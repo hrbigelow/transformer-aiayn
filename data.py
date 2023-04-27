@@ -29,32 +29,6 @@ def column_counts(dataset, column):
     dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=dict(accu=cts))
     return dict(cts)
 
-def compute_binmap(counts, num_bins):
-    total = sum(counts.values())
-    target_bin_size = total / num_bins
-    binmap = {} # length -> bin
-    bins = []
-    bin_counts = 0
-    bin_start = 0
-    length_bin = 0
-    for length in sorted(counts.keys()):
-        if bin_counts >= target_bin_size:
-            binmap.update({ sz: length_bin for sz in range(bin_start, length) })
-            bin_counts = 0
-            bin_start = length
-            length_bin += 1
-        bin_counts += counts[length]
-    if bin_counts != 0:
-        binmap.update({ sz: length_bin for sz in range(bin_start, length) })
-
-    return binmap
-
-def assign_bin(tok_lengths, binmap, out_column):
-    """
-    binmap: Dict[length, bin]
-    """
-    return { out_column: list(map(binmap.get, tok_lengths)) } 
-
 def shuffle_inner(ary, block_size, rng):
     """
     Shuffle each contiguous subrange of size block_size, preserving order of the
