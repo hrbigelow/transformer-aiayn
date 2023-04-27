@@ -3,6 +3,7 @@ import numpy as np
 import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
+import pdb
 
 @dataclass
 class Dims:
@@ -18,7 +19,7 @@ class MultiHeadAttention(nn.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, dims):
+    def __init__(self, dims, masked=False):
         super().__init__()
         self.wq = nn.Parameter(t.randn(dims.H,dims.M,dims.K))
         self.wk = nn.Parameter(t.randn(dims.H,dims.M,dims.K))
@@ -26,6 +27,7 @@ class MultiHeadAttention(nn.Module):
         self.wo = nn.Parameter(t.randn(dims.H,dims.V,dims.M))
         self.scale_factor = np.sqrt(dims.K)
         self.M = dims.M
+        self.masked = masked
 
     def forward(self, kvinput, qinput):
         """
@@ -34,9 +36,12 @@ class MultiHeadAttention(nn.Module):
         output: bcm 
         """
         kval = t.einsum('bcm,hmk->bhck', kvinput, self.wk)
-        vval = t.einsum('bcm,hmk->bhck', kvinput, self.wv)
         qval = t.einsum('bcm,hmk->bhck', qinput, self.wq)
+        vval = t.einsum('bcm,hmk->bhck', kvinput, self.wv)
         alogit = t.einsum('bhck,bhdk->bhcd', kval, qval)
+        if self.masked:
+            side = alogit.shape[2]
+            alogit += t.full((side, side), -100.0).triu()
         att = t.softmax(alogit * self.scale_factor ** -1, dim=2)
         pre = t.einsum('bhcd,bhcv->bhdv', att, vval)
         out = t.einsum('bhcv,hvm->bcm', pre, self.wo)
@@ -63,14 +68,12 @@ class PositionwiseFF(nn.Module):
         return out
 
 class AddAndNorm(nn.Module):
-    def __init__(self, sublayer):
+    def __init__(self, M):
         super().__init__()
-        self.sublayer = sublayer
-        self.layer_norm = nn.LayerNorm(self.sublayer.M)
+        self.layer_norm = nn.LayerNorm(M)
 
-    def forward(self, input):
-        sl = self.sublayer(input)
-        return self.layer_norm(input + sl)
+    def forward(self, residual, proximal):
+        return self.layer_norm(residual + proximal)
 
 class InputEmbedding(nn.Module):
     def __init__(self, embedding: t.nn.Embedding):
@@ -105,53 +108,78 @@ class InputEmbedding(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, dims):
         super().__init__()
-        self.sub1 = AddAndNorm(MultiHeadAttention(dims))
-        self.sub2 = AddAndNorm(PositionwiseFF(dims.M, dims.F))
+        self.att = MultiHeadAttention(dims)
+        self.norm1 = AddAndNorm(dims.M)
+        self.ff = PositionwiseFF(dims.M, dims.F)
+        self.norm2 = AddAndNorm(dims.M)
 
     def forward(self, input):
-        out = self.sub1(input, input)
-        out = self.sub2(out)
+        """
+        input: bcm
+        returns: bcm
+        """
+        att = self.att(input, input)
+        norm = self.norm1(input, att)
+        ff = self.ff(norm)
+        out = self.norm2(norm, ff)
         return out
 
-class Encoder(nn.Sequential):
+class Encoder(nn.Module):
     def __init__(self, dims, embed_matrix):
-        mods = (EncoderLayer(dims) for _ in range(dims.num_layers))
-        super().__init__(*mods)
+        super().__init__()
         self.embed_layer = InputEmbedding(embed_matrix)
+        mods = (EncoderLayer(dims) for _ in range(dims.num_layers))
+        self.body = nn.Sequential(*mods)
 
     def forward(self, input):
+        """
+        input: bc
+        returns: bcm
+        """
         out = self.embed_layer(input)
-        out = super().forward(out)
+        out = self.body(out)
         return out
 
 class DecoderLayer(nn.Module):
     def __init__(self, dims):
         super().__init__()
-        self.sub1 = AddAndNorm(MultiHeadAttention(dims))
-        self.sub2 = AddAndNorm(MultiHeadAttention(dims))
-        self.sub3 = AddAndNorm(PositionwiseFF(dims.M, dims.F))
+        self.mask_att = MultiHeadAttention(dims, masked=True)
+        self.norm1 = AddAndNorm(dims.M)
+        self.att2 = MultiHeadAttention(dims)
+        self.norm2 = AddAndNorm(dims.M)
+        self.ff = PositionwiseFF(dims.M, dims.F)
+        self.norm3 = AddAndNorm(dims.M)
 
-    def forward(self, enc_out, pre_queries):
+    def forward(self, enc_out, input):
         """
-        enc_out: bsm
-        pre_queries: bsm
+        enc_out: bcm
+        queries: bcm
         """
-        out = self.sub1(pre_queries, pre_queries)
-        out = self.sub2(enc_out, out)
-        out = self.sub3(out)
+        att1 = self.mask_att(input, input)
+        norm1 = self.norm1(input, att1)
+        att2 = self.att2(enc_out, norm1)
+        norm2 = self.norm2(norm1, att2)
+        ff = self.ff(norm2)
+        out = self.norm3(norm2, ff)
         return out
 
-class Decoder(nn.Sequential):
+class Decoder(nn.Module):
     def __init__(self, dims, embed_matrix):
-        mods = (DecoderLayer(dims) for _ in range(dims.num_layers))
-        super().__init__(*mods)
+        super().__init__()
         self.embed_layer = InputEmbedding(embed_matrix)
+        self.body = (DecoderLayer(dims) for _ in range(dims.num_layers))
         self.linear_final = nn.Linear(dims.M, dims.T)
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, enc_out, dec_in):
-        dec = self.embed_layer(dec_in)
-        out = super().forward(enc_out, dec)
+        """
+        enc_out: bcm 
+        dec_in: bc
+        returns: bct
+        """
+        out = self.embed_layer(dec_in)
+        for mod in self.body:
+            out = mod(enc_out, out)
         out = self.linear_final(out)
         out = self.softmax(out)
         return out
@@ -164,8 +192,36 @@ class Model(nn.Module):
         self.decoder = Decoder(dims, self.embed_matrix)
 
     def forward(self, enc_input, dec_input):
+        """
+        enc_input: bc
+        dec_input: bc
+        returns: bct
+        """
         enc_output = self.encoder(enc_input)
         dec_output = self.decoder(enc_output, dec_input)
         return dec_output
 
+
+class Loss(nn.Module):
+    def __init__(self, token_histo, smoothing_eps=0.1):
+        """
+        page 8, Label Smoothing: using eps = 0.1
+        """
+        super().__init__()
+        self.eps = smoothing_eps
+        self.u = token_histo / token_histo.sum() 
+        self.vocab_size = self.u.shape[0]
+
+    def forward(self, dec_input, dec_output):
+        """
+        dec_input: bc
+        dec_output: bct
+        """
+        # bct
+        dec_target = F.one_hot(dec_input[:,1:], self.vocab_size)
+        smooth_target = (1.0 - self.eps) * dec_target + self.eps * self.u
+        dec_pred = dec_output[:,:-1,:]
+        shape = (-1, dec_pred.shape[2])
+        xent = F.cross_entropy(dec_pred.reshape(*shape), smooth_target.reshape(*shape))
+        return xent
 

@@ -5,12 +5,22 @@ from collections import defaultdict, Counter
 import datasets
 from transformers import GPT2TokenizerFast
 
-def to_tokens(examples, tokenizer):
-    ret = dict()
-    for col, text in examples.items():
-        toks = [tokenizer(s)['input_ids'] for s in text]
-        ret.update({ f'{col}_tok': toks, f'{col}_length': list(map(len, toks)) })
-    return ret
+
+def token_histo(dataset, column):
+    tokenizer = get_tokenizer()
+    vocab_size = tokenizer.vocab_size
+
+    # get histogram of tokens for token column
+    def map_fn(toks, cts):
+        all_toks = t.cat(toks)
+        cts.scatter_add_(0, all_toks, t.ones_like(all_toks))
+
+    cts = t.zeros(vocab_size, dtype=t.int64)
+    kwargs = dict(cts=cts)
+    # dataset = dataset.shard(100, 1)
+    dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=kwargs)
+            # with_rank=True, num_proc=num_proc)
+    return cts
 
 def column_counts(dataset, column):
     def map_fn(examples, accu):
@@ -74,36 +84,53 @@ def shuffle_outer(ary, block_size, rng):
     shuf = np.take(ary, inds)
     return shuf
 
-def preprocess(data_path, num_proc=8):
-    """
-    """
+def get_tokenizer():
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-    ds = datasets.load_dataset('wmt14', 'de-en', split='train')
-    ds = ds.flatten().rename_columns(
+    tokenizer.pad_token = '<|PAD|>'
+    return tokenizer
+
+
+def tokenize_data(dataset, num_proc):
+    ds = dataset.flatten().rename_columns(
             { 'translation.de': 'de', 'translation.en': 'en'})
     
+    def map_fn(examples, tokenizer):
+        ret = dict()
+        for col, text in examples.items():
+            toks = [tokenizer(s)['input_ids'] for s in text]
+            ret[f'{col}_tok'] = toks
+            ret[f'{col}_length'] = list(map(len, toks))
+        return ret
     # ds = ds.shard(100, 1)
-    ds = ds.map(to_tokens, batched=True, 
-            fn_kwargs=dict(tokenizer=tokenizer),
-            num_proc=num_proc)
-    # en_counts = column_counts(ds, 'en_length')
-    # en_binmap = compute_binmap(en_counts, 100) 
-    # ds = ds.map(assign_bin, batched=True, 
-            # input_columns='en_length',
-            # fn_kwargs=dict(binmap=en_binmap, out_column='en_bin'), 
-            # num_proc=num_proc)
+    kwargs = dict(tokenizer=get_tokenizer())
+
+    ds = ds.map(map_fn, batched=True, fn_kwargs=kwargs, num_proc=num_proc)
     ds = ds.remove_columns(('en', 'de'))
     ds = ds.sort('en_length')
     ds.set_format('torch')
-    # return ds, tokenizer
-    # print(ds.features)
+    return ds
+
+def preprocess(data_path, num_proc=8):
+    """
+    """
+    ds = datasets.load_dataset('wmt14', 'de-en', split='train')
+    ds = ds.shard(10, 5)
+    print(f'Tokenizing dataset')
+    ds = tokenize_data(ds, num_proc)
+
+    print(f'Computing token histo')
+    de_token_histo = token_histo(ds, 'de_tok')
+    t.save(de_token_histo, f'{data_path}/de_token_histo.pt')
+
     print(f'Saving dataset to {data_path}.  Columns: {ds.column_names}')
     ds.save_to_disk(data_path)
 
+def load_token_histo(data_path):
+    histo = t.load(f'{data_path}/de_token_histo.pt')
+    return histo
 
 def get_dataset(data_path):
-    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-    return datasets.load_from_disk(data_path), tokenizer
+    return datasets.load_from_disk(data_path)
 
 def inverse_mod(val, modulo):
     # amount needed to round up to nearest modulo
@@ -133,7 +160,7 @@ def make_batch(dataset, inds, pad_value):
     entries = dataset[inds]
     def _padded_stack(tensors, pad_value):
         max_len = max(ten.shape[0] for ten in tensors)
-        st = t.full((len(tensors), max_len), pad_value, dtype=t.int32)
+        st = t.full((len(tensors), max_len), pad_value, dtype=t.int64)
         for i, ten in enumerate(tensors):
             st[i,:ten.shape[0]] = ten 
         return st
