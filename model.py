@@ -16,6 +16,9 @@ class HyperParams:
     T: int = 0 # number of tokens
     warmup_steps: int = 4000
 
+    # Section 5.4: Regularization (P_drop = 0.1)
+    dropout_rate: float = 0.1
+
     # mixture coefficient for positional encoding
     pos_encoding_factor: float = 0.01
 
@@ -57,15 +60,15 @@ class PositionwiseFF(nn.Module):
     """
     Implements equation 2 (section 3.3)
     """
-    def __init__(self, M, F):
+    def __init__(self, hps):
         super().__init__()
-        mscale = np.sqrt(M) ** -1
-        fscale = np.sqrt(F) ** -1
-        self.w1 = nn.Parameter(t.randn(M,F) * mscale)
-        self.b1 = nn.Parameter(t.zeros(F))
-        self.w2 = nn.Parameter(t.randn(F,M) * fscale)
-        self.b2 = nn.Parameter(t.zeros(M))
-        self.M = M
+        mscale = np.sqrt(hps.M) ** -1
+        fscale = np.sqrt(hps.F) ** -1
+        self.w1 = nn.Parameter(t.randn(hps.M,hps.F) * mscale)
+        self.b1 = nn.Parameter(t.zeros(hps.F))
+        self.w2 = nn.Parameter(t.randn(hps.F,hps.M) * fscale)
+        self.b2 = nn.Parameter(t.zeros(hps.M))
+        self.M = hps.M
 
     def forward(self, input):
         """
@@ -75,12 +78,14 @@ class PositionwiseFF(nn.Module):
         out = t.einsum('bcf,fm->bcm', s, self.w2) + self.b2
         return out
 
-class AddAndNorm(nn.Module):
-    def __init__(self, M):
+class DropoutAddAndNorm(nn.Module):
+    def __init__(self, hps):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(M)
+        self.dropout = nn.Dropout(hps.dropout_rate)
+        self.layer_norm = nn.LayerNorm(hps.M)
 
     def forward(self, residual, proximal):
+        proximal = self.dropout(proximal)
         return self.layer_norm(residual + proximal)
 
 class InputEmbedding(nn.Module):
@@ -118,9 +123,9 @@ class EncoderLayer(nn.Module):
     def __init__(self, hps):
         super().__init__()
         self.att = MultiHeadAttention(hps)
-        self.norm1 = AddAndNorm(hps.M)
-        self.ff = PositionwiseFF(hps.M, hps.F)
-        self.norm2 = AddAndNorm(hps.M)
+        self.norm1 = DropoutAddAndNorm(hps)
+        self.ff = PositionwiseFF(hps)
+        self.norm2 = DropoutAddAndNorm(hps)
 
     def forward(self, input):
         """
@@ -153,11 +158,11 @@ class DecoderLayer(nn.Module):
     def __init__(self, hps):
         super().__init__()
         self.mask_att = MultiHeadAttention(hps, masked=True)
-        self.norm1 = AddAndNorm(hps.M)
+        self.norm1 = DropoutAddAndNorm(hps)
         self.att2 = MultiHeadAttention(hps)
-        self.norm2 = AddAndNorm(hps.M)
-        self.ff = PositionwiseFF(hps.M, hps.F)
-        self.norm3 = AddAndNorm(hps.M)
+        self.norm2 = DropoutAddAndNorm(hps)
+        self.ff = PositionwiseFF(hps)
+        self.norm3 = DropoutAddAndNorm(hps)
 
     def forward(self, enc_out, input):
         """
