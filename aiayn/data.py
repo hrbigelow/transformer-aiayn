@@ -102,13 +102,13 @@ def preprocess(data_path, num_proc=8, shard=None):
     """
     """
     import os
-    dest_dir = os.path.dirname(data_path)
-    if not os.path.exists(dest_dir):
-        raise RuntimeError(f'Couldn\'t find data path \'{dest_dir}\'')
+    if not os.path.exists(data_path):
+        raise RuntimeError(f'Couldn\'t find data path \'{data_path}\'')
 
+    cache_dir = f'{data_path}/.cache'
     print(f'Starting preprocess, data_path={data_path}, shard={shard}')
 
-    ds = datasets.load_dataset('wmt14', 'de-en', split='train')
+    ds = datasets.load_dataset('wmt14', 'de-en', cache_dir=cache_dir, split='train')
     if shard:
         ds = ds.shard(*shard)
     print(f'Tokenizing dataset')
