@@ -98,11 +98,17 @@ def tokenize_data(dataset, num_proc):
     ds.set_format('torch')
     return ds
 
-def preprocess(data_path, num_proc=8):
+def preprocess(data_path, num_proc=8, shard=None):
     """
     """
+    import os
+    if not os.path.exists(data_path):
+        raise RuntimeError(
+            f'Couldn\'t find data path \'{data_path}\'')
+
     ds = datasets.load_dataset('wmt14', 'de-en', split='train')
-    ds = ds.shard(10, 5)
+    if shard:
+        ds = ds.shard(*shard)
     print(f'Tokenizing dataset')
     ds = tokenize_data(ds, num_proc)
 
