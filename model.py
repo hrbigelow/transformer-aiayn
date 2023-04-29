@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import pdb
 
 @dataclass
-class Dims:
+class HyperParams:
     H: int = 8 # heads
     K: int = 64 # key (d_k in paper)
     V: int = 64 # value (d_v in paper)
@@ -14,19 +14,25 @@ class Dims:
     F: int = 2048 # feed-forward dimension (d_ff in paper)
     num_layers: int = 6
     T: int = 0 # number of tokens
+    warmup_steps: int = 4000
+
+    # mixture coefficient for positional encoding
+    pos_encoding_factor: float = 0.01
 
 class MultiHeadAttention(nn.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, dims, masked=False):
+    def __init__(self, hps, masked=False):
         super().__init__()
-        self.wq = nn.Parameter(t.randn(dims.H,dims.M,dims.K))
-        self.wk = nn.Parameter(t.randn(dims.H,dims.M,dims.K))
-        self.wv = nn.Parameter(t.randn(dims.H,dims.M,dims.V))
-        self.wo = nn.Parameter(t.randn(dims.H,dims.V,dims.M))
-        self.scale_factor = np.sqrt(dims.K)
-        self.M = dims.M
+        mscale = np.sqrt(hps.M) ** -1
+        vscale = np.sqrt(hps.V) ** -1
+        self.wq = nn.Parameter(t.randn(hps.H,hps.M,hps.K) * mscale)
+        self.wk = nn.Parameter(t.randn(hps.H,hps.M,hps.K) * mscale)
+        self.wv = nn.Parameter(t.randn(hps.H,hps.M,hps.V) * mscale)
+        self.wo = nn.Parameter(t.randn(hps.H,hps.V,hps.M) * vscale)
+        self.scale_factor = np.sqrt(hps.K)
+        self.M = hps.M
         self.masked = masked
 
     def forward(self, kvinput, qinput):
@@ -53,9 +59,11 @@ class PositionwiseFF(nn.Module):
     """
     def __init__(self, M, F):
         super().__init__()
-        self.w1 = nn.Parameter(t.randn(M,F))
+        mscale = np.sqrt(M) ** -1
+        fscale = np.sqrt(F) ** -1
+        self.w1 = nn.Parameter(t.randn(M,F) * mscale)
         self.b1 = nn.Parameter(t.zeros(F))
-        self.w2 = nn.Parameter(t.randn(F,M))
+        self.w2 = nn.Parameter(t.randn(F,M) * fscale)
         self.b2 = nn.Parameter(t.zeros(M))
         self.M = M
 
@@ -76,17 +84,17 @@ class AddAndNorm(nn.Module):
         return self.layer_norm(residual + proximal)
 
 class InputEmbedding(nn.Module):
-    def __init__(self, embedding: t.nn.Embedding):
+    def __init__(self, embedding: t.nn.Embedding, hps):
         super().__init__()
         self.embedding = embedding # T,M
         self.T = self.embedding.num_embeddings
         self.M = self.embedding.embedding_dim
-        self.scale_factor = np.sqrt(self.T)
+        self.scale_factor = np.sqrt(self.T) ** -1 # my experiment
+        self.pos_factor = hps.pos_encoding_factor
 
     def positional_embedding(self, num_positions):
         pos = t.arange(num_positions)
-        exp = t.arange(self.M) / self.M * t.log2(t.tensor(10000))
-        denom = t.exp2(exp)
+        denom = 10000 ** t.linspace(0, 1, self.M)
         arg = pos.unsqueeze(-1) / denom.unsqueeze(0)
         # it shouldn't matter what order embeddings are placed but here I follow
         # the paper, and alternate sin with cos
@@ -102,16 +110,17 @@ class InputEmbedding(nn.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
-        embed = self.embedding(input) * self.scale_factor
-        return embed + pos_embed
+        # embed = self.embedding(input) * self.scale_factor
+        embed = self.embedding(input)
+        return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(nn.Module):
-    def __init__(self, dims):
+    def __init__(self, hps):
         super().__init__()
-        self.att = MultiHeadAttention(dims)
-        self.norm1 = AddAndNorm(dims.M)
-        self.ff = PositionwiseFF(dims.M, dims.F)
-        self.norm2 = AddAndNorm(dims.M)
+        self.att = MultiHeadAttention(hps)
+        self.norm1 = AddAndNorm(hps.M)
+        self.ff = PositionwiseFF(hps.M, hps.F)
+        self.norm2 = AddAndNorm(hps.M)
 
     def forward(self, input):
         """
@@ -125,10 +134,10 @@ class EncoderLayer(nn.Module):
         return out
 
 class Encoder(nn.Module):
-    def __init__(self, dims, embed_matrix):
+    def __init__(self, hps, embed_matrix):
         super().__init__()
-        self.embed_layer = InputEmbedding(embed_matrix)
-        mods = (EncoderLayer(dims) for _ in range(dims.num_layers))
+        self.embed_layer = InputEmbedding(embed_matrix, hps)
+        mods = (EncoderLayer(hps) for _ in range(hps.num_layers))
         self.body = nn.Sequential(*mods)
 
     def forward(self, input):
@@ -141,14 +150,14 @@ class Encoder(nn.Module):
         return out
 
 class DecoderLayer(nn.Module):
-    def __init__(self, dims):
+    def __init__(self, hps):
         super().__init__()
-        self.mask_att = MultiHeadAttention(dims, masked=True)
-        self.norm1 = AddAndNorm(dims.M)
-        self.att2 = MultiHeadAttention(dims)
-        self.norm2 = AddAndNorm(dims.M)
-        self.ff = PositionwiseFF(dims.M, dims.F)
-        self.norm3 = AddAndNorm(dims.M)
+        self.mask_att = MultiHeadAttention(hps, masked=True)
+        self.norm1 = AddAndNorm(hps.M)
+        self.att2 = MultiHeadAttention(hps)
+        self.norm2 = AddAndNorm(hps.M)
+        self.ff = PositionwiseFF(hps.M, hps.F)
+        self.norm3 = AddAndNorm(hps.M)
 
     def forward(self, enc_out, input):
         """
@@ -164,12 +173,12 @@ class DecoderLayer(nn.Module):
         return out
 
 class Decoder(nn.Module):
-    def __init__(self, dims, embed_matrix):
+    def __init__(self, hps, embed_matrix):
         super().__init__()
-        self.embed_layer = InputEmbedding(embed_matrix)
-        self.body = (DecoderLayer(dims) for _ in range(dims.num_layers))
-        self.linear_final = nn.Linear(dims.M, dims.T)
-        self.softmax = nn.Softmax(dim=1)
+        self.embed_layer = InputEmbedding(embed_matrix, hps)
+        self.body = (DecoderLayer(hps) for _ in range(hps.num_layers))
+        self.linear_final = nn.Linear(hps.M, hps.T)
+        self.softmax = nn.Softmax(dim=2)
 
     def forward(self, enc_out, dec_in):
         """
@@ -185,11 +194,11 @@ class Decoder(nn.Module):
         return out
 
 class Model(nn.Module):
-    def __init__(self, dims=Dims()):
+    def __init__(self, hps=HyperParams()):
         super().__init__()
-        self.embed_matrix = nn.Embedding(dims.T,dims.M)
-        self.encoder = Encoder(dims, self.embed_matrix)
-        self.decoder = Decoder(dims, self.embed_matrix)
+        self.embed_matrix = nn.Embedding(hps.T,hps.M)
+        self.encoder = Encoder(hps, self.embed_matrix)
+        self.decoder = Decoder(hps, self.embed_matrix)
 
     def forward(self, enc_input, dec_input):
         """
@@ -203,7 +212,7 @@ class Model(nn.Module):
 
 
 class Loss(nn.Module):
-    def __init__(self, token_histo, smoothing_eps=0.1):
+    def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
@@ -211,17 +220,53 @@ class Loss(nn.Module):
         self.eps = smoothing_eps
         self.u = token_histo / token_histo.sum() 
         self.vocab_size = self.u.shape[0]
+        self.pad_value = pad_value
+
+    @staticmethod
+    def kldiv(q, p, axis):
+        # compute D[q(x) || p(x)] over the axis dimension
+        terms = t.special.xlogy(q, q) - (q * p.log())
+        return terms.sum(axis=axis)
+
+    def label_smooth(self, labels):
+        """
+        labels: bc
+        returns: bct
+        """
+        labels = F.one_hot(labels, self.vocab_size)
+        smoothed = (1.0 - self.eps) * labels + self.eps * self.u
+        return smoothed
 
     def forward(self, dec_input, dec_output):
         """
         dec_input: bc
         dec_output: bct
         """
+        # bc
+        labels = dec_input[:,1:]
+        smoothed_labels = self.label_smooth(labels)
+        dec_mask = t.ne(labels, self.pad_value).to(t.float64)
+
         # bct
-        dec_target = F.one_hot(dec_input[:,1:], self.vocab_size)
-        smooth_target = (1.0 - self.eps) * dec_target + self.eps * self.u
         dec_pred = dec_output[:,:-1,:]
-        shape = (-1, dec_pred.shape[2])
-        xent = F.cross_entropy(dec_pred.reshape(*shape), smooth_target.reshape(*shape))
-        return xent
+        kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
+        masked = kldiv * dec_mask
+        return masked.mean()
+
+class CustomScheduler:
+    def __init__(self, optimizer, hps):
+        # from section 5.3, page 7, equation 3
+        self.optimizer = optimizer
+        self.M = hps.M
+        self.warmup_steps = hps.warmup_steps
+
+    def update(self, step): 
+        ord_step = step + 1
+        factor = min(ord_step ** -0.5, ord_step * self.warmup_steps ** -1.5)
+        new_lr = self.M ** -0.5 * factor
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = new_lr
+
+    def current_lr(self):
+        return self.optimizer.param_groups[0]['lr']
 

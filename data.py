@@ -8,7 +8,7 @@ from transformers import GPT2TokenizerFast
 
 def token_histo(dataset, column):
     tokenizer = get_tokenizer()
-    vocab_size = tokenizer.vocab_size
+    vocab_size = len(tokenizer)
 
     # get histogram of tokens for token column
     def map_fn(toks, cts):
@@ -58,11 +58,17 @@ def shuffle_outer(ary, block_size, rng):
     shuf = np.take(ary, inds)
     return shuf
 
+BOS = '<|BOS|>'
+EOS = '<|EOS|>'
+PAD = '<|PAD|>'
+
 def get_tokenizer():
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-    tokenizer.pad_token = '<|PAD|>'
+    tokenizer.add_tokens([BOS, EOS, PAD])
+    tokenizer.pad_token = PAD
+    tokenizer.bos_token = BOS
+    tokenizer.eos_token = EOS
     return tokenizer
-
 
 def tokenize_data(dataset, num_proc):
     ds = dataset.flatten().rename_columns(
@@ -70,15 +76,23 @@ def tokenize_data(dataset, num_proc):
     
     def map_fn(examples, tokenizer):
         ret = dict()
+        bos_ten = t.tensor([tokenizer.vocab[BOS]])
+        eos_ten = t.tensor([tokenizer.vocab[EOS]])
         for col, text in examples.items():
-            toks = [tokenizer(s)['input_ids'] for s in text]
+            toks = []
+            for s in text:
+                tok = tokenizer(s, return_tensors='pt')['input_ids']
+                # print(tok.shape)
+                tok = t.cat((bos_ten, tok[0], eos_ten))
+                toks.append(tok)
             ret[f'{col}_tok'] = toks
-            ret[f'{col}_length'] = list(map(len, toks))
+            ret[f'{col}_length'] = [tok.shape[0] for tok in toks]
         return ret
     # ds = ds.shard(100, 1)
     kwargs = dict(tokenizer=get_tokenizer())
 
-    ds = ds.map(map_fn, batched=True, fn_kwargs=kwargs, num_proc=num_proc)
+    ds = ds.map(map_fn, batched=True, load_from_cache_file=False, fn_kwargs=kwargs,
+            num_proc=num_proc)
     ds = ds.remove_columns(('en', 'de'))
     ds = ds.sort('en_length')
     ds.set_format('torch')
@@ -116,6 +130,7 @@ def batched_sample(rng, batch_size, bin_size, dataset_size):
     uniformly, even if dataset_size % batch_size != 0
     """
     offset = 0
+    step, epoch = 0, 0
     while True:
         main_inds = np.arange(offset, dataset_size)
         extra = inverse_mod(main_inds.shape[0], batch_size) 
@@ -126,7 +141,9 @@ def batched_sample(rng, batch_size, bin_size, dataset_size):
         inds = shuffle_inner(inds, bin_size, rng)
         inds = shuffle_outer(inds, batch_size, rng)
         for b in range(0, inds.shape[0], batch_size):
-            yield inds[b:b+batch_size]
+            yield epoch, step, inds[b:b+batch_size]
+            step += 1
+        epoch += 1
 
 def make_batch(dataset, inds, pad_value):
     """
@@ -134,14 +151,15 @@ def make_batch(dataset, inds, pad_value):
     entries = dataset[inds]
     def _padded_stack(tensors, pad_value):
         max_len = max(ten.shape[0] for ten in tensors)
+        st_lengths = t.tensor([ten.shape[0] for ten in tensors])
         st = t.full((len(tensors), max_len), pad_value, dtype=t.int64)
         for i, ten in enumerate(tensors):
             st[i,:ten.shape[0]] = ten 
-        return st
+        return st, st_lengths
 
-    en = _padded_stack(entries['en_tok'], pad_value)
-    de = _padded_stack(entries['de_tok'], pad_value)
-    return en, de
+    en, en_lengths = _padded_stack(entries['en_tok'], pad_value)
+    de, de_lengths = _padded_stack(entries['de_tok'], pad_value)
+    return en, de, en_lengths, de_lengths
 
 
 if __name__ == '__main__':
