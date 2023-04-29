@@ -102,9 +102,11 @@ def preprocess(data_path, num_proc=8, shard=None):
     """
     """
     import os
-    if not os.path.exists(data_path):
-        raise RuntimeError(
-            f'Couldn\'t find data path \'{data_path}\'')
+    dest_dir = os.path.dirname(data_path)
+    if not os.path.exists(dest_dir):
+        raise RuntimeError(f'Couldn\'t find data path \'{dest_dir}\'')
+
+    print(f'Starting preprocess, data_path={data_path}, shard={shard}')
 
     ds = datasets.load_dataset('wmt14', 'de-en', split='train')
     if shard:
