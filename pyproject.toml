@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Implementation of the Transformer from the paper 'Attention is All You Need'"
 authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
-  "torch>2.0",
+  "torch>=2.0",
   "datasets",
   "transformers",
   "numpy",

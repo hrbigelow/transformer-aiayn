@@ -1,7 +1,7 @@
 import fire
 import numpy as np
-import model
-import data
+from . import model
+from . import data
 import torch
 from torch.optim import Adam
 
