@@ -11,6 +11,7 @@ dependencies = [
   "torch>=2.0",
   "datasets",
   "transformers",
+  "fire",
   "numpy",
 ]
 
