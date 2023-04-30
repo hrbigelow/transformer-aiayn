@@ -3,17 +3,21 @@ import numpy as np
 import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
+from . import state
 import pdb
 
 @dataclass
 class HyperParams:
+    # model architecture
     H: int = 8 # heads
     K: int = 64 # key (d_k in paper)
     V: int = 64 # value (d_v in paper)
     M: int = 512 # model (d_model in paper)
     F: int = 2048 # feed-forward dimension (d_ff in paper)
     num_layers: int = 6
-    T: int = 0 # number of tokens
+    T: int = 10000 # number of tokens
+
+    # learning rate
     warmup_steps: int = 4000
 
     # Section 5.4: Regularization (P_drop = 0.1)
@@ -21,6 +25,13 @@ class HyperParams:
 
     # mixture coefficient for positional encoding
     pos_encoding_factor: float = 0.01
+
+    # training
+    B: int = 32 # batch
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.98
+    adam_eps: float = 1e-9
+
 
 class MultiHeadAttention(nn.Module):
     """
@@ -46,11 +57,13 @@ class MultiHeadAttention(nn.Module):
         """
         kval = t.einsum('bcm,hmk->bhck', kvinput, self.wk)
         qval = t.einsum('bcm,hmk->bhck', qinput, self.wq)
-        vval = t.einsum('bcm,hmk->bhck', kvinput, self.wv)
+        vval = t.einsum('bcm,hmv->bhcv', kvinput, self.wv)
         alogit = t.einsum('bhck,bhdk->bhcd', kval, qval)
         if self.masked:
-            side = alogit.shape[2]
+            # side = alogit.shape[2]
+            side = kvinput.shape[1]
             alogit += t.full((side, side), -100.0).triu()
+            # alogit += t.full((kvinput.shape[1],), -100.0).triu()
         att = t.softmax(alogit * self.scale_factor ** -1, dim=2)
         pre = t.einsum('bhcd,bhcv->bhdv', att, vval)
         out = t.einsum('bhcv,hvm->bcm', pre, self.wo)
@@ -177,11 +190,29 @@ class DecoderLayer(nn.Module):
         out = self.norm3(norm2, ff)
         return out
 
+class TeeSequential(nn.Module):
+    """
+    Like nn.Sequential, but accepts an additional global input in each
+    module
+    """
+    def __init__(self, *mods):
+        super().__init__()
+        for l, mod in enumerate(mods):
+            super().add_module(f'{l}', mod)
+        # self.mods = mods
+
+    def forward(self, side_input, input):
+        out = input
+        for mod in self.children():
+            out = mod(side_input, out)
+        return out
+
 class Decoder(nn.Module):
     def __init__(self, hps, embed_matrix):
         super().__init__()
         self.embed_layer = InputEmbedding(embed_matrix, hps)
-        self.body = (DecoderLayer(hps) for _ in range(hps.num_layers))
+        self.body = TeeSequential(*(DecoderLayer(hps) for _ in
+            range(hps.num_layers)))
         self.linear_final = nn.Linear(hps.M, hps.T)
         self.softmax = nn.Softmax(dim=2)
 
@@ -192,18 +223,19 @@ class Decoder(nn.Module):
         returns: bct
         """
         out = self.embed_layer(dec_in)
-        for mod in self.body:
-            out = mod(enc_out, out)
+        out = self.body(enc_out, out)
         out = self.linear_final(out)
         out = self.softmax(out)
         return out
 
-class Model(nn.Module):
-    def __init__(self, hps=HyperParams()):
+class Model(state.State, nn.Module):
+    def __init__(self, params=HyperParams(), saved_state=None):
         super().__init__()
         self.embed_matrix = nn.Embedding(hps.T,hps.M)
         self.encoder = Encoder(hps, self.embed_matrix)
         self.decoder = Decoder(hps, self.embed_matrix)
+        if saved_state is not None:
+            self.load_state_dict(saved_state)
 
     def forward(self, enc_input, dec_input):
         """
@@ -215,6 +247,8 @@ class Model(nn.Module):
         dec_output = self.decoder(enc_output, dec_input)
         return dec_output
 
+    def state(self):
+        pass
 
 class Loss(nn.Module):
     def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
@@ -258,12 +292,24 @@ class Loss(nn.Module):
         masked = kldiv * dec_mask
         return masked.mean()
 
+class StateOptim(state.State, optim.Adam):
+    def __init__(self, params, saved_state, model):
+        beta1 = params['adam_beta1']
+        beta2 = params['adam_beta2']
+        eps = params['adam_eps']
+        super().__init__(model.parameters(), (beta1, beta2), eps)
+        if saved_state is not None:
+            self.load_state_dict(saved_state['optim'])
+
+    def state(self):
+        return dict(optim=self.state_dict())
+
 class CustomScheduler:
-    def __init__(self, optimizer, hps):
+    def __init__(self, optimizer, M, warmup_steps):
         # from section 5.3, page 7, equation 3
+        self.M = M
+        self.warmup_steps = params.warmup_steps
         self.optimizer = optimizer
-        self.M = hps.M
-        self.warmup_steps = hps.warmup_steps
 
     def update(self, step): 
         ord_step = step + 1
@@ -274,4 +320,7 @@ class CustomScheduler:
 
     def current_lr(self):
         return self.optimizer.param_groups[0]['lr']
+
+    def state(self):
+        pass
 

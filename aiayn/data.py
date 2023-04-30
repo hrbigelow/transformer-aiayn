@@ -132,13 +132,15 @@ def inverse_mod(val, modulo):
     # amount needed to round up to nearest modulo
     return - (val % -modulo)
 
-def batched_sample(rng, batch_size, bin_size, dataset_size):
+def batched_sample(batch_size, bin_size, dataset_size, rng, state={}):
     """
     Infinitely generates batch_size batches of indices in range(dataset_size)
     uniformly, even if dataset_size % batch_size != 0
     """
-    offset = 0
-    step, epoch = 0, 0
+    if len(state) != 0:
+        offset, step, epoch = state['offset'], state['step'], state['epoch']
+    else:
+        offset, step, epoch = 0, 0, 0
     while True:
         main_inds = np.arange(offset, dataset_size)
         extra = inverse_mod(main_inds.shape[0], batch_size) 
@@ -152,6 +154,14 @@ def batched_sample(rng, batch_size, bin_size, dataset_size):
             yield epoch, step, inds[b:b+batch_size]
             step += 1
         epoch += 1
+
+class Data(state.State):
+    def __init__(self, hps, state):
+        super().__init__()
+        pass
+
+    def state(self):
+        pass
 
 def make_batch(dataset, inds, pad_value):
     """
