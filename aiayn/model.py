@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch as t
 import torch.nn as nn
+from torch import optim
 import torch.nn.functional as F
 from . import state
 import pdb
@@ -17,9 +18,6 @@ class HyperParams:
     num_layers: int = 6
     T: int = 10000 # number of tokens
 
-    # learning rate
-    warmup_steps: int = 4000
-
     # Section 5.4: Regularization (P_drop = 0.1)
     dropout_rate: float = 0.1
 
@@ -27,10 +25,16 @@ class HyperParams:
     pos_encoding_factor: float = 0.01
 
     # training
-    B: int = 32 # batch
+    batch_size: int = 32 # batch
+    bin_size: int = 1000
+    dataset_size: int = 10000 # set this externally
     adam_beta1: float = 0.9
     adam_beta2: float = 0.98
     adam_eps: float = 1e-9
+    warmup_steps: int = 4000
+
+    # other
+    random_seed: int = 982349820
 
 
 class MultiHeadAttention(nn.Module):
@@ -228,14 +232,14 @@ class Decoder(nn.Module):
         out = self.softmax(out)
         return out
 
-class Model(state.State, nn.Module):
-    def __init__(self, params=HyperParams(), saved_state=None):
+class Model(nn.Module):
+    def __init__(self, params=HyperParams()):
         super().__init__()
-        self.embed_matrix = nn.Embedding(hps.T,hps.M)
-        self.encoder = Encoder(hps, self.embed_matrix)
-        self.decoder = Decoder(hps, self.embed_matrix)
-        if saved_state is not None:
-            self.load_state_dict(saved_state)
+        self.rng = t.Generator()
+        self.rng.manual_seed(params.random_seed)
+        self.embed_matrix = nn.Embedding(params.T,params.M)
+        self.encoder = Encoder(params, self.embed_matrix)
+        self.decoder = Decoder(params, self.embed_matrix)
 
     def forward(self, enc_input, dec_input):
         """
@@ -247,8 +251,18 @@ class Model(state.State, nn.Module):
         dec_output = self.decoder(enc_output, dec_input)
         return dec_output
 
+class StateModel(state.State):
+    def __init__(self):
+        super().__init__()
+
+    def make(self, params, saved_state):
+        self.obj = Model(params)
+        if saved_state is not None:
+            self.obj.load_state_dict(saved_state['weights'])
+            self.obj.rng.set_state(saved_state['rng'])
+
     def state(self):
-        pass
+        return dict(weights=self.obj.state_dict(), rng=self.obj.rng.get_state())
 
 class Loss(nn.Module):
     def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
@@ -292,24 +306,33 @@ class Loss(nn.Module):
         masked = kldiv * dec_mask
         return masked.mean()
 
-class StateOptim(state.State, optim.Adam):
-    def __init__(self, params, saved_state, model):
-        beta1 = params['adam_beta1']
-        beta2 = params['adam_beta2']
-        eps = params['adam_eps']
-        super().__init__(model.parameters(), (beta1, beta2), eps)
+class StateOptim(state.State):
+    def __init__(self):
+        super().__init__()
+
+    def make(self, params, saved_state, model):
+        beta1 = params.adam_beta1
+        beta2 = params.adam_beta2
+        eps = params.adam_eps
+        self.obj = optim.Adam(model.parameters(), betas=(beta1, beta2), eps=eps)
         if saved_state is not None:
-            self.load_state_dict(saved_state['optim'])
+            self.obj.load_state_dict(saved_state['optim'])
 
     def state(self):
-        return dict(optim=self.state_dict())
+        return dict(optim=self.obj.state_dict())
 
-class CustomScheduler:
-    def __init__(self, optimizer, M, warmup_steps):
+class CustomScheduler(state.State):
+    def __init__(self):
+        super().__init__()
+
+    def make(self, params, saved_state, optimizer):
         # from section 5.3, page 7, equation 3
-        self.M = M
+        self.M = params.M
         self.warmup_steps = params.warmup_steps
         self.optimizer = optimizer
+
+    def get(self):
+        return self
 
     def update(self, step): 
         ord_step = step + 1
@@ -322,5 +345,5 @@ class CustomScheduler:
         return self.optimizer.param_groups[0]['lr']
 
     def state(self):
-        pass
+        return {}
 

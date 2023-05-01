@@ -4,6 +4,7 @@ import torch as t
 from collections import defaultdict, Counter
 import datasets
 from transformers import GPT2TokenizerFast
+from . import state
 
 
 def token_histo(dataset, column):
@@ -132,36 +133,51 @@ def inverse_mod(val, modulo):
     # amount needed to round up to nearest modulo
     return - (val % -modulo)
 
-def batched_sample(batch_size, bin_size, dataset_size, rng, state={}):
+class Data(state.State):
     """
     Infinitely generates batch_size batches of indices in range(dataset_size)
     uniformly, even if dataset_size % batch_size != 0
     """
-    if len(state) != 0:
-        offset, step, epoch = state['offset'], state['step'], state['epoch']
-    else:
-        offset, step, epoch = 0, 0, 0
-    while True:
-        main_inds = np.arange(offset, dataset_size)
-        extra = inverse_mod(main_inds.shape[0], batch_size) 
-        wrap_inds = np.arange(extra) # wrapping around to the next epoch
-        inds = np.concatenate((wrap_inds, main_inds))
-        assert inds.shape[0] % batch_size == 0
-        offset = extra
-        inds = shuffle_inner(inds, bin_size, rng)
-        inds = shuffle_outer(inds, batch_size, rng)
-        for b in range(0, inds.shape[0], batch_size):
-            yield epoch, step, inds[b:b+batch_size]
-            step += 1
-        epoch += 1
-
-class Data(state.State):
-    def __init__(self, hps, state):
+    def __init__(self):
         super().__init__()
-        pass
+
+    def make(self, params, saved_state):
+        self.rng = np.random.mtrand.RandomState(params.random_seed)
+        self.batch_size = params.batch_size
+        self.bin_size = params.bin_size
+        self.dataset_size = params.dataset_size
+
+        if saved_state is None:
+            self.offset = 0
+            self.step = 0
+            self.epoch = 0
+        else:
+            self.rng.set_state(saved_state['randstate'])
+            self.offset = saved_state['offset']
+            self.step = saved_state['step']
+            self.epoch = saved_state['epoch']
+
+    def get(self):
+        return self
 
     def state(self):
-        pass
+        return dict(offset=self.offset, step=self.step, epoch=self.epoch,
+                randstate=self.rng.get_state())
+
+    def __iter__(self):
+        while True:
+            main_inds = np.arange(self.offset, self.dataset_size)
+            extra = inverse_mod(main_inds.shape[0], self.batch_size) 
+            wrap_inds = np.arange(extra) # wrapping around to the next epoch
+            inds = np.concatenate((wrap_inds, main_inds))
+            assert inds.shape[0] % self.batch_size == 0
+            self.offset = extra
+            inds = shuffle_inner(inds, self.bin_size, self.rng)
+            inds = shuffle_outer(inds, self.batch_size, self.rng)
+            for b in range(0, inds.shape[0], self.batch_size):
+                yield self.epoch, self.step, inds[b:b+self.batch_size]
+                self.step += 1
+            self.epoch += 1
 
 def make_batch(dataset, inds, pad_value):
     """

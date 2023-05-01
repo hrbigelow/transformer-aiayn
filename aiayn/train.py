@@ -7,22 +7,29 @@ import torch
 from torch.optim import Adam
 
 def main(batch_size, bin_size, data_path, ckpt_path=None):
-    run = state.Run(model=model.Model, data=data.Data, opt=) 
+    run = state.Run(
+            model=model.StateModel(),
+            data=data.Data(),
+            opt=model.StateOptim(),
+            sched=model.CustomScheduler()) 
+    run.add_deps('sched', 'opt')
+    run.add_deps('opt', 'model')
+
     ds = data.get_dataset(data_path)
     token_histo = data.load_token_histo(data_path)
     tokenizer = data.get_tokenizer()
     print(f'Prepared dataset')
 
-    hps = model.HyperParams()
-    hps.T = len(tokenizer)
-
-    print(f'Instantiating run')
     if ckpt_path is None:
+        hps = model.HyperParams()
+        hps.T = len(tokenizer)
+        hps.dataset_size = len(ds)
         run.init(hps)
     else:
         run.load(ckpt_path)
-
+    print(f'Instantiated run')
     # mod = torch.compile(mod)
+
     loss = run.model.Loss(token_histo, tokenizer.pad_token_id)
     opt = Adam(run.model.parameters(), betas=(0.9, 0.98), eps=1e-9)
     run.sched.update(0)
@@ -49,6 +56,7 @@ def main(batch_size, bin_size, data_path, ckpt_path=None):
         print(f', loss = {xent.item():5.4f}')
 
         if step % 1000 == 0 and step > 0:
+            pass
 
 if __name__ == '__main__':
     fire.Fire(main)

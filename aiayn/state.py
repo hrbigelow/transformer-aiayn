@@ -1,72 +1,50 @@
 from typing import Dict
 from abc import ABC, abstractmethod
 from inspect import signature
+from collections import OrderedDict
 from torch import nn
 
 
 class State(ABC):
     """
-    Instances of this class should provide the following semantics:
-    It can be instantiated as one of:
-        Derived(params)  - de-novo, before any saved state exists
-        Derived(params, saved_state)  - resuming from a saved state
-
-    params are parameters that remain constant throughout the life of the instance.
-    Multiple different classes derived from State should all expect the same instance
-    of params, as it represents a single source of truth to begin a run.
-
-    A call to self.state() must return the entire non-constant state of the
-    object which is needed to restore it.  The return value of self.state() will
-    be used as saved_state in a subsequent re-instantiation.
-
-    In particular, any dependence on random number generation (from numpy, python,
-    torch cpu or torch cuda) implies that the rng state should be returned by
-    self.state() and resumed during construction.
-
-    The best practice is for instances of State to own the random number generators
-    they use, and always use them explicitly whenever randomness is needed.
-    See recommendation from:
     https://numpy.org/doc/stable/reference/random/index.html#quick-start 
     """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        """
-        Override this to call super().__init__() appropriately with an init method
-        with signature:  (params, saved_state)
-        params: hyperparmeters defining the base instance
-        saved_state: if present, object state was saved and is being restored
-        """
-        self.check_sig(self.__init__, ('params', 'saved_state'))
+    def __init__(self):
+        self.obj = None
+        self.check_sig(self.make, ('params', 'saved_state'))
         self.check_sig(self.state, ())
         
-    @staticmethod
-    def check_sig(func, expected_args):
+    def check_sig(self, func, expected_args):
+        # print(f'checking signature of {func} from self={type(self)}')
         args = list(signature(func).parameters.keys())
-        if args != list(expected_args):
+        if any(l != r for l,r in zip(args, expected_args)):
             raise TypeError(
                 f'Can\'t instantiate State object.  {func.__name__} method must have '
-                f'signature {func.__name__}({", ".join(expected_args)}).'
+                f'signature {func}({", ".join(expected_args)}).'
                 f'Found \'{", ".join(args)}\'')
+
+    @abstractmethod
+    def make(self):
+        """
+        Configure this instance such that get() returns a populated object.
+        The derived class may act as a container class for a third-party object.  If
+        so, make() will construct that and store it as self.obj.
+        Alternatively, the derived class may itself provide the functionality needed.
+        If so, make() will populate fields on the derived class, and get() will
+        return self.
+        """
+        pass
+
+    def get(self):
+        # only override if not a container class
+        return self.obj
 
     @abstractmethod
     def state(self):
         """
-        Return the current state of the instance, suitable for saving and restoring.
-        This is the state used in the constructor
+        Return the current state of the object instance, suitable for saving and restoring.
         """
         pass
-
-"""
-# inherit State as first subclass
-# __init__ and state must have signatures as shown:
-class Derived(State, nn.Module):
-    def __init__(self, params=None, saved_state=None):
-        super().__init__()
-
-    def state(self):
-        pass
-"""
 
 class Run:
     def __init__(self, **kwargs):
@@ -76,10 +54,10 @@ class Run:
         here.
         """
         self._params = None
-        for name, cls in kwargs:
-            if not issubclass(cls, State):
-                raise TypeError(f'\'{name}\' was not a subclass of `State`')
-        self.classes = OrderedDict(kwargs)
+        for name, make in kwargs.items():
+            if not isinstance(make, State):
+                raise TypeError(f'\'{name}\' was not an instance of `State`')
+        self.objs = OrderedDict(kwargs)
         self.deps = {}
 
     def init(self, params):
@@ -87,10 +65,10 @@ class Run:
         Instantiate all class members, storing each instance as a named member
         """
         self._params = params
-        for name, cls in self.classes:
+        for name, obj in self.objs.items():
             deps = tuple(self.__dict__[d] for d in self.deps.get(name, ()))
-            instance = cls(self._params, {}, *deps)
-            self.__dict__[name] = instance
+            obj.make(self._params, None, *deps)
+            self.__dict__[name] = obj.get()
 
     def add_deps(self, name, *deps):
         """
@@ -100,13 +78,13 @@ class Run:
 
         The `deps` instances constructed will be used as arguments to `name`
         """
-        missing = next((n for n in (name, *deps) if n not in self.classes), None)
+        missing = next((n for n in (name, *deps) if n not in self.objs), None)
         if missing:
             raise RuntimeError(
                 f'Argument value \'{missing}\' is not found in the list of registered '
-                f'classes: {"\, ".join(self.classes.keys())}')
-        cl = list(self.classes.keys())
-        ni = cl.index(name)
+                f'objects: {", ".join(self.objs.keys())}')
+        clist = list(self.objs.keys())
+        ni = clist.index(name)
         out_of_order = next((dep for dep in deps if clist.index(dep) >= ni), None)
         if out_of_order:
             raise RuntimeError(
@@ -120,9 +98,9 @@ class Run:
         """
         state = torch.load(path)
         self._params = state['_params']
-        for name, cls in self.classes:
-            instance = cls(self._params, state[name])
-            self.__dict__[name] = cls
+        for name, obj in self.objs:
+            obj.make(self._params, state[name])
+            self.__dict__[name] = obj.get()
 
     def save(self, path_template, step):
         """
@@ -130,7 +108,7 @@ class Run:
         """
         state = dict(_params=self._params) 
         for name in self.classes:
-            state[name] = self.__dict__[name].state()
+            state[name] = self.objs[name].state()
 
         path = path_template.format(step)
         t.save(path, state)
