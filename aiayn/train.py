@@ -6,7 +6,7 @@ from . import state
 import torch
 from torch.optim import Adam
 
-def main(batch_size, data_path, ckpt_path=None):
+def main(batch_size, data_path, ckpt_templ, resume_ckpt=None):
     run = state.Run(
             model=model.StateModel(),
             data=data.Data(),
@@ -19,7 +19,7 @@ def main(batch_size, data_path, ckpt_path=None):
     tokenizer = data.get_tokenizer()
     print(f'Prepared dataset')
 
-    if ckpt_path is None:
+    if resume_ckpt is None:
         hps = model.HyperParams()
         hps.T = len(tokenizer)
         hps.batch_size = batch_size
@@ -28,8 +28,10 @@ def main(batch_size, data_path, ckpt_path=None):
         hps.pad_token_id = tokenizer.pad_token_id
         run.init(hps)
     else:
-        run.load(ckpt_path)
-    print(f'Instantiated run')
+        path = ckpt_templ.format(resume_ckpt)
+        print(f'Resuming from {path}')
+        run.load(path)
+
     if torch.cuda.get_device_capability() >= (7,0):
         print('Compiling model')
         run.model = torch.compile(run.model)
@@ -59,8 +61,10 @@ def main(batch_size, data_path, ckpt_path=None):
         run.sched.update(step)
         print(f', loss = {xent.item():5.4f}')
 
-        if step % 1000 == 0 and step > 0:
-            pass
+        if step % 3 == 0 and step > 0 and step != resume_ckpt:
+            path = ckpt_templ.format(step)
+            print(f'Saving {path}')
+            run.save(path)
 
 if __name__ == '__main__':
     fire.Fire(main)

@@ -2,6 +2,7 @@ from typing import Dict
 from abc import ABC, abstractmethod
 from inspect import signature
 from collections import OrderedDict
+import torch
 from torch import nn
 
 
@@ -60,15 +61,35 @@ class Run:
         self.objs = OrderedDict(kwargs)
         self.deps = {}
 
+    def _make(self, params, state=None):
+        # instantiate all objects from params and state (if present)
+        self._params = params
+        for name, obj in self.objs.items():
+            deps = tuple(self.__dict__[d] for d in self.deps.get(name, ()))
+            obj.make(self._params, state, *deps)
+            self.__dict__[name] = obj.get()
+
     def init(self, params):
         """
         Instantiate all class members, storing each instance as a named member
         """
-        self._params = params
-        for name, obj in self.objs.items():
-            deps = tuple(self.__dict__[d] for d in self.deps.get(name, ()))
-            obj.make(self._params, None, *deps)
-            self.__dict__[name] = obj.get()
+        return self._make(params)
+
+    def load(self, path):
+        """
+        Load everything from the checkpoint path given 
+        """
+        state = torch.load(path)
+        return self._make(state['_params'], state)
+
+    def save(self, path):
+        """
+        Save everything to the path
+        """
+        state = dict(_params=self._params) 
+        for name in self.objs:
+            state[name] = self.objs[name].state()
+        torch.save(state, path)
 
     def add_deps(self, name, *deps):
         """
@@ -91,25 +112,4 @@ class Run:
                 f'deps contained \'{out_of_order}\' which occurs after \'{name}\''
                 f'in the class list order')
         self.deps[name] = deps
-
-    def load(self, path):
-        """
-        Load everything from the checkpoint path given 
-        """
-        state = torch.load(path)
-        self._params = state['_params']
-        for name, obj in self.objs:
-            obj.make(self._params, state[name])
-            self.__dict__[name] = obj.get()
-
-    def save(self, path_template, step):
-        """
-        Save everything to the path
-        """
-        state = dict(_params=self._params) 
-        for name in self.classes:
-            state[name] = self.objs[name].state()
-
-        path = path_template.format(step)
-        t.save(path, state)
 
