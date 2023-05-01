@@ -267,6 +267,9 @@ class StateModel(state.State):
             self.obj.load_state_dict(saved_state['weights'])
             self.obj.rng.set_state(saved_state['rng'])
 
+    def to(self, device):
+        return self.obj.to(device)
+
     def state(self):
         return dict(weights=self.obj.state_dict(), rng=self.obj.rng.get_state())
 
@@ -325,8 +328,15 @@ class StateOptim(state.State):
         if saved_state is not None:
             self.obj.load_state_dict(saved_state['optim'])
 
+    def to(self, device):
+        sd = self.get().state_dict()
+        self.get().load_state_dict(sd)
+
+    def step(self):
+        self.get().step()
+
     def state(self):
-        return dict(optim=self.obj.state_dict())
+        return dict(optim=self.get().state_dict())
 
 class CustomScheduler(state.State):
     def __init__(self):

@@ -36,9 +36,8 @@ def main(batch_size, data_path, ckpt_templ, resume_ckpt=None):
         print('Compiling model')
         run.model = torch.compile(run.model)
 
-    opt = Adam(run.model.parameters(), betas=(0.9, 0.98), eps=1e-9)
+    run.to(torch.device('cuda'))
     run.sched.update(0)
-    run.model.cuda()
 
     inds_gen = iter(run.data)
     for epoch, step, inds in inds_gen:
@@ -61,7 +60,7 @@ def main(batch_size, data_path, ckpt_templ, resume_ckpt=None):
         run.sched.update(step)
         print(f', loss = {xent.item():5.4f}')
 
-        if step % 3 == 0 and step > 0 and step != resume_ckpt:
+        if step % 1000 == 0 and step > 0 and step != resume_ckpt:
             path = ckpt_templ.format(step)
             print(f'Saving {path}')
             run.save(path)

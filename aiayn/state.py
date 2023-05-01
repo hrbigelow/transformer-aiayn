@@ -40,6 +40,9 @@ class State(ABC):
         # only override if not a container class
         return self.obj
 
+    def to(self, device):
+        pass
+
     @abstractmethod
     def state(self):
         """
@@ -66,7 +69,7 @@ class Run:
         self._params = params
         for name, obj in self.objs.items():
             deps = tuple(self.__dict__[d] for d in self.deps.get(name, ()))
-            obj.make(self._params, state, *deps)
+            obj.make(self._params, state[name], *deps)
             self.__dict__[name] = obj.get()
 
     def init(self, params):
@@ -81,6 +84,10 @@ class Run:
         """
         state = torch.load(path)
         return self._make(state['_params'], state)
+
+    def to(self, device):
+        for obj in self.objs.values():
+            obj.to(device)
 
     def save(self, path):
         """
