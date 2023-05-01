@@ -53,8 +53,8 @@ def main(batch_size, data_path, ckpt_templ,
             print(f'epoch = {epoch}, step = {step}, '
                     f'en = {en_range}, de = {de_range}, '
                     f'lr = {lr:7.6f}', end='', flush=True) 
-        if en_range[1] > 150:
-            print(f'Skipping too-long sentence to avoid OOM')
+        if en_range[1] > 150 or de_range[1] > 150:
+            print(f'Skipping too-long sentence to avoid OOM: en = {en_range}, de = {de_range}')
             continue
         dec_output = run.model(enc_input, dec_input)
         xent = run.model.loss(dec_input, dec_output)
