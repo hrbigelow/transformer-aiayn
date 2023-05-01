@@ -6,7 +6,7 @@ from . import state
 import torch
 from torch.optim import Adam
 
-def main(batch_size, data_path, ckpt_templ, resume_ckpt=None):
+def main(batch_size, data_path, ckpt_templ, resume_ckpt=None, compile_model=False):
     run = state.Run(
             model=model.StateModel(),
             data=data.Data(),
@@ -33,8 +33,9 @@ def main(batch_size, data_path, ckpt_templ, resume_ckpt=None):
         run.load(path)
 
     if torch.cuda.get_device_capability() >= (7,0):
-        print('Compiling model')
-        run.model = torch.compile(run.model)
+        if compile_model:
+            print('Compiling model')
+            run.model = torch.compile(run.model)
 
     run.to(torch.device('cuda'))
     run.sched.update(0)
