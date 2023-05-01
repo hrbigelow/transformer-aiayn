@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 from . import state
+from .data import load_token_histo
 import pdb
 
 @dataclass
@@ -26,8 +27,6 @@ class HyperParams:
 
     # training
     batch_size: int = 32 # batch
-    bin_size: int = 1000
-    dataset_size: int = 10000 # set this externally
     adam_beta1: float = 0.9
     adam_beta2: float = 0.98
     adam_eps: float = 1e-9
@@ -35,6 +34,12 @@ class HyperParams:
 
     # other
     random_seed: int = 982349820
+
+    # data
+    bin_size: int = 1000
+    dataset_size: int = None
+    data_path: str = None
+    pad_token_id: int = None
 
 
 class MultiHeadAttention(nn.Module):
@@ -64,10 +69,8 @@ class MultiHeadAttention(nn.Module):
         vval = t.einsum('bcm,hmv->bhcv', kvinput, self.wv)
         alogit = t.einsum('bhck,bhdk->bhcd', kval, qval)
         if self.masked:
-            # side = alogit.shape[2]
             side = kvinput.shape[1]
-            alogit += t.full((side, side), -100.0).triu()
-            # alogit += t.full((kvinput.shape[1],), -100.0).triu()
+            alogit += t.full_like(alogit, -100.0).triu()
         att = t.softmax(alogit * self.scale_factor ** -1, dim=2)
         pre = t.einsum('bhcd,bhcv->bhdv', att, vval)
         out = t.einsum('bhcv,hvm->bcm', pre, self.wo)
@@ -132,6 +135,7 @@ class InputEmbedding(nn.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
+        pos_embed = pos_embed.to(input.device)
         # embed = self.embedding(input) * self.scale_factor
         embed = self.embedding(input)
         return embed + pos_embed * self.pos_factor
@@ -240,6 +244,8 @@ class Model(nn.Module):
         self.embed_matrix = nn.Embedding(params.T,params.M)
         self.encoder = Encoder(params, self.embed_matrix)
         self.decoder = Decoder(params, self.embed_matrix)
+        token_histo = load_token_histo(params.data_path) 
+        self.loss = Loss(token_histo, params.pad_token_id) 
 
     def forward(self, enc_input, dec_input):
         """
@@ -271,9 +277,10 @@ class Loss(nn.Module):
         """
         super().__init__()
         self.eps = smoothing_eps
-        self.u = token_histo / token_histo.sum() 
-        self.vocab_size = self.u.shape[0]
         self.pad_value = pad_value
+        token_histo = F.normalize(token_histo.to(t.float64), p=1.0, dim=0)
+        self.register_buffer('u', token_histo, persistent=False)
+        self.vocab_size = self.u.shape[0]
 
     @staticmethod
     def kldiv(q, p, axis):

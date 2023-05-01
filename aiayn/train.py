@@ -6,7 +6,7 @@ from . import state
 import torch
 from torch.optim import Adam
 
-def main(batch_size, bin_size, data_path, ckpt_path=None):
+def main(batch_size, data_path, ckpt_path=None):
     run = state.Run(
             model=model.StateModel(),
             data=data.Data(),
@@ -16,28 +16,32 @@ def main(batch_size, bin_size, data_path, ckpt_path=None):
     run.add_deps('opt', 'model')
 
     ds = data.get_dataset(data_path)
-    token_histo = data.load_token_histo(data_path)
     tokenizer = data.get_tokenizer()
     print(f'Prepared dataset')
 
     if ckpt_path is None:
         hps = model.HyperParams()
         hps.T = len(tokenizer)
+        hps.batch_size = batch_size
         hps.dataset_size = len(ds)
+        hps.data_path = data_path
+        hps.pad_token_id = tokenizer.pad_token_id
         run.init(hps)
     else:
         run.load(ckpt_path)
     print(f'Instantiated run')
-    # mod = torch.compile(mod)
+    if torch.cuda.get_device_capability() >= (7,0):
+        print('Compiling model')
+        run.model = torch.compile(run.model)
 
-    loss = run.model.Loss(token_histo, tokenizer.pad_token_id)
     opt = Adam(run.model.parameters(), betas=(0.9, 0.98), eps=1e-9)
     run.sched.update(0)
+    run.model.cuda()
 
-    inds_gen = run.data.batched_sample(batch_size, bin_size, ds.num_rows)
+    inds_gen = iter(run.data)
     for epoch, step, inds in inds_gen:
         enc_input, dec_input, en_lengths, de_lengths = data.make_batch(ds, inds, 
-                tokenizer.pad_token_id)
+                tokenizer.pad_token_id, 'cuda')
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
         lr = run.sched.current_lr()
@@ -48,7 +52,7 @@ def main(batch_size, bin_size, data_path, ckpt_path=None):
             print(f'Skipping too-long sentence to avoid OOM')
             continue
         dec_output = run.model(enc_input, dec_input)
-        xent = loss(dec_input, dec_output)
+        xent = run.model.loss(dec_input, dec_output)
         run.model.zero_grad()
         xent.backward()
         run.opt.step()

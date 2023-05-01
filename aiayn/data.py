@@ -179,7 +179,7 @@ class Data(state.State):
                 self.step += 1
             self.epoch += 1
 
-def make_batch(dataset, inds, pad_value):
+def make_batch(dataset, inds, pad_value, device):
     """
     """
     entries = dataset[inds]
@@ -193,7 +193,7 @@ def make_batch(dataset, inds, pad_value):
 
     en, en_lengths = _padded_stack(entries['en_tok'], pad_value)
     de, de_lengths = _padded_stack(entries['de_tok'], pad_value)
-    return en, de, en_lengths, de_lengths
+    return en.to(device), de.to(device), en_lengths, de_lengths
 
 
 if __name__ == '__main__':
