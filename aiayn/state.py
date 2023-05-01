@@ -69,7 +69,8 @@ class Run:
         self._params = params
         for name, obj in self.objs.items():
             deps = tuple(self.__dict__[d] for d in self.deps.get(name, ()))
-            obj.make(self._params, state[name], *deps)
+            sub_state = None if state is None else state[name]
+            obj.make(self._params, sub_state, *deps)
             self.__dict__[name] = obj.get()
 
     def init(self, params):
