@@ -6,7 +6,9 @@ from . import state
 import torch
 from torch.optim import Adam
 
-def main(batch_size, data_path, ckpt_templ, resume_ckpt=None, compile_model=False):
+def main(batch_size, data_path, ckpt_templ, 
+        report_every=10, ckpt_every=1000,
+        resume_ckpt=None, compile_model=False):
     run = state.Run(
             model=model.StateModel(),
             data=data.Data(),
@@ -47,9 +49,10 @@ def main(batch_size, data_path, ckpt_templ, resume_ckpt=None, compile_model=Fals
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
         lr = run.sched.current_lr()
-        print(f'epoch = {epoch}, step = {step}, '
-                f'en = {en_range}, de = {de_range}, '
-                f'lr = {lr:7.6f}', end='', flush=True) 
+        if step % report_every == 0:
+            print(f'epoch = {epoch}, step = {step}, '
+                    f'en = {en_range}, de = {de_range}, '
+                    f'lr = {lr:7.6f}', end='', flush=True) 
         if en_range[1] > 150:
             print(f'Skipping too-long sentence to avoid OOM')
             continue
@@ -59,9 +62,10 @@ def main(batch_size, data_path, ckpt_templ, resume_ckpt=None, compile_model=Fals
         xent.backward()
         run.opt.step()
         run.sched.update(step)
-        print(f', loss = {xent.item():5.4f}')
+        if step % report_every == 0:
+            print(f', loss = {xent.item():5.4f}')
 
-        if step % 1000 == 0 and step > 0 and step != resume_ckpt:
+        if step % ckpt_every == 0 and step > 0 and step != resume_ckpt:
             path = ckpt_templ.format(step)
             print(f'Saving {path}')
             run.save(path)
