@@ -99,15 +99,14 @@ def tokenize_data(dataset, num_proc):
     ds.set_format('torch')
     return ds
 
-def preprocess(data_path, num_proc=8, shard=None):
+def preprocess(cache_dir, data_dir, num_proc=8, shard=None):
     """
     """
     import os
-    if not os.path.exists(data_path):
-        raise RuntimeError(f'Couldn\'t find data path \'{data_path}\'')
+    if not os.path.exists(data_dir):
+        raise RuntimeError(f'Couldn\'t find data path \'{data_dir}\'')
 
-    cache_dir = f'{data_path}/.cache'
-    print(f'Starting preprocess, data_path={data_path}, shard={shard}')
+    print(f'Starting preprocess, data_dir={data_dir}, shard={shard}')
 
     ds = datasets.load_dataset('wmt14', 'de-en', cache_dir=cache_dir, split='train')
     if shard:
@@ -117,10 +116,10 @@ def preprocess(data_path, num_proc=8, shard=None):
 
     print(f'Computing token histo')
     de_token_histo = token_histo(ds, 'de_tok')
-    t.save(de_token_histo, f'{data_path}/de_token_histo.pt')
+    t.save(de_token_histo, f'{data_dir}/de_token_histo.pt')
 
-    print(f'Saving dataset to {data_path}.  Columns: {ds.column_names}')
-    ds.save_to_disk(data_path)
+    print(f'Saving dataset to {data_dir}.  Columns: {ds.column_names}')
+    ds.save_to_disk(data_dir)
 
 def load_token_histo(data_path):
     histo = t.load(f'{data_path}/de_token_histo.pt')

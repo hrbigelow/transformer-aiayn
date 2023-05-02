@@ -9,7 +9,7 @@ description = "Implementation of the Transformer from the paper 'Attention is Al
 authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
   "torch>=2.0",
-  "datasets",
+  "datasets>=2.12.0",
   "transformers",
   "fire",
   "numpy",

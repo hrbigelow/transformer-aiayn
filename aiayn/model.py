@@ -247,6 +247,15 @@ class Model(nn.Module):
         token_histo = load_token_histo(params.data_path) 
         self.loss = Loss(token_histo, params.pad_token_id) 
 
+    def total_params(self):
+        # get total number of parameters
+        return sum(par.numel() for par in self.parameters())
+
+    def param_shape_map(self):
+        from collections import Counter
+        shape_map = Counter(tuple(par.shape) for par in self.parameters())
+        return
+
     def forward(self, enc_input, dec_input):
         """
         enc_input: bc
