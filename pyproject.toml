@@ -13,6 +13,7 @@ dependencies = [
   "transformers",
   "fire",
   "numpy",
+  "streamvis @ git+https://github.com/hrbigelow/streamvis.git"
 ]
 
 [tool.setuptools]
