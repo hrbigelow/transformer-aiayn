@@ -5,10 +5,12 @@ from . import data
 from . import state
 import torch
 from torch.optim import Adam
+from streamvis import Client
 
-def main(batch_size, sub_batch_size, data_path, ckpt_templ, report_every=10,
-        ckpt_every=1000, resume_ckpt=None, compile_model=False):
+def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
+        report_every=10, ckpt_every=1000, resume_ckpt=None, compile_model=False):
     """
+    pubsub_project_id: the GCP project with Cloud Pub/Sub API enabled
     batch_size: SGD batch size
     sub_batch_size: size used for a single forward pass to accumulate gradients.
                     must be factor of batch_size
@@ -16,6 +18,12 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, report_every=10,
     if batch_size % sub_batch_size != 0:
         raise RuntimeError(f'batch_size = {batch_size} must be disivible by '
                 f'sub_batch_size = {sub_batch_size}')
+
+    client = Client('aiayn')
+    client.init_pubsub(pubsub_project_id, 'aiayn')
+    client.clear()
+    grid_map = dict(loss = (0,0,1,1))
+    client.set_layout(grid_map)
 
     run = state.Run(
             model=model.StateModel(),
@@ -52,6 +60,8 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, report_every=10,
     run.sched.update(0)
 
     batch_shape = (hps.batch_size // hps.sub_batch_size, hps.sub_batch_size)
+    sub_loss = torch.zeros(batch_shape[0])
+
 
     inds_gen = iter(run.data)
     for epoch, step, inds in inds_gen:
@@ -60,7 +70,7 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, report_every=10,
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
         if en_range[1] > 150 or de_range[1] > 150:
-            # print(f'Skipping: en = {en_range}, de = {de_range}')
+            print(f'Skipping: en = {en_range}, de = {de_range}')
             continue
 
         lr = run.sched.current_lr()
@@ -79,11 +89,15 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, report_every=10,
             sub_dec_output = run.model(sub_enc_input, sub_dec_input)
             xent = run.model.loss(sub_dec_input, sub_dec_output)
             xent.backward()
+            sub_loss[sub_batch] = xent.item()
 
         run.opt.step()
         run.sched.update(step)
+
+        loss = sub_loss.mean().item()
+        client.tandem_lines('loss', step, [loss], fig_kwargs={'width':1800})
         if step % report_every == 0:
-            print(f', loss = {xent.item():5.4f}', flush=True)
+            print(f', loss = {loss:5.4f}', flush=True)
 
         if step % ckpt_every == 0 and step > 0 and step != resume_ckpt:
             path = ckpt_templ.format(step)
