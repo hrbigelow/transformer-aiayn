@@ -60,7 +60,6 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
     run.sched.update(0)
 
     batch_shape = (hps.batch_size // hps.sub_batch_size, hps.sub_batch_size)
-    sub_loss = torch.zeros(batch_shape[0])
 
 
     inds_gen = iter(run.data)
@@ -83,13 +82,16 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
         dec_input = dec_input.reshape(*batch_shape, *dec_input.shape[1:])
         run.model.zero_grad()
 
+        sub_loss = torch.zeros(batch_shape[0])
+
         for sub_batch in range(batch_shape[0]):
             sub_enc_input = enc_input[sub_batch]
             sub_dec_input = dec_input[sub_batch]
             sub_dec_output = run.model(sub_enc_input, sub_dec_input)
             xent = run.model.loss(sub_dec_input, sub_dec_output)
             xent.backward()
-            sub_loss[sub_batch] = xent.item()
+            with torch.no_grad():
+                sub_loss[sub_batch] = xent.item()
 
         run.opt.step()
         run.sched.update(step)
