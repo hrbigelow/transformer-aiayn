@@ -6,9 +6,17 @@ from . import state
 import torch
 from torch.optim import Adam
 
-def main(batch_size, data_path, ckpt_templ, 
-        report_every=10, ckpt_every=1000,
-        resume_ckpt=None, compile_model=False):
+def main(batch_size, sub_batch_size, data_path, ckpt_templ, report_every=10,
+        ckpt_every=1000, resume_ckpt=None, compile_model=False):
+    """
+    batch_size: SGD batch size
+    sub_batch_size: size used for a single forward pass to accumulate gradients.
+                    must be factor of batch_size
+    """
+    if batch_size % sub_batch_size != 0:
+        raise RuntimeError(f'batch_size = {batch_size} must be disivible by '
+                f'sub_batch_size = {sub_batch_size}')
+
     run = state.Run(
             model=model.StateModel(),
             data=data.Data(),
@@ -25,6 +33,7 @@ def main(batch_size, data_path, ckpt_templ,
         hps = model.HyperParams()
         hps.T = len(tokenizer)
         hps.batch_size = batch_size
+        hps.sub_batch_size = sub_batch_size
         hps.dataset_size = len(ds)
         hps.data_path = data_path
         hps.pad_token_id = tokenizer.pad_token_id
@@ -42,32 +51,43 @@ def main(batch_size, data_path, ckpt_templ,
     run.to(torch.device('cuda'))
     run.sched.update(0)
 
+    batch_shape = (hps.batch_size // hps.sub_batch_size, hps.sub_batch_size)
+
     inds_gen = iter(run.data)
     for epoch, step, inds in inds_gen:
         enc_input, dec_input, en_lengths, de_lengths = data.make_batch(ds, inds, 
                 tokenizer.pad_token_id, 'cuda')
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
+        if en_range[1] > 150 or de_range[1] > 150:
+            # print(f'Skipping: en = {en_range}, de = {de_range}')
+            continue
+
         lr = run.sched.current_lr()
         if step % report_every == 0:
             print(f'epoch = {epoch}, step = {step}, '
                     f'en = {en_range}, de = {de_range}, '
                     f'lr = {lr:7.6f}', end='', flush=True) 
-        if en_range[1] > 150 or de_range[1] > 150:
-            # print(f'Skipping too-long sentence to avoid OOM: en = {en_range}, de = {de_range}')
-            continue
-        dec_output = run.model(enc_input, dec_input)
-        xent = run.model.loss(dec_input, dec_output)
+        
+        enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
+        dec_input = dec_input.reshape(*batch_shape, *dec_input.shape[1:])
         run.model.zero_grad()
-        xent.backward()
+
+        for sub_batch in range(batch_shape[0]):
+            sub_enc_input = enc_input[sub_batch]
+            sub_dec_input = dec_input[sub_batch]
+            sub_dec_output = run.model(sub_enc_input, sub_dec_input)
+            xent = run.model.loss(sub_dec_input, sub_dec_output)
+            xent.backward()
+
         run.opt.step()
         run.sched.update(step)
         if step % report_every == 0:
-            print(f', loss = {xent.item():5.4f}')
+            print(f', loss = {xent.item():5.4f}', flush=True)
 
         if step % ckpt_every == 0 and step > 0 and step != resume_ckpt:
             path = ckpt_templ.format(step)
-            print(f'Saving {path}')
+            print(f'Saving {path}', flush=True)
             run.save(path)
 
 if __name__ == '__main__':

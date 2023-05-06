@@ -256,6 +256,17 @@ class Model(nn.Module):
         shape_map = Counter(tuple(par.shape) for par in self.parameters())
         return
 
+    def input_output_attention(self, enc_input, dec_input):
+        """
+        c, d are lengths in tokens
+        enc_input: bc
+        dec_input: bd
+        returns: bcd, a matrix of attention probabilities
+
+        Needed for beam search
+        """
+        pass
+
     def forward(self, enc_input, dec_input):
         """
         enc_input: bc
