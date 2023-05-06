@@ -8,7 +8,8 @@ from torch.optim import Adam
 from streamvis import Client
 
 def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
-        report_every=10, ckpt_every=1000, resume_ckpt=None, compile_model=False):
+        max_sentence_length, report_every=10, ckpt_every=1000, resume_ckpt=None,
+        compile_model=False):
     """
     pubsub_project_id: the GCP project with Cloud Pub/Sub API enabled
     batch_size: SGD batch size
@@ -68,7 +69,7 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
                 tokenizer.pad_token_id, 'cuda')
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
-        if en_range[1] > 150 or de_range[1] > 150:
+        if max(en_range[1], de_range[1]) > max_sentence_length:
             print(f'Skipping: en = {en_range}, de = {de_range}')
             continue
 
