@@ -23,7 +23,7 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
     client = Client('aiayn')
     client.init_pubsub(pubsub_project_id, 'aiayn')
     client.clear()
-    grid_map = dict(loss = (0,0,1,1))
+    grid_map = dict(loss = (0,0,1,1), gnorms = (1,0,1,1))
     client.set_layout(grid_map)
 
     run = state.Run(
@@ -70,7 +70,7 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
         if max(en_range[1], de_range[1]) > max_sentence_length:
-            print(f'Skipping: en = {en_range}, de = {de_range}')
+            print(f'step {step}: skipping en = {en_range}, de = {de_range}')
             continue
 
         lr = run.sched.current_lr()
@@ -98,7 +98,13 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
         run.sched.update(step)
 
         loss = sub_loss.mean().item()
-        client.tandem_lines('loss', step, [loss], fig_kwargs={'width':1800})
+        client.tandem_lines('loss', step, [loss, lr], fig_kwargs={'width':1800})
+
+        gnorms_map = run.model.grad_norms()
+        gnorms = [ norm.item() for norm in gnorms_map.values() ]
+        
+        client.tandem_lines('gnorms', step, gnorms, fig_kwargs={'width':1800})
+
         if step % report_every == 0:
             print(f', loss = {loss:5.4f}', flush=True)
 

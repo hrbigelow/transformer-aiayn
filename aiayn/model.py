@@ -3,6 +3,7 @@ import numpy as np
 import torch as t
 import torch.nn as nn
 from torch import optim
+from torch.linalg import vector_norm
 import torch.nn.functional as F
 from . import state
 from .data import load_token_histo
@@ -266,6 +267,12 @@ class Model(nn.Module):
         Needed for beam search
         """
         pass
+
+    def grad_norms(self):
+        """
+        Return a map of all parameter gradient norms
+        """
+        return { name: vector_norm(par.grad) for name, par in self.named_parameters() }
 
     def forward(self, enc_input, dec_input):
         """
