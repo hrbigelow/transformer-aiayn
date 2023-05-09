@@ -22,7 +22,7 @@ class HyperParams:
     T: int = 10000 # number of tokens
 
     # Section 5.4: Regularization (P_drop = 0.1)
-    dropout_rate: float = 0.0
+    dropout_rate: float = 0.1
 
     # mixture coefficient for positional encoding
     pos_encoding_factor: float = 0.01
