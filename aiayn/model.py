@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 import numpy as np
 import torch as t
 import torch.nn as nn
@@ -21,7 +22,7 @@ class HyperParams:
     T: int = 10000 # number of tokens
 
     # Section 5.4: Regularization (P_drop = 0.1)
-    dropout_rate: float = 0.1
+    dropout_rate: float = 0.0
 
     # mixture coefficient for positional encoding
     pos_encoding_factor: float = 0.01
@@ -268,11 +269,29 @@ class Model(nn.Module):
         """
         pass
 
-    def grad_norms(self):
+    def regex_params(self, pat):
         """
-        Return a map of all parameter gradient norms
+        For each parameter name matching pat, return:
+        name => (*captures)
         """
-        return { name: vector_norm(par.grad) for name, par in self.named_parameters() }
+        ret = {}
+        for name, par in self.named_parameters():
+            m = re.match(pat, name)
+            if m:
+                ret[name] = m.groups()
+        return ret
+
+    def grad_norms(self, pat):
+        """
+        Return a vector of gradient norms for all parameters matching pat.
+        Entries in the vector will be ordered by any tuple of match patterns
+        """
+        norms = []
+        for name, par in self.named_parameters():
+            m = re.match(pat, name)
+            if m:
+                norms.append((m.groups(), vector_norm(par.grad).item()))
+        return [ p for _, p in sorted(norms) ]
 
     def forward(self, enc_input, dec_input):
         """

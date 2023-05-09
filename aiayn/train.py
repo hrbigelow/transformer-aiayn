@@ -5,26 +5,76 @@ from . import data
 from . import state
 import torch
 from torch.optim import Adam
-from streamvis import Client
+from streamvis import DataLogger 
 
-def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
-        max_sentence_length, report_every=10, ckpt_every=1000, resume_ckpt=None,
-        compile_model=False):
+def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
+        report_every=10, ckpt_every=1000, resume_ckpt=None, compile_model=False,
+        pubsub_project: str = None, streamvis_log_file: str = None):
     """
-    pubsub_project_id: the GCP project with Cloud Pub/Sub API enabled
-    batch_size: SGD batch size
-    sub_batch_size: size used for a single forward pass to accumulate gradients.
-                    must be factor of batch_size
+    :param batch_size: SGD batch size
+    :param sub_batch_size: size used for a single forward pass to accumulate
+                           gradients.  must be factor of batch_size
+    :param data_path:
+           path to dataset prepared using python -m aiayn.data script
+    :param ckpt_templ: checkpoint file path containing literal {} to be substituted with 
+                       step value
+    :param max_sentence_length: skip data batches containing token sequences longer
+                                than this, to avoid OOM errors
+    :param report_every:
+           every number of steps to issue progress message to stdout
+    :param ckpt_every:
+           create a checkpoint every `ckpt_every` steps
+    :param resume_ckpt:
+           if present, resume from this checkpoint file
+    :param compile_model: obsolete (varying sentence length seems to prevent
+                                    effective compilation)
+    :param pubsub_project: the GCP project with Cloud Pub/Sub API enabled
+    :param streamvis_log_file: path to streamvis log file (optional) 
+
     """
+    if pubsub_project is None and streamvis_log_file is None:
+        raise RuntimeError(
+            f'At least one of `pubsub_project` or `streamvis_log_file` must be provided')
+
     if batch_size % sub_batch_size != 0:
         raise RuntimeError(f'batch_size = {batch_size} must be disivible by '
                 f'sub_batch_size = {sub_batch_size}')
 
-    client = Client('aiayn')
-    client.init_pubsub(pubsub_project_id, 'aiayn')
-    client.clear()
-    grid_map = dict(loss = (0,0,1,1), gnorms = (1,0,1,1))
-    client.set_layout(grid_map)
+    param_patterns = dict(
+        decoder_masked_attention = r'decoder.body.(\d+).mask_att..*',
+        decoder_attention2 = r'decoder.body.(\d+).att2..*',
+        decoder_feed_forward = r'decoder.body.(\d+).ff..*',
+        enc_attention_wq = r'encoder.body.(\d+).att.wq',
+        enc_attention_wk = r'encoder.body.(\d+).att.wk',
+        enc_attention_wv = r'encoder.body.(\d+).att.wv',
+        enc_feed_forward = r'encoder.body.(\d+).ff..*'
+        )
+
+    logger = DataLogger('aiayn')
+    if pubsub_project is not None:
+        logger.init_pubsub(pubsub_project, 'aiayn')
+
+    if streamvis_log_file is not None:
+        logger.init_write_log(streamvis_log_file)
+
+    logger.clear()
+
+    # (top, left, height, width)
+    grid_map = dict(
+            loss = (0,0,1,1),
+            decoder_masked_attention = (0,1,1,1),
+            decoder_attention2 = (1,0,1,1),
+            decoder_feed_forward = (1,1,1,1),
+            enc_attention_wq = (2,0,1,1),
+            enc_attention_wk = (2,1,1,1),
+            enc_attention_wv = (2,2,1,1),
+            enc_feed_forward = (2,3,1,1))
+    logger.set_layout(grid_map)
+
+    max_height, max_width = 900, 1800
+    grad_kwargs = dict(height=300, width=1800//5)
+    loss_kwargs = dict(height=300, width=1800)
+    cell_kwargs = dict(height=max_height // 3, width=max_width // 2)
 
     run = state.Run(
             model=model.StateModel(),
@@ -62,14 +112,17 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
 
     batch_shape = (hps.batch_size // hps.sub_batch_size, hps.sub_batch_size)
 
-
     inds_gen = iter(run.data)
     for epoch, step, inds in inds_gen:
         enc_input, dec_input, en_lengths, de_lengths = data.make_batch(ds, inds, 
                 tokenizer.pad_token_id, 'cuda')
+        mean_en = en_lengths.to(torch.float32).mean()
+        mean_de = de_lengths.to(torch.float32).mean()
+        # print(mean_en)
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
-        if max(en_range[1], de_range[1]) > max_sentence_length:
+        longest_sentence = max(en_range[1], de_range[1])
+        if longest_sentence > max_sentence_length:
             print(f'step {step}: skipping en = {en_range}, de = {de_range}')
             continue
 
@@ -98,12 +151,12 @@ def main(pubsub_project_id, batch_size, sub_batch_size, data_path, ckpt_templ,
         run.sched.update(step)
 
         loss = sub_loss.mean().item()
-        client.tandem_lines('loss', step, [loss, lr], fig_kwargs={'width':1800})
+        loss_metrics = [loss, en_lengths.sum().item() / loss, de_lengths.sum().item() / loss]
+        logger.tandem_lines('loss', step, loss_metrics, 'Viridis256', fig_kwargs=cell_kwargs)
 
-        gnorms_map = run.model.grad_norms()
-        gnorms = [ norm.item() for norm in gnorms_map.values() ]
-        
-        client.tandem_lines('gnorms', step, gnorms, fig_kwargs={'width':1800})
+        for plot, pattern in param_patterns.items():
+            norms = run.model.grad_norms(pattern) 
+            logger.tandem_lines(plot, step, norms, 'Viridis256', fig_kwargs=cell_kwargs)
 
         if step % report_every == 0:
             print(f', loss = {loss:5.4f}', flush=True)
