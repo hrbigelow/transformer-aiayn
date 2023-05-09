@@ -151,7 +151,7 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
         run.sched.update(step)
 
         loss = sub_loss.mean().item()
-        loss_metrics = [loss, en_lengths.sum().item() / loss, de_lengths.sum().item() / loss]
+        loss_metrics = [loss]
         logger.tandem_lines('loss', step, loss_metrics, 'Viridis256', fig_kwargs=cell_kwargs)
 
         for plot, pattern in param_patterns.items():

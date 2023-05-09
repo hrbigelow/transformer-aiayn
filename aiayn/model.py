@@ -360,7 +360,10 @@ class Loss(nn.Module):
         dec_pred = dec_output[:,:-1,:]
         kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
         masked = kldiv * dec_mask
-        return masked.mean()
+        total_targets = dec_mask.sum()
+        # target_fraction = total_targets / dec_mask.numel()
+        # print(f'{total_targets=}, {target_fraction=}')
+        return masked.sum() / total_targets
 
 class StateOptim(state.State):
     def __init__(self):
