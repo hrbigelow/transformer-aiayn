@@ -13,6 +13,7 @@ import pdb
 def main(hps_keys='arch,reg,train,data', 
         data_path: str = None, 
         pubsub_project: str = None, 
+        pubsub_topic: str = None,
         streamvis_log_file: str = None, 
         **kwargs):
     """
@@ -34,6 +35,7 @@ def main(hps_keys='arch,reg,train,data',
     :param compile_model: obsolete (varying sentence length seems to prevent
                                     effective compilation)
     :param pubsub_project: the GCP project with Cloud Pub/Sub API enabled
+    :param pubsub_topic: the GCP topic associated with pubsub_project
     :param streamvis_log_file: path to streamvis log file (optional) 
 
     """
@@ -64,7 +66,7 @@ def main(hps_keys='arch,reg,train,data',
 
     logger = DataLogger('aiayn')
     if pubsub_project is not None:
-        logger.init_pubsub(pubsub_project, 'aiayn')
+        logger.init_pubsub(pubsub_project, pubsub_topic)
 
     if streamvis_log_file is not None:
         logger.init_write_log(streamvis_log_file)
