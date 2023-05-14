@@ -8,41 +8,8 @@ from torch.linalg import vector_norm
 import torch.nn.functional as F
 from . import state
 from .data import load_token_histo
+from . import hparams
 import pdb
-
-@dataclass
-class HyperParams:
-    # model architecture
-    H: int = 8 # heads
-    K: int = 64 # key (d_k in paper)
-    V: int = 64 # value (d_v in paper)
-    M: int = 512 # model (d_model in paper)
-    F: int = 2048 # feed-forward dimension (d_ff in paper)
-    num_layers: int = 6
-    T: int = 10000 # number of tokens
-
-    # Section 5.4: Regularization (P_drop = 0.1)
-    dropout_rate: float = 0.1
-
-    # mixture coefficient for positional encoding
-    pos_encoding_factor: float = 0.01
-
-    # training
-    batch_size: int = 32 # batch
-    adam_beta1: float = 0.9
-    adam_beta2: float = 0.98
-    adam_eps: float = 1e-9
-    warmup_steps: int = 4000
-
-    # other
-    random_seed: int = 982349820
-
-    # data
-    bin_size: int = 1000
-    dataset_size: int = None
-    data_path: str = None
-    pad_token_id: int = None
-
 
 class MultiHeadAttention(nn.Module):
     """
@@ -239,15 +206,15 @@ class Decoder(nn.Module):
         return out
 
 class Model(nn.Module):
-    def __init__(self, params=HyperParams()):
+    def __init__(self, hps):
         super().__init__()
         self.rng = t.Generator()
-        self.rng.manual_seed(params.random_seed)
-        self.embed_matrix = nn.Embedding(params.T,params.M)
-        self.encoder = Encoder(params, self.embed_matrix)
-        self.decoder = Decoder(params, self.embed_matrix)
-        token_histo = load_token_histo(params.data_path) 
-        self.loss = Loss(token_histo, params.pad_token_id) 
+        self.rng.manual_seed(hps.random_seed)
+        self.embed_matrix = nn.Embedding(hps.T,hps.M)
+        self.encoder = Encoder(hps, self.embed_matrix)
+        self.decoder = Decoder(hps, self.embed_matrix)
+        token_histo = load_token_histo(hps.data_path) 
+        self.loss = Loss(token_histo, hps.pad_token_id) 
 
     def total_params(self):
         # get total number of parameters
@@ -281,17 +248,69 @@ class Model(nn.Module):
                 ret[name] = m.groups()
         return ret
 
-    def grad_norms(self, pat):
+    def get_ordered_params(self, pat):
+        """
+        Return an ordered list of parameters matching pat.
+        Ordered according to any capture groups in pat.
+        """
+        params = []
+        for name, par in self.named_parameters():
+            m = re.match(pat, name)
+            if m:
+                params.append((m.groups(), name, par))
+        return [ (name, par) for _, name, par in sorted(params) ]
+
+    def zero_gradients(self, pat):
+        """
+        Zero gradients matching parameter name `pat`.
+        Return a map of the recorded gradients to restore later
+
+        Usage:
+
+        current_grads = zero_gradients(pat)
+
+        # compute gradients for given samples
+        loss.backward()
+
+        # add in gradients
+        self.add_gradients(current_grads)
+    
+        """
+        grads = {} 
+        params = self.get_ordered_params(pat)
+        for name, par in params:
+            if par.grad is None:
+                continue
+            grads[name] = par.grad.clone()
+            par.grad.zero_()
+        return grads
+
+    def add_gradients(self, grads):
+        """
+        Add previously saved gradients back.
+        Call this function if you are inspecting some gradients within an
+        accumulation loop
+        """
+        for name, grad in grads.items():
+            par = self.get_parameter(name)
+            with t.no_grad():
+                par.grad += grad
+
+    def grad_norms(self, pat, index_dims=None):
         """
         Return a vector of gradient norms for all parameters matching pat.
         Entries in the vector will be ordered by any tuple of match patterns
         """
+        if index_dims is None:
+            index_dims = tuple()
+
+        params = self.get_ordered_params(pat)
         norms = []
-        for name, par in self.named_parameters():
-            m = re.match(pat, name)
-            if m:
-                norms.append((m.groups(), vector_norm(par.grad).item()))
-        return [ p for _, p in sorted(norms) ]
+
+        for name, par in params:
+            dims = [d for d in range(par.grad.ndim) if d not in index_dims]
+            norms.append(vector_norm(par.grad, dim=dims))
+        return norms
 
     def forward(self, enc_input, dec_input):
         """
@@ -390,6 +409,7 @@ class StateOptim(state.State):
 class CustomScheduler(state.State):
     def __init__(self):
         super().__init__()
+        self.step = 0 
 
     def make(self, params, saved_state, optimizer):
         # from section 5.3, page 7, equation 3
@@ -401,6 +421,7 @@ class CustomScheduler(state.State):
         return self
 
     def update(self, step): 
+        self.step = step
         ord_step = step + 1
         factor = min(ord_step ** -0.5, ord_step * self.warmup_steps ** -1.5)
         new_lr = self.M ** -0.5 * factor

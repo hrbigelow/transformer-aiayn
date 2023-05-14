@@ -1,15 +1,20 @@
+import signal
+import sys
 import fire
 import numpy as np
-from . import model
-from . import data
-from . import state
+from aiayn import model, data, state
 import torch
 from torch.optim import Adam
 from streamvis import DataLogger 
+from aiayn.hparams import setup_hparams, Hyperparams
 
-def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
-        report_every=10, ckpt_every=1000, resume_ckpt=None, compile_model=False,
-        pubsub_project: str = None, streamvis_log_file: str = None):
+import pdb
+
+def main(hps_keys='arch,reg,train,data', 
+        data_path: str = None, 
+        pubsub_project: str = None, 
+        streamvis_log_file: str = None, 
+        **kwargs):
     """
     :param batch_size: SGD batch size
     :param sub_batch_size: size used for a single forward pass to accumulate
@@ -32,13 +37,20 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
     :param streamvis_log_file: path to streamvis log file (optional) 
 
     """
+    if 'ckpt_file' in kwargs:
+        hps = Hyperparams(kwargs)
+        if 'random_seed' not in hps:
+            hps.random_seed = 2507
+    else:
+        kwargs['data_path'] = data_path
+        hps = setup_hparams(hps_keys, kwargs)
+
     if pubsub_project is None and streamvis_log_file is None:
         raise RuntimeError(
             f'At least one of `pubsub_project` or `streamvis_log_file` must be provided')
 
-    if batch_size % sub_batch_size != 0:
-        raise RuntimeError(f'batch_size = {batch_size} must be disivible by '
-                f'sub_batch_size = {sub_batch_size}')
+    if hps.batch_size % hps.sub_batch_size != 0:
+        raise RuntimeError(f'{hps.batch_size=} must be disivible by {hps.sub_batch_size=}')
 
     param_patterns = dict(
         decoder_masked_attention = r'decoder.body.(\d+).mask_att..*',
@@ -57,25 +69,6 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
     if streamvis_log_file is not None:
         logger.init_write_log(streamvis_log_file)
 
-    logger.clear()
-
-    # (top, left, height, width)
-    grid_map = dict(
-            loss = (0,0,1,1),
-            decoder_masked_attention = (0,1,1,1),
-            decoder_attention2 = (1,0,1,1),
-            decoder_feed_forward = (1,1,1,1),
-            enc_attention_wq = (2,0,1,1),
-            enc_attention_wk = (2,1,1,1),
-            enc_attention_wv = (2,2,1,1),
-            enc_feed_forward = (2,3,1,1))
-    logger.set_layout(grid_map)
-
-    max_height, max_width = 900, 1800
-    grad_kwargs = dict(height=300, width=1800//5)
-    loss_kwargs = dict(height=300, width=1800)
-    cell_kwargs = dict(height=max_height // 3, width=max_width // 2)
-
     run = state.Run(
             model=model.StateModel(),
             data=data.Data(),
@@ -84,28 +77,37 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
     run.add_deps('sched', 'opt')
     run.add_deps('opt', 'model')
 
-    ds = data.get_dataset(data_path)
+    ds = data.get_dataset(hps.data_path)
     tokenizer = data.get_tokenizer()
     print(f'Prepared dataset')
 
-    if resume_ckpt is None:
-        hps = model.HyperParams()
-        hps.T = len(tokenizer)
-        hps.batch_size = batch_size
-        hps.sub_batch_size = sub_batch_size
-        hps.dataset_size = len(ds)
-        hps.data_path = data_path
-        hps.pad_token_id = tokenizer.pad_token_id
-        run.init(hps)
-    else:
-        path = ckpt_templ.format(resume_ckpt)
+    if hps.resume_ckpt:
+        path = hps.ckpt_templ.format(hps.resume_ckpt)
         print(f'Resuming from {path}')
         run.load(path)
+    else:
+        hps.T = len(tokenizer)
+        hps.dataset_size = len(ds)
+        hps.pad_token_id = tokenizer.pad_token_id
+        run.init(hps)
 
     if torch.cuda.get_device_capability() >= (7,0):
-        if compile_model:
+        if hps.compile_model:
             print('Compiling model')
             run.model = torch.compile(run.model)
+
+    print(hps)
+
+    def shutdown_handler(signum, frame):
+        logger.shutdown()
+        path = hps.ckpt_templ.format(run.sched.step)
+        run.save(path)
+        print(f'Saved final checkpoint to {path}')
+        print(f'Exiting after receiving {signal.Signals(signum).name}')
+        sys.exit(0)
+
+    # signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
 
     run.to(torch.device('cuda'))
     run.sched.update(0)
@@ -122,51 +124,81 @@ def main(batch_size, sub_batch_size, data_path, ckpt_templ, max_sentence_length,
         en_range = (en_lengths.min().item(), en_lengths.max().item())
         de_range = (de_lengths.min().item(), de_lengths.max().item())
         longest_sentence = max(en_range[1], de_range[1])
-        if longest_sentence > max_sentence_length:
+        if longest_sentence > hps.max_sentence_length:
             print(f'step {step}: skipping en = {en_range}, de = {de_range}')
             continue
 
         lr = run.sched.current_lr()
-        if step % report_every == 0:
+        if step % hps.report_every == 0:
             print(f'epoch = {epoch}, step = {step}, '
                     f'en = {en_range}, de = {de_range}, '
                     f'lr = {lr:7.6f}', end='', flush=True) 
         
         enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
         dec_input = dec_input.reshape(*batch_shape, *dec_input.shape[1:])
-        run.model.zero_grad()
 
         sub_loss = torch.zeros(batch_shape[0])
 
+        enc_layer0 = r'encoder.body.0.att.wq'
+        layer0_norms = torch.empty(batch_shape)
+
+        # accumulate gradients over sub-batches
+        batch_fraction = hps.sub_batch_size / hps.batch_size
+        run.model.zero_grad()
         for sub_batch in range(batch_shape[0]):
             sub_enc_input = enc_input[sub_batch]
             sub_dec_input = dec_input[sub_batch]
             sub_dec_output = run.model(sub_enc_input, sub_dec_input)
-            xent = run.model.loss(sub_dec_input, sub_dec_output)
+
+            # zero out specific gradients for later inspection
+            layer0_grads = run.model.zero_gradients(enc_layer0)
+
+            # scale loss by batch_fraction
+            xent = run.model.loss(sub_dec_input, sub_dec_output) * batch_fraction
+
+            # copy gradients
             xent.backward()
+
+            # norms: pat, B (only one pat here)
+            norms = run.model.grad_norms(enc_layer0, index_dims=(0,)) 
+            layer0_norms[sub_batch] = norms[0]
+
+            # add back copied gradients
+            run.model.add_gradients(layer0_grads)
+
             with torch.no_grad():
                 sub_loss[sub_batch] = xent.item()
 
+        # protect to avoid partial update
+        old_handler = signal.signal(signal.SIGTERM, None)
         run.opt.step()
         run.sched.update(step)
+        signal.signal(signal.SIGTERM, old_handler)
 
         loss = sub_loss.mean().item()
         loss_metrics = [loss]
-        logger.tandem_lines('loss', step, loss_metrics, 'Viridis256', fig_kwargs=cell_kwargs)
+        logger.tandem_lines('loss', step, loss_metrics, 'Viridis256')
+        logger.tandem_lines('lr', step, [lr], 'Viridis256')
+        logger.tandem_lines('epoch', step, [epoch])
+        logger.tandem_lines('en_lengths', step, en_lengths, 'Viridis256')
+        logger.tandem_lines('de_lengths', step, de_lengths, 'Viridis256')
 
+        layer0_norms = layer0_norms.reshape(hps.batch_size).cpu().numpy()
+        logger.tandem_lines('enc_layer0', step, layer0_norms, 'Viridis256')
+        """
         for plot, pattern in param_patterns.items():
             norms = run.model.grad_norms(pattern) 
-            logger.tandem_lines(plot, step, norms, 'Viridis256', fig_kwargs=cell_kwargs)
+            logger.tandem_lines(plot, step, norms, 'Viridis256')
+        """
 
-        if step % report_every == 0:
+        if step % hps.report_every == 0:
             print(f', loss = {loss:5.4f}', flush=True)
 
-        if step % ckpt_every == 0 and step > 0 and step != resume_ckpt:
-            path = ckpt_templ.format(step)
+        if step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt:
+            path = hps.ckpt_templ.format(step)
             print(f'Saving {path}', flush=True)
             run.save(path)
 
 if __name__ == '__main__':
     fire.Fire(main)
-
 
