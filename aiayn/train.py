@@ -166,7 +166,7 @@ def main(hps_keys='arch,reg,train,data',
             # layer0_norms[sub_batch,:] = norms[0]
 
             # add back copied gradients
-            run.model.add_gradients(layer0_grads)
+            # run.model.add_gradients(layer0_grads)
 
             with torch.no_grad():
                 sub_loss[sub_batch] = xent.item()
