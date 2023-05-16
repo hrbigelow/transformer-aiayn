@@ -153,7 +153,7 @@ def main(hps_keys='arch,reg,train,data',
             sub_dec_output = run.model(sub_enc_input, sub_dec_input)
 
             # zero out specific gradients for later inspection
-            layer0_grads = run.model.zero_gradients(enc_layer0)
+            # layer0_grads = run.model.zero_gradients(enc_layer0)
 
             # scale loss by batch_fraction
             xent = run.model.loss(sub_dec_input, sub_dec_output) * batch_fraction
@@ -162,8 +162,8 @@ def main(hps_keys='arch,reg,train,data',
             xent.backward()
 
             # norms: pat, B (only one pat here)
-            norms = run.model.grad_norms(enc_layer0, index_dims=(0,)) 
-            layer0_norms[sub_batch] = norms[0]
+            # norms = run.model.grad_norms(enc_layer0, index_dims=(0,)) 
+            # layer0_norms[sub_batch,:] = norms[0]
 
             # add back copied gradients
             run.model.add_gradients(layer0_grads)
@@ -172,7 +172,7 @@ def main(hps_keys='arch,reg,train,data',
                 sub_loss[sub_batch] = xent.item()
 
         # protect to avoid partial update
-        old_handler = signal.signal(signal.SIGTERM, None)
+        old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
         run.opt.step()
         run.sched.update(step)
         signal.signal(signal.SIGTERM, old_handler)
@@ -185,13 +185,11 @@ def main(hps_keys='arch,reg,train,data',
         logger.tandem_lines('en_lengths', step, en_lengths, 'Viridis256')
         logger.tandem_lines('de_lengths', step, de_lengths, 'Viridis256')
 
-        layer0_norms = layer0_norms.reshape(hps.batch_size).cpu().numpy()
-        logger.tandem_lines('enc_layer0', step, layer0_norms, 'Viridis256')
-        """
+        # layer0_norms = layer0_norms.reshape(hps.batch_size).cpu().numpy()
+        # logger.tandem_lines('enc_layer0', step, layer0_norms, 'Viridis256')
         for plot, pattern in param_patterns.items():
             norms = run.model.grad_norms(pattern) 
             logger.tandem_lines(plot, step, norms, 'Viridis256')
-        """
 
         if step % hps.report_every == 0:
             print(f', loss = {loss:5.4f}', flush=True)
