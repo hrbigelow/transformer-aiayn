@@ -309,7 +309,7 @@ class Model(nn.Module):
 
         for name, par in params:
             dims = [d for d in range(par.grad.ndim) if d not in index_dims]
-            norms.append(vector_norm(par.grad, dim=dims))
+            norms.append(vector_norm(par.grad, dim=dims).item())
         return norms
 
     def forward(self, enc_input, dec_input):

@@ -141,8 +141,8 @@ def main(hps_keys='arch,reg,train,data',
 
         sub_loss = torch.zeros(batch_shape[0])
 
-        enc_layer0 = r'encoder.body.0.att.wq'
-        layer0_norms = torch.empty(batch_shape)
+        # enc_layer0 = r'encoder.body.0.att.wq'
+        # layer0_norms = torch.empty(batch_shape)
 
         # accumulate gradients over sub-batches
         batch_fraction = hps.sub_batch_size / hps.batch_size
