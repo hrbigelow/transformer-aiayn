@@ -103,10 +103,6 @@ def tokenize_data(dataset, num_proc):
     ds.set_format('torch')
     return ds
 
-def cap_sentence_length(dataset, max_length, num_proc):
-    filt = lambda el: el['en_length'] <= max_length and el['de_length'] <= max_length
-    return dataset.filter(filt, num_proc=num_proc)
-
 def preprocess(cache_dir, data_dir, num_proc=8, shard=None):
     """
     """
@@ -133,8 +129,11 @@ def load_token_histo(data_path):
     histo = torch.load(f'{data_path}/de_token_histo.pt')
     return histo
 
-def get_dataset(data_path):
-    return datasets.load_from_disk(data_path)
+def get_dataset(data_path, max_sentence_length, num_proc):
+    ds = datasets.load_from_disk(data_path)
+    def filt(el):
+        return max(el['en_length'], el['de_length']) <= max_sentence_length
+    return ds.filter(filt, num_proc=num_proc)
 
 def inverse_mod(val, modulo):
     # amount needed to round up to nearest modulo
@@ -145,12 +144,26 @@ class BatchedSampler(torch.utils.data.Sampler):
     Infinitely generates batch_size batches of indices in range(dataset_size)
     uniformly, even if dataset_size % batch_size != 0.
     """
-    def __init__(self, dataset_size, batch_size, bin_size, rand_seed):
+    def __init__(self, dataset_size, batch_size, bin_size, rand_seed, shard,
+            num_shards):
+        """
+        batch_size: total number of samples for one step
+        bin_size: number of dataset entries in each sentence-length bin
+        shard: number in [0, num_shards) to shard the batch_size elements
+        num_shards: total number of shards (must evenly divide batch_size)
+        """
         super().__init__(data_source=None)
+        if batch_size % num_shards != 0:
+            raise RuntimeError(f'{batch_size=} is not evenly divisible by {num_shards=}')
+        if shard not in range(num_shards):
+            raise RuntimeError(f'{shard=} not in range [0, {num_shards=})')
+
         self.dataset_size = dataset_size 
         self.batch_size = batch_size
         self.bin_size = bin_size
         self.rng = np.random.mtrand.RandomState(rand_seed)
+        self.shard = shard
+        self.num_shards = num_shards
         self.offset = 0
         self.step = 0
         self.epoch = 0
@@ -166,6 +179,8 @@ class BatchedSampler(torch.utils.data.Sampler):
                 randstate=self.rng.get_state())
 
     def __iter__(self):
+        shard_size = self.batch_size // self.num_shards
+        shard_offset = self.shard * shard_size
         while True:
             main_inds = np.arange(self.offset, self.dataset_size)
             extra = inverse_mod(main_inds.shape[0], self.batch_size) 
@@ -175,8 +190,10 @@ class BatchedSampler(torch.utils.data.Sampler):
             self.offset = extra
             inds = shuffle_inner(inds, self.bin_size, self.rng)
             inds = shuffle_outer(inds, self.batch_size, self.rng)
-            for b in range(0, inds.shape[0], self.batch_size):
-                yield inds[b:b+self.batch_size]
+            # inds contains a whole epoch plus possible wrap-over to complete any
+            # partial batch
+            for b in range(shard_offset, inds.shape[0], self.batch_size):
+                yield inds[b:b+shard_size]
                 self.step += 1
             self.epoch += 1
 

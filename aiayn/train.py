@@ -1,3 +1,4 @@
+import os
 import signal
 import sys
 import fire
@@ -8,6 +9,13 @@ import torch
 from torch.optim import Adam
 from streamvis import DataLogger 
 from aiayn.hparams import setup_hparams, Hyperparams
+
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.parallel_loader as pl
+    import torch_xla.distributed.xla_multiprocessing as xmp
+except ImportError:
+    pass
 
 class Run(pause.Pause):
     """
@@ -31,24 +39,13 @@ class Run(pause.Pause):
         pad_token_id = token_info['pad_token_id']
         self.model = model.Model(params, token_info) 
 
-        ds = data.get_dataset(params.data_path)
-        ds = data.cap_sentence_length(ds, params.max_sentence_length, num_proc=4)
-
-        dataset_size = len(ds)
-        self.sampler = data.BatchedSampler(dataset_size, params.batch_size,
-                params.bin_size, params.random_seed)
-        self.loader = data.PadLoader(params.max_sentence_length, pad_token_id, ds,
-                self.sampler) 
         betas = params.adam_beta1, params.adam_beta2
         self.opt = Adam(self.model.parameters(), betas=betas, eps=params.adam_eps)
         self.sched = model.CustomScheduler(self.opt, params.M, params.warmup_steps)
 
         if params.use_xla:
-            import torch_xla.core.xla_model as xm
-            import torch_xla.distributed.parallel_loader as pl
-            import torch_xla.distributed.xla_multiprocessing as xmp
             self.serial_exec = xmp.MpSerialExecutor()
-            self.model = xmp.MpModelWrapper(self.model)
+            self.wrapped_model = xmp.MpModelWrapper(self.model)
 
         self.logger = DataLogger('aiayn')
         if params.pubsub_project is not None:
@@ -65,6 +62,30 @@ class Run(pause.Pause):
         self.sampler.load(state['sampler'])
         self.opt.load_state_dict(state['optim'])
 
+    def device_init(self, device):
+        """
+        Device specific initialization
+        If on single GPU, called once.
+        If on TPU, called in each spawned process
+        """
+        if self.use_xla:
+            shard, num_shards = xm.get_ordinal(), xm.xrt_world_size()
+            def get_ds():
+                return data.get_dataset(self.params.data_path,
+                        self.params.max_sentence_length, num_proc=4)
+            self.dataset = self.serial_exec.run(get_ds)
+            dataset_size = len(self.dataset)
+            self.sampler = data.BatchedSampler(dataset_size, self.params.batch_size,
+                    self.params.bin_size, self.params.random_seed, shard, num_shards)
+            pad_loader = data.PadLoader(self.params.max_sentence_length,
+                    self.model.pad_token_id, self.dataset, self.sampler) 
+            para_loader = pl.ParallelLoader(pad_loader, [device])
+            per_device_loader = para_loader.per_device_loader(device)
+            self.loader = per_device_loader
+            self.model = self.wrapped_model.to(device)
+        else:
+            pass
+
     def _get_state(self):
         state = {}
         state['model'] = self.model.get_state() 
@@ -80,16 +101,13 @@ class Run(pause.Pause):
 def _mp_fn(rank, run):
     torch.manual_seed(run.params.random_seed)
     device = xm.xla_device()
+    run.device_init(device)
 
     # run.model.to(device) doesn't work? 
-    run.model = run.model.to(device)
-    para_loader = pl.ParallelLoader(run.loader, [device])
-    per_device_loader = para_loader.per_device_loader(device)
-    run.xla_loader = per_device_loader
     train_loop_xla(run)
     
 def train_loop_xla(run):
-    for enc_input, dec_input, step, epoch in run.xla_loader:
+    for enc_input, dec_input, step, epoch in run.loader:
 
         lr = run.sched.current_lr()
         
@@ -108,8 +126,8 @@ def train_loop_xla(run):
         # accumulate gradients over sub-batches
         batch_fraction = run.params.sub_batch_size / run.params.batch_size
 
-        # run.opt.zero_grad() instead?
-        run.model.zero_grad()
+        run.opt.zero_grad()
+        # run.model.zero_grad()
 
         for sub_batch in range(batch_shape[0]):
             sub_enc_input = enc_input[sub_batch]
@@ -216,7 +234,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
         hps = setup_hparams(hps_keys, kwargs)
         run.init(hps)
     else:
-        print(f'Resuming from {path}')
+        # print(f'Resuming from {path}')
         run.load(resume_ckpt, **kwargs)
 
     print('Running with parameters:')
@@ -245,9 +263,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
 
-
     if run.params.use_xla:
-        xmp.spawn(_mp_fn, args=(), nprocs=8, start_method='fork')
+        num_cores = 8 if os.environ.get('TPU_NAME', None) else 1
+        xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
 
 
 if __name__ == '__main__':

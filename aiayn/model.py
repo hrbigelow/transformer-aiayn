@@ -210,12 +210,12 @@ class Model(nn.Module):
         self.rng = t.Generator()
         self.rng.manual_seed(hps.random_seed)
         token_histo = token_info['histo']
-        pad_token_id = token_info['pad_token_id']
+        self.pad_token_id = token_info['pad_token_id']
         T = token_histo.shape[0]
         self.embed_matrix = nn.Embedding(T,hps.M)
         self.encoder = Encoder(hps, self.embed_matrix)
         self.decoder = Decoder(hps, T, self.embed_matrix)
-        self.loss = Loss(token_histo, pad_token_id) 
+        self.loss = Loss(token_histo, self.pad_token_id) 
 
     def total_params(self):
         # get total number of parameters
