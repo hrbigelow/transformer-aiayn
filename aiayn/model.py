@@ -6,7 +6,6 @@ import torch.nn as nn
 from torch import optim
 from torch.linalg import vector_norm
 import torch.nn.functional as F
-from . import state
 from .data import load_token_histo
 from . import hparams
 import pdb
@@ -185,12 +184,12 @@ class TeeSequential(nn.Module):
         return out
 
 class Decoder(nn.Module):
-    def __init__(self, hps, embed_matrix):
+    def __init__(self, hps, T, embed_matrix):
         super().__init__()
         self.embed_layer = InputEmbedding(embed_matrix, hps)
         self.body = TeeSequential(*(DecoderLayer(hps) for _ in
             range(hps.num_layers)))
-        self.linear_final = nn.Linear(hps.M, hps.T)
+        self.linear_final = nn.Linear(hps.M, T)
         self.softmax = nn.Softmax(dim=2)
 
     def forward(self, enc_out, dec_in):
@@ -206,15 +205,17 @@ class Decoder(nn.Module):
         return out
 
 class Model(nn.Module):
-    def __init__(self, hps):
+    def __init__(self, hps, token_info):
         super().__init__()
         self.rng = t.Generator()
         self.rng.manual_seed(hps.random_seed)
-        self.embed_matrix = nn.Embedding(hps.T,hps.M)
+        token_histo = token_info['histo']
+        pad_token_id = token_info['pad_token_id']
+        T = token_histo.shape[0]
+        self.embed_matrix = nn.Embedding(T,hps.M)
         self.encoder = Encoder(hps, self.embed_matrix)
-        self.decoder = Decoder(hps, self.embed_matrix)
-        token_histo = load_token_histo(hps.data_path) 
-        self.loss = Loss(token_histo, hps.pad_token_id) 
+        self.decoder = Decoder(hps, T, self.embed_matrix)
+        self.loss = Loss(token_histo, pad_token_id) 
 
     def total_params(self):
         # get total number of parameters
@@ -312,6 +313,9 @@ class Model(nn.Module):
             norms.append(vector_norm(par.grad, dim=dims).item())
         return norms
 
+    def get_state(self):
+        return dict(weights=self.state_dict(), rng=self.rng.get_state())
+
     def forward(self, enc_input, dec_input):
         """
         enc_input: bc
@@ -321,22 +325,6 @@ class Model(nn.Module):
         enc_output = self.encoder(enc_input)
         dec_output = self.decoder(enc_output, dec_input)
         return dec_output
-
-class StateModel(state.State):
-    def __init__(self):
-        super().__init__()
-
-    def make(self, params, saved_state):
-        self.obj = Model(params)
-        if saved_state is not None:
-            self.obj.load_state_dict(saved_state['weights'])
-            self.obj.rng.set_state(saved_state['rng'])
-
-    def to(self, device):
-        return self.obj.to(device)
-
-    def state(self):
-        return dict(weights=self.obj.state_dict(), rng=self.obj.rng.get_state())
 
 class Loss(nn.Module):
     def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
@@ -384,41 +372,12 @@ class Loss(nn.Module):
         # print(f'{total_targets=}, {target_fraction=}')
         return masked.sum() / total_targets
 
-class StateOptim(state.State):
-    def __init__(self):
-        super().__init__()
-
-    def make(self, params, saved_state, model):
-        beta1 = params.adam_beta1
-        beta2 = params.adam_beta2
-        eps = params.adam_eps
-        self.obj = optim.Adam(model.parameters(), betas=(beta1, beta2), eps=eps)
-        if saved_state is not None:
-            self.obj.load_state_dict(saved_state['optim'])
-
-    def to(self, device):
-        sd = self.get().state_dict()
-        self.get().load_state_dict(sd)
-
-    def step(self):
-        self.get().step()
-
-    def state(self):
-        return dict(optim=self.get().state_dict())
-
-class CustomScheduler(state.State):
-    def __init__(self):
-        super().__init__()
-        self.step = 0 
-
-    def make(self, params, saved_state, optimizer):
+class CustomScheduler:
+    def __init__(self, optimizer, M, warmup_steps):
+        self.M = M
         # from section 5.3, page 7, equation 3
-        self.M = params.M
-        self.warmup_steps = params.warmup_steps
+        self.warmup_steps = warmup_steps
         self.optimizer = optimizer
-
-    def get(self):
-        return self
 
     def update(self, step): 
         self.step = step
@@ -430,7 +389,4 @@ class CustomScheduler(state.State):
 
     def current_lr(self):
         return self.optimizer.param_groups[0]['lr']
-
-    def state(self):
-        return {}
 

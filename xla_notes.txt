@@ -1,0 +1,23 @@
+main process (on the host node)
+
+- Instantiate the model
+- Instantiate the data loader 
+- Get the Dataset
+- Instantiate the wrapped model using xmp.MpModelWrapper (optional)
+- Instantiate an xmp.MpSerialExecutor()
+
+Within each spawned process, setup (the _mp_fn)
+
+- call torch.manual_seed(...)
+- obtain the device (xm.xla_device())
+- dataset = xmp.MpSerialExecutor.run(dataset) (optional)
+- move the model to the device
+- instantiate pl.ParallelLoader (pl.ParallelLoader(loader, [device])  )
+- obtain a per-device loader using para_loader.per_device_loader(device)
+- call the train_loop function
+
+Within each spawned process, train_loop:
+
+- call xm.optimizer_step(optimizer)
+
+

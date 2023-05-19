@@ -1,10 +1,10 @@
 import fire
 import numpy as np
-import torch as t
+import torch
+from torch.utils.data import Sampler
 from collections import defaultdict, Counter
 import datasets
 from transformers import GPT2TokenizerFast
-from . import state
 
 
 def token_histo(dataset, column):
@@ -13,15 +13,19 @@ def token_histo(dataset, column):
 
     # get histogram of tokens for token column
     def map_fn(toks, cts):
-        all_toks = t.cat(toks)
-        cts.scatter_add_(0, all_toks, t.ones_like(all_toks))
+        all_toks = torch.cat(toks)
+        cts.scatter_add_(0, all_toks, torch.ones_like(all_toks))
 
-    cts = t.zeros(vocab_size, dtype=t.int64)
+    cts = torch.zeros(vocab_size, dtype=torch.int64)
     kwargs = dict(cts=cts)
     # dataset = dataset.shard(100, 1)
     dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=kwargs)
             # with_rank=True, num_proc=num_proc)
-    return cts
+    return dict(
+            pad_token_id = tokenizer.pad_token_id,
+            bos_token_id = tokenizer.bos_token_id,
+            eos_token_id = tokenizer.eos_token_id,
+            histo = cts)
 
 def column_counts(dataset, column):
     def map_fn(examples, accu):
@@ -77,14 +81,14 @@ def tokenize_data(dataset, num_proc):
     
     def map_fn(examples, tokenizer):
         ret = dict()
-        bos_ten = t.tensor([tokenizer.vocab[BOS]])
-        eos_ten = t.tensor([tokenizer.vocab[EOS]])
+        bos_ten = torch.tensor([tokenizer.vocab[BOS]])
+        eos_ten = torch.tensor([tokenizer.vocab[EOS]])
         for col, text in examples.items():
             toks = []
             for s in text:
                 tok = tokenizer(s, return_tensors='pt')['input_ids']
                 # print(tok.shape)
-                tok = t.cat((bos_ten, tok[0], eos_ten))
+                tok = torch.cat((bos_ten, tok[0], eos_ten))
                 toks.append(tok)
             ret[f'{col}_tok'] = toks
             ret[f'{col}_length'] = [tok.shape[0] for tok in toks]
@@ -98,6 +102,10 @@ def tokenize_data(dataset, num_proc):
     ds = ds.sort('en_length')
     ds.set_format('torch')
     return ds
+
+def cap_sentence_length(dataset, max_length, num_proc):
+    filt = lambda el: el['en_length'] <= max_length and el['de_length'] <= max_length
+    return dataset.filter(filt, num_proc=num_proc)
 
 def preprocess(cache_dir, data_dir, num_proc=8, shard=None):
     """
@@ -116,13 +124,13 @@ def preprocess(cache_dir, data_dir, num_proc=8, shard=None):
 
     print(f'Computing token histo')
     de_token_histo = token_histo(ds, 'de_tok')
-    t.save(de_token_histo, f'{data_dir}/de_token_histo.pt')
+    torch.save(de_token_histo, f'{data_dir}/de_token_histo.pt')
 
     print(f'Saving dataset to {data_dir}.  Columns: {ds.column_names}')
     ds.save_to_disk(data_dir)
 
 def load_token_histo(data_path):
-    histo = t.load(f'{data_path}/de_token_histo.pt')
+    histo = torch.load(f'{data_path}/de_token_histo.pt')
     return histo
 
 def get_dataset(data_path):
@@ -132,32 +140,26 @@ def inverse_mod(val, modulo):
     # amount needed to round up to nearest modulo
     return - (val % -modulo)
 
-class Data(state.State):
+class BatchedSampler(torch.utils.data.Sampler):
     """
     Infinitely generates batch_size batches of indices in range(dataset_size)
-    uniformly, even if dataset_size % batch_size != 0
+    uniformly, even if dataset_size % batch_size != 0.
     """
-    def __init__(self):
-        super().__init__()
+    def __init__(self, dataset_size, batch_size, bin_size, rand_seed):
+        super().__init__(data_source=None)
+        self.dataset_size = dataset_size 
+        self.batch_size = batch_size
+        self.bin_size = bin_size
+        self.rng = np.random.mtrand.RandomState(rand_seed)
+        self.offset = 0
+        self.step = 0
+        self.epoch = 0
 
-    def make(self, params, saved_state):
-        self.rng = np.random.mtrand.RandomState(params.random_seed)
-        self.batch_size = params.batch_size
-        self.bin_size = params.bin_size
-        self.dataset_size = params.dataset_size
-
-        if saved_state is None:
-            self.offset = 0
-            self.step = 0
-            self.epoch = 0
-        else:
-            self.rng.set_state(saved_state['randstate'])
-            self.offset = saved_state['offset']
-            self.step = saved_state['step']
-            self.epoch = saved_state['epoch']
-
-    def get(self):
-        return self
+    def load(self, state):
+        self.rng.set_state(state['randstate'])
+        self.offset = state['offset']
+        self.step = state['step']
+        self.epoch = state['epoch']
 
     def state(self):
         return dict(offset=self.offset, step=self.step, epoch=self.epoch,
@@ -174,25 +176,32 @@ class Data(state.State):
             inds = shuffle_inner(inds, self.bin_size, self.rng)
             inds = shuffle_outer(inds, self.batch_size, self.rng)
             for b in range(0, inds.shape[0], self.batch_size):
-                yield self.epoch, self.step, inds[b:b+self.batch_size]
+                yield inds[b:b+self.batch_size]
                 self.step += 1
             self.epoch += 1
 
-def make_batch(dataset, inds, pad_value, device):
+class PadLoader(torch.utils.data.DataLoader):
     """
     """
-    entries = dataset[inds]
-    def _padded_stack(tensors, pad_value):
-        max_len = max(ten.shape[0] for ten in tensors)
-        st_lengths = t.tensor([ten.shape[0] for ten in tensors])
-        st = t.full((len(tensors), max_len), pad_value, dtype=t.int64)
-        for i, ten in enumerate(tensors):
-            st[i,:ten.shape[0]] = ten 
-        return st, st_lengths
+    def __init__(self, max_length, pad_value, dataset, sampler):
+        super().__init__(dataset=dataset, batch_sampler=sampler, collate_fn=self.collate)
+        self.max_length = max_length
+        self.pad_value = pad_value
 
-    en, en_lengths = _padded_stack(entries['en_tok'], pad_value)
-    de, de_lengths = _padded_stack(entries['de_tok'], pad_value)
-    return en.to(device), de.to(device), en_lengths, de_lengths
+    def collate(self, samples):
+        def _padded_stack(samples, column_name):
+            shape = self.batch_sampler.batch_size, self.max_length
+            st = torch.full(shape, self.pad_value, dtype=torch.int64)
+            for i, sample in enumerate(samples):
+                ten = sample[column_name]
+                st[i,:ten.shape[0]] = ten 
+            return st
+
+        en = _padded_stack(samples, 'en_tok')
+        de = _padded_stack(samples, 'de_tok')
+        step = self.batch_sampler.step
+        epoch = self.batch_sampler.epoch
+        return en, de, step, epoch
 
 
 if __name__ == '__main__':

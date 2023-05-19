@@ -45,8 +45,7 @@ arch = Hyperparams(
     V = 64, # value (d_v in paper)
     M = 512, # model (d_model in paper)
     F = 2048, # feed-forward dimension (d_ff in paper)
-    num_layers = 6,
-    T = None # number of tokens
+    num_layers = 6
 )
 
 reg = Hyperparams(
@@ -66,9 +65,16 @@ train = Hyperparams(
     warmup_steps = 4000,
     random_seed = 982349820,
     ckpt_every = 5000,
-    report_every = 100,
     resume_ckpt = None,
-    ckpt_templ = None
+    ckpt_templ = None,
+    use_xla = False
+    )
+
+logging = Hyperparams(
+    report_every = 100,
+    pubsub_project = None,
+    pubsub_topic = None,
+    streamvis_log_file = None
     )
 
 data = Hyperparams(
@@ -84,9 +90,11 @@ HPARAMS_REGISTRY['arch'] = arch
 HPARAMS_REGISTRY['reg'] = reg
 HPARAMS_REGISTRY['train'] = train
 HPARAMS_REGISTRY['data'] = data
+HPARAMS_REGISTRY['logging'] = logging 
 
 DEFAULTS['arch'] = arch
 DEFAULTS['reg'] = reg
 DEFAULTS['train'] = train
 DEFAULTS['data'] = data
+DEFAULTS['logging'] = logging
 
