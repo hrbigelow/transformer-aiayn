@@ -249,10 +249,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
 
     def shutdown_handler(signum, frame):
         run.logger.shutdown()
-        path = run.params.ckpt_templ.format(run.sched.step)
-        run.save(path)
-        print(f'Saved final checkpoint to {path}')
-        print(f'Exiting after receiving {signal.Signals(signum).name}')
+        if run.sched.step > 1000:
+            path = run.params.ckpt_templ.format(run.sched.step)
+            run.save(path)
         sys.exit(0)
 
     # signal.signal(signal.SIGINT, shutdown_handler)

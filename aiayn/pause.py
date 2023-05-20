@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
 from inspect import signature
 from collections import OrderedDict
+try:
+    import torch_xla.core.xla_model as xm
+except ImportError:
+    pass
 
 class Pause(ABC):
     """
