@@ -138,7 +138,7 @@ def train_loop_xla(run):
         # layer0_norms = torch.empty(batch_shape)
 
         # accumulate gradients over sub-batches
-        batch_fraction = run.params.sub_batch_size / run.params.batch_size
+        sub_batch_fraction = run.params.sub_batch_size / run.shard_size
 
         run.opt.zero_grad()
         # run.model.zero_grad()
@@ -152,7 +152,7 @@ def train_loop_xla(run):
             # layer0_grads = run.model.zero_gradients(enc_layer0)
 
             # scale loss by batch_fraction
-            xent = run.model.loss(sub_dec_input, sub_dec_output) * batch_fraction
+            xent = run.model.loss(sub_dec_input, sub_dec_output) * sub_batch_fraction 
 
             # copy gradients
             xent.backward()
@@ -169,6 +169,8 @@ def train_loop_xla(run):
 
         # protect to avoid partial update
         old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+        # this averages gradients?
         xm.optimizer_step(run.opt)
         # run.opt.step()
         run.sched.update(step)

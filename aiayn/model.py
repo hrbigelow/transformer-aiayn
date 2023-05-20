@@ -217,7 +217,7 @@ class Model(nn.Module):
         self.embed_matrix = nn.Embedding(T,hps.M)
         self.encoder = Encoder(hps, self.embed_matrix)
         self.decoder = Decoder(hps, T, self.embed_matrix)
-        self.loss = Loss(token_histo, self.pad_token_id) 
+        self.loss = Loss(token_histo, T, self.pad_token_id) 
 
     def total_params(self):
         # get total number of parameters
@@ -329,7 +329,7 @@ class Model(nn.Module):
         return dec_output
 
 class Loss(nn.Module):
-    def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
+    def __init__(self, token_histo, T, pad_value, smoothing_eps=0.1):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
@@ -338,7 +338,7 @@ class Loss(nn.Module):
         self.pad_value = pad_value
         token_histo = F.normalize(token_histo.to(t.float64), p=1.0, dim=0)
         self.register_buffer('u', token_histo, persistent=False)
-        self.vocab_size = self.u.shape[0]
+        self.vocab_size = T 
 
     @staticmethod
     def kldiv(q, p, axis):
