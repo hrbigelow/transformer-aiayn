@@ -67,3 +67,8 @@ class Pause(ABC):
         else:
             torch.save(ckpt, path)
 
+        if self.use_xla and not xm.is_master_ordinal():
+            return
+        print(f'Saved final checkpoint to {path}')
+        print(f'Exiting after receiving {signal.Signals(signum).name}')
+
