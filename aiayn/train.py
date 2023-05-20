@@ -70,6 +70,11 @@ class Run(pause.Pause):
         """
         if self.use_xla:
             shard, num_shards = xm.get_ordinal(), xm.xrt_world_size()
+            if self.params.batch_size % num_shards != 0:
+                raise RuntimeError(
+                    f'batch_size {self.params.batch_size} not divisible by {num_shards=}')
+            self.shard_size = self.params.batch_size // num_shards
+
             def get_ds():
                 return data.get_dataset(self.params.data_path,
                         self.params.max_sentence_length, num_proc=4)
@@ -83,6 +88,7 @@ class Run(pause.Pause):
             per_device_loader = para_loader.per_device_loader(device)
             self.loader = per_device_loader
             self.model = self.wrapped_model.to(device)
+            print(f'Run::device_init: {shard=}, {num_shards=}', flush=True)
         else:
             pass
 
@@ -107,11 +113,12 @@ def _mp_fn(rank, run):
     train_loop_xla(run)
     
 def train_loop_xla(run):
+    print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
     for enc_input, dec_input, step, epoch in run.loader:
 
         lr = run.sched.current_lr()
         
-        batch_shape = (run.params.batch_size // run.params.sub_batch_size,
+        batch_shape = (run.shard_size // run.params.sub_batch_size,
                 run.params.sub_batch_size)
 
         # allows sub-batching

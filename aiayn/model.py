@@ -25,6 +25,8 @@ class MultiHeadAttention(nn.Module):
         self.scale_factor = np.sqrt(hps.K)
         self.M = hps.M
         self.masked = masked
+        # TODO: incorporate this into forward (use masked_fill)
+        self.register_buffer('triu', t.triu(t.ones(hps.M, hps.M)))
 
     def forward(self, kvinput, qinput):
         """
