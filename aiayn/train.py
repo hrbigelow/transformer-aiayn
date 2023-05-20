@@ -158,7 +158,7 @@ def train_loop_xla(run):
             # run.model.add_gradients(layer0_grads)
 
             with torch.no_grad():
-                sub_loss[sub_batch] = xent.item()
+                sub_loss[sub_batch:sub_batch+1] = xent
 
         # protect to avoid partial update
         old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
