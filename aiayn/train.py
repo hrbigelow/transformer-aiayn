@@ -73,7 +73,14 @@ class Run(pause.Pause):
             if self.params.batch_size % num_shards != 0:
                 raise RuntimeError(
                     f'batch_size {self.params.batch_size} not divisible by {num_shards=}')
+
             self.shard_size = self.params.batch_size // num_shards
+            if self.shard_size % self.params.sub_batch_size != 0:
+                raise RuntimeError(
+                    f'shard_size {self.shard_size} not divisible by sub_batch_size '
+                    f'{self.params.sub_batch_size}.  shard_size is equal to '
+                    f'batch_size // num_shards '
+                    f'({self.params.batch_size} // {num_shards})')
 
             def get_ds():
                 return data.get_dataset(self.params.data_path,
