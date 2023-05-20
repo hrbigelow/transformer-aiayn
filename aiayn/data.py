@@ -160,6 +160,7 @@ class BatchedSampler(torch.utils.data.Sampler):
 
         self.dataset_size = dataset_size 
         self.batch_size = batch_size
+        self.shard_size = batch_size // num_shards
         self.bin_size = bin_size
         self.rng = np.random.mtrand.RandomState(rand_seed)
         self.shard = shard
@@ -179,8 +180,7 @@ class BatchedSampler(torch.utils.data.Sampler):
                 randstate=self.rng.get_state())
 
     def __iter__(self):
-        shard_size = self.batch_size // self.num_shards
-        shard_offset = self.shard * shard_size
+        shard_offset = self.shard * self.shard_size
         while True:
             main_inds = np.arange(self.offset, self.dataset_size)
             extra = inverse_mod(main_inds.shape[0], self.batch_size) 
@@ -193,7 +193,7 @@ class BatchedSampler(torch.utils.data.Sampler):
             # inds contains a whole epoch plus possible wrap-over to complete any
             # partial batch
             for b in range(shard_offset, inds.shape[0], self.batch_size):
-                yield inds[b:b+shard_size]
+                yield inds[b:b+self.shard_size]
                 self.step += 1
             self.epoch += 1
 
@@ -207,7 +207,7 @@ class PadLoader(torch.utils.data.DataLoader):
 
     def collate(self, samples):
         def _padded_stack(samples, column_name):
-            shape = self.batch_sampler.batch_size, self.max_length
+            shape = self.batch_sampler.shard_size, self.max_length
             st = torch.full(shape, self.pad_value, dtype=torch.int64)
             for i, sample in enumerate(samples):
                 ten = sample[column_name]
