@@ -318,6 +318,20 @@ class Model(nn.Module):
     def get_state(self):
         return dict(weights=self.state_dict(), rng=self.rng.get_state())
 
+    def __getstate__(self):
+        """
+        Provided for pickle since torch.Generator cannot be pickled
+        """
+        d = dict.copy(self.__dict__)
+        d['rng'] = self.rng.get_state()
+        return d
+
+    def __setstate__(self, state):
+        gen = t.Generator()
+        gen.set_state(state['rng'])
+        state['rng'] = gen
+        self.__dict__.update(state)
+
     def forward(self, enc_input, dec_input):
         """
         enc_input: bc
