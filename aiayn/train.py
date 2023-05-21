@@ -12,6 +12,7 @@ from aiayn.hparams import setup_hparams, Hyperparams
 
 try:
     import torch_xla.core.xla_model as xm
+    import torch_xla.debug.metrics as met
     import torch_xla.distributed.parallel_loader as pl
     import torch_xla.distributed.xla_multiprocessing as xmp
 except ImportError:
@@ -167,6 +168,7 @@ def train_loop_xla(run):
             with torch.no_grad():
                 sub_loss[sub_batch:sub_batch+1] = xent
 
+
         # protect to avoid partial update
         old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
@@ -200,6 +202,8 @@ def train_loop_xla(run):
             print(f'Saving {path}', flush=True)
             run.save(path)
 
+        if step % 50 == 0 and step > 0:
+            xm.master_print(met.metrics_report(), flush=True)
 
 def main(hps_keys: str = 'arch,reg,train,data,logging' , 
         resume_ckpt: str = None,
