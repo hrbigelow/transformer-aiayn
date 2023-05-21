@@ -295,7 +295,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
     if run.params.use_xla:
         # num_cores = 8 if os.environ.get('TPU_NAME', None) else 1
         # xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
-        xmp.spawn(_mp_fn, args=(run,), nprocs=1)
+        xmp.spawn(_mp_fn, args=(run,), nprocs=None)
 
 
 if __name__ == '__main__':
