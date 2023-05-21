@@ -96,6 +96,11 @@ class Run(pause.Pause):
             per_device_loader = para_loader.per_device_loader(device)
             self.loader = per_device_loader
             self.model = self.wrapped_model.to(device)
+            if self.params.compile_backend is not None:
+                import torch._dynamo
+                torch._dynamo.config.verbose=True
+                self.model = torch.compile(self.model,
+                        backend=self.params.compile_backend)
             print(f'Run::device_init: {shard=}, {num_shards=}', flush=True)
         else:
             pass
@@ -217,7 +222,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
         pubsub_project: str = None,
         pubsub_topic: str = None,
         streamvis_log_file: str = None,
-        use_xla: bool = False):
+        use_xla: bool = False,
+        compile_backend: str = None):
     """
     :param resume_ckpt:
            if present, resume from this checkpoint
@@ -239,8 +245,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
            every number of steps to issue progress message to stdout
     :param ckpt_every:
            create a checkpoint every `ckpt_every` steps
-    :param compile_model: obsolete (varying sentence length seems to prevent
-                                    effective compilation)
+    :param compile_backend: torch.compile backend name to use.  Do not compile if None 
     :param use_xla: if True, configure to run on TPU using torch_xla (otherwise GPU)
     """
     kwargs = { k: v for k, v in locals().items() if v is not None }
