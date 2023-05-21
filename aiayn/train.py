@@ -6,6 +6,7 @@ import numpy as np
 from aiayn import model, data, pause
 from aiayn.data import load_token_histo
 import torch
+import torch.distributed as dist
 from torch.optim import Adam
 from streamvis import DataLogger 
 from aiayn.hparams import setup_hparams, Hyperparams
@@ -15,6 +16,7 @@ try:
     import torch_xla.debug.metrics as met
     import torch_xla.distributed.parallel_loader as pl
     import torch_xla.distributed.xla_multiprocessing as xmp
+    import torch_xla.experimental.pjrt_backend
 except ImportError:
     pass
 
@@ -69,7 +71,9 @@ class Run(pause.Pause):
         If on single GPU, called once.
         If on TPU, called in each spawned process
         """
+
         if self.use_xla:
+            dist.init_process_group('xla', init_method='pjrt://')
             shard, num_shards = xm.get_ordinal(), xm.xrt_world_size()
             if self.params.batch_size % num_shards != 0:
                 raise RuntimeError(
