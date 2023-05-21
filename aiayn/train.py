@@ -255,6 +255,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
 
     print('Running with parameters:')
     print(run.params)
+    print(f'Total model params: {run.model.total_params()}')
 
     def shutdown_handler(signum, frame):
         run.logger.shutdown()

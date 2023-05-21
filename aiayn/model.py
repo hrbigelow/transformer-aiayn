@@ -334,11 +334,13 @@ class Loss(nn.Module):
         page 8, Label Smoothing: using eps = 0.1
         """
         super().__init__()
-        self.eps = smoothing_eps
+        # self.eps = smoothing_eps
         self.pad_value = pad_value
         token_histo = F.normalize(token_histo.to(t.float64), p=1.0, dim=0)
         self.register_buffer('u', token_histo, persistent=False)
-        self.vocab_size = T 
+        self.register_buffer('eps', t.tensor(smoothing_eps), persistent=False)
+        # self.register_buffer('vocab_size', t.tensor(T), persistent=False)
+        self.T = T 
 
     @staticmethod
     def kldiv(q, p, axis):
@@ -351,8 +353,11 @@ class Loss(nn.Module):
         labels: bc
         returns: bct
         """
-        labels = F.one_hot(labels, self.vocab_size)
-        smoothed = (1.0 - self.eps) * labels + self.eps * self.u
+        B, C = labels.shape
+        zeros = t.zeros(B, C, self.T, device=labels.device)
+        ones = t.ones(B, C, self.T, device=labels.device)
+        one_hot = t.scatter(zeros, 2, labels.unsqueeze(-1), ones)
+        smoothed = (1.0 - self.eps) * one_hot + self.eps * self.u
         return smoothed
 
     def forward(self, dec_input, dec_output):
