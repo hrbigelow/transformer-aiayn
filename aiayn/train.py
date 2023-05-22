@@ -39,6 +39,7 @@ class Run(pause.Pause):
                 f'{params.batch_size=} must be disivible by {params.sub_batch_size=}')
 
     def _make(self, params, state=None):
+        torch.manual_seed(self.params.random_seed)
         token_info = load_token_histo(params.data_path) 
         pad_token_id = token_info['pad_token_id']
         self.model = model.Model(params, token_info) 
@@ -130,7 +131,6 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
         dist.init_process_group('xla', init_method='pjrt://')
     # signal.signal(signal.SIGINT, test_handler)
     run = Run(True)
-    torch.manual_seed(run.params.random_seed)
 
     if resume_ckpt is None:
         hps_keys = hps_overrides.pop('hps_keys')
