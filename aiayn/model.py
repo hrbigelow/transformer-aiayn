@@ -322,6 +322,7 @@ class Model(nn.Module):
         """
         Provided for pickle since torch.Generator cannot be pickled
         """
+        print('in Model::__getstate__')
         d = dict.copy(self.__dict__)
         d['rng'] = self.rng.get_state()
         return d

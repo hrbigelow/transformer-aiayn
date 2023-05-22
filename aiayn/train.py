@@ -1,5 +1,6 @@
 import os
 import signal
+import queue
 import sys
 import fire
 import numpy as np
@@ -122,9 +123,28 @@ class Run(pause.Pause):
         # self.loader.dataset.to(device)
         # self.opt.to(device)
 
-def _mp_fn(rank, run):
+def test_handler(signum, frame):
+    print(f'in test_handler')
+
+def _mp_fn(rank, resume_ckpt, hps_overrides):
+    # signal.signal(signal.SIGINT, test_handler)
+    run = Run(hps_overrides['use_xla'])
+    if resume_ckpt is None:
+        hps_keys = hps_overrides.pop('hps_keys')
+        hps = setup_hparams(hps_keys, hps_overrides)
+        run.init(hps)
+    else:
+        # print(f'Resuming from {path}')
+        run.load(resume_ckpt, **hps_overrides)
+
     torch.manual_seed(run.params.random_seed)
     device = xm.xla_device()
+
+    xm.master_print('Running with parameters:')
+    xm.master_print(run.params)
+    xm.master_print(f'Total model params: {run.model.total_params()}')
+
+    run.sched.update(0)
     run.device_init(device)
 
     # run.model.to(device) doesn't work? 
@@ -178,15 +198,25 @@ def train_loop_xla(run):
             with torch.no_grad():
                 sub_loss[sub_batch:sub_batch+1] = xent
 
-
         # protect to avoid partial update
-        old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
         # this averages gradients?
         xm.optimizer_step(run.opt)
         # run.opt.step()
         run.sched.update(step)
-        signal.signal(signal.SIGTERM, old_handler)
+        # signal.signal(signal.SIGTERM, old_handler)
+        """
+        if xm.is_master_ordinal():
+            try:
+                msg = queue.get(block=False)
+                if msg is not None:
+                    print(f'received parent message {msg=}, shutting down.')
+                    q.put('child shutdown complete')
+                    sys.exit(1)
+            except queue.Empty:
+                pass
+        """
 
         loss = sub_loss.mean().item()
         """
@@ -215,7 +245,7 @@ def train_loop_xla(run):
         if step % 50 == 0 and step > 0:
             xm.master_print(met.metrics_report(), flush=True)
 
-def main(hps_keys: str = 'arch,reg,train,data,logging' , 
+def main(hps_keys: str = 'arch,reg,train,data,logging', 
         resume_ckpt: str = None,
         data_path: str = None, 
         batch_size: int = None,
@@ -253,24 +283,11 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
     :param compile_backend: torch.compile backend name to use.  Do not compile if None 
     :param use_xla: if True, configure to run on TPU using torch_xla (otherwise GPU)
     """
-    kwargs = { k: v for k, v in locals().items() if v is not None }
+    hps_overrides = { k: v for k, v in locals().items() if v is not None }
+    hps_overrides.pop('resume_ckpt', None)
     # make a copy
 
-    run = Run(kwargs['use_xla'])
-    resume_ckpt = kwargs.pop('resume_ckpt', None)
-
-    if resume_ckpt is None:
-        hps_keys = kwargs.pop('hps_keys')
-        hps = setup_hparams(hps_keys, kwargs)
-        run.init(hps)
-    else:
-        # print(f'Resuming from {path}')
-        run.load(resume_ckpt, **kwargs)
-
-    print('Running with parameters:')
-    print(run.params)
-    print(f'Total model params: {run.model.total_params()}')
-
+    """
     def shutdown_handler(signum, frame):
         run.logger.shutdown()
         if run.sched.step > 1000:
@@ -292,13 +309,19 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
         enc_attention_wv = r'encoder.body.(\d+).att.wv',
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
+    """
+    # qu = mp.Queue()
+    # def shutdown_handler(signum, frame):
+        # parent.send('cleanup')
 
-    if run.params.use_xla:
+    # signal.signal(signal.SIGINT, shutdown_handler)
+
+    if use_xla:
         # num_cores = 8 if os.environ.get('TPU_NAME', None) else 1
         # xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
         # if you use MpModelWrapper, use 'fork' method
         # xmp.spawn(_mp_fn, args=(run,), nprocs=None, start_method='fork')
-        xmp.spawn(_mp_fn, args=(run,), nprocs=None)
+        xmp.spawn(_mp_fn, args=(resume_ckpt, hps_overrides), nprocs=None)
 
 
 if __name__ == '__main__':
