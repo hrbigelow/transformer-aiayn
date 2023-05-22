@@ -74,7 +74,6 @@ class Run(pause.Pause):
         """
 
         if self.use_xla:
-            dist.init_process_group('xla', init_method='pjrt://')
             shard, num_shards = xm.get_ordinal(), xm.xrt_world_size()
             if self.params.batch_size % num_shards != 0:
                 raise RuntimeError(
@@ -127,6 +126,7 @@ def test_handler(signum, frame):
     print(f'in test_handler')
 
 def _mp_fn(rank, resume_ckpt, hps_overrides):
+    dist.init_process_group('xla', init_method='pjrt://')
     # signal.signal(signal.SIGINT, test_handler)
     run = Run(hps_overrides['use_xla'])
     if resume_ckpt is None:
