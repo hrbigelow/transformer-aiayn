@@ -44,9 +44,6 @@ class Run(pause.Pause):
         pad_token_id = token_info['pad_token_id']
         self.model = model.Model(params, token_info) 
 
-        betas = params.adam_beta1, params.adam_beta2
-        self.opt = Adam(self.model.parameters(), betas=betas, eps=params.adam_eps)
-        self.sched = model.CustomScheduler(self.opt, params.M, params.warmup_steps)
 
         if params.infra_mode in ('tpu_colab', 'tpu_vm'):
             self.serial_exec = xmp.MpSerialExecutor()
@@ -102,6 +99,12 @@ class Run(pause.Pause):
             self.loader = per_device_loader
             # self.model = self.wrapped_model.to(device)
             self.model = self.model.to(device)
+
+            betas = self.params.adam_beta1, self.params.adam_beta2
+            self.opt = Adam(self.model.parameters(), betas=betas, eps=self.params.adam_eps)
+            self.sched = model.CustomScheduler(self.opt, self.params.M,
+                    self.params.warmup_steps)
+
             if self.params.compile_backend is not None:
                 import torch._dynamo
                 torch._dynamo.config.verbose=True
@@ -146,8 +149,9 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
     xm.master_print(run.params)
     xm.master_print(f'Total model params: {run.model.total_params()}')
 
-    run.sched.update(0)
     run.device_init(device)
+    # TODO: should be set according to save/restore
+    run.sched.update(0)
 
     # run.model.to(device) doesn't work? 
     train_loop_xla(run)
