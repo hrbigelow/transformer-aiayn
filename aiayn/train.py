@@ -47,7 +47,7 @@ class Run(pause.Pause):
         self.opt = Adam(self.model.parameters(), betas=betas, eps=params.adam_eps)
         self.sched = model.CustomScheduler(self.opt, params.M, params.warmup_steps)
 
-        if params.use_xla:
+        if params.infra_mode in ('tpu_colab', 'tpu_vm'):
             self.serial_exec = xmp.MpSerialExecutor()
             # self.wrapped_model = xmp.MpModelWrapper(self.model)
 
@@ -125,10 +125,11 @@ class Run(pause.Pause):
 def test_handler(signum, frame):
     print(f'in test_handler')
 
-def _mp_fn(rank, resume_ckpt, hps_overrides):
-    dist.init_process_group('xla', init_method='pjrt://')
+def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
+    if use_pjrt:
+        dist.init_process_group('xla', init_method='pjrt://')
     # signal.signal(signal.SIGINT, test_handler)
-    run = Run(hps_overrides['use_xla'])
+    run = Run(True)
     if resume_ckpt is None:
         hps_keys = hps_overrides.pop('hps_keys')
         hps = setup_hparams(hps_keys, hps_overrides)
@@ -257,7 +258,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
         pubsub_project: str = None,
         pubsub_topic: str = None,
         streamvis_log_file: str = None,
-        use_xla: bool = False,
+        infra_mode: str = None,
         compile_backend: str = None):
     """
     :param resume_ckpt:
@@ -281,7 +282,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
     :param ckpt_every:
            create a checkpoint every `ckpt_every` steps
     :param compile_backend: torch.compile backend name to use.  Do not compile if None 
-    :param use_xla: if True, configure to run on TPU using torch_xla (otherwise GPU)
+    :param infra_mode: one of tpu_colab, tpu_vm, gpu
     """
     hps_overrides = { k: v for k, v in locals().items() if v is not None }
     hps_overrides.pop('resume_ckpt', None)
@@ -316,12 +317,22 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
 
     # signal.signal(signal.SIGINT, shutdown_handler)
 
-    if use_xla:
+    if infra_mode == 'tpu_colab':
+        args = False, resume_ckpt, hps_overrides
+        xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
+    elif infra_mode == 'tpu_vm':
+        args = True, resume_ckpt, hps_overrides
+        xmp.spawn(_mp_fn, args=args)
+    elif infra_mode == 'gpu':
+        pass
+    else:
+        raise RuntimeError(
+            f'Got {infra_mode=}, but must be one of \'tpu_colab\', \'tpu_vm\', or \'gpu\'')
         # num_cores = 8 if os.environ.get('TPU_NAME', None) else 1
         # xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
         # if you use MpModelWrapper, use 'fork' method
         # xmp.spawn(_mp_fn, args=(run,), nprocs=None, start_method='fork')
-        xmp.spawn(_mp_fn, args=(resume_ckpt, hps_overrides), nprocs=None)
+        # xmp.spawn(_mp_fn, args=(resume_ckpt, hps_overrides), nprocs=None)
 
 
 if __name__ == '__main__':

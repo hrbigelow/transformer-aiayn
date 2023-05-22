@@ -67,7 +67,7 @@ train = Hyperparams(
     ckpt_every = 5000,
     resume_ckpt = None,
     ckpt_templ = None,
-    use_xla = False,
+    infra_mode = None,
     compile_backend = None
     )
 
