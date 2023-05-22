@@ -165,7 +165,7 @@ def train_loop_xla(run):
         enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
         dec_input = dec_input.reshape(*batch_shape, *dec_input.shape[1:])
 
-        sub_loss = torch.zeros(batch_shape[0])
+        sub_loss = torch.tensor(0.0)
 
         # enc_layer0 = r'encoder.body.0.att.wq'
         # layer0_norms = torch.empty(batch_shape)
@@ -198,7 +198,7 @@ def train_loop_xla(run):
             # run.model.add_gradients(layer0_grads)
 
             with torch.no_grad():
-                sub_loss[sub_batch:sub_batch+1] = xent
+                sub_loss.add_(xent)
 
         # protect to avoid partial update
         # old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -220,7 +220,7 @@ def train_loop_xla(run):
                 pass
         """
 
-        loss = sub_loss.mean().item()
+        loss = sub_loss.item()
         """
         loss_metrics = [loss]
         run.logger.tandem_lines('loss', step, loss_metrics, 'Viridis256')
