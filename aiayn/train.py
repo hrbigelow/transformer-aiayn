@@ -154,7 +154,7 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
     
 def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
-    print(f'{run.params.sub_batch_size=}, {run.shard_size=}, {run.params.batch_size=}')
+    # print(f'{run.params.sub_batch_size=}, {run.shard_size=}, {run.params.batch_size=}')
     run.model.train()
 
     batch_shape = (run.shard_size // run.params.sub_batch_size, run.params.sub_batch_size)
@@ -163,6 +163,8 @@ def train_loop_xla(run):
 
     for enc_input, dec_input, step, epoch in run.loader:
         lr = run.sched.current_lr()
+        param = run.model.get_parameter('encoder.body.0.att.wq') 
+        print(f'xla:{xm.get_ordinal()}: {param[0,0,0:5]}')
 
         # allows sub-batching
         enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
