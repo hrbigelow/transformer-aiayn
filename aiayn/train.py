@@ -106,7 +106,7 @@ class Run(pause.Pause):
                 torch._dynamo.config.verbose=True
                 self.model = torch.compile(self.model,
                         backend=self.params.compile_backend)
-            print(f'Run::device_init: {shard=}, {num_shards=}', flush=True)
+            # print(f'Run::device_init: {shard=}, {num_shards=}', flush=True)
         else:
             pass
 
@@ -130,6 +130,8 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
         dist.init_process_group('xla', init_method='pjrt://')
     # signal.signal(signal.SIGINT, test_handler)
     run = Run(True)
+    torch.manual_seed(run.params.random_seed)
+
     if resume_ckpt is None:
         hps_keys = hps_overrides.pop('hps_keys')
         hps = setup_hparams(hps_keys, hps_overrides)
@@ -138,7 +140,6 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
         # print(f'Resuming from {path}')
         run.load(resume_ckpt, **hps_overrides)
 
-    torch.manual_seed(run.params.random_seed)
     device = xm.xla_device()
 
     xm.master_print('Running with parameters:')
