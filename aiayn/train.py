@@ -48,7 +48,7 @@ class Run(pause.Pause):
 
         if params.use_xla:
             self.serial_exec = xmp.MpSerialExecutor()
-            self.wrapped_model = xmp.MpModelWrapper(self.model)
+            # self.wrapped_model = xmp.MpModelWrapper(self.model)
 
         self.logger = DataLogger('aiayn')
         if params.pubsub_project is not None:
@@ -99,7 +99,8 @@ class Run(pause.Pause):
             para_loader = pl.ParallelLoader(pad_loader, [device])
             per_device_loader = para_loader.per_device_loader(device)
             self.loader = per_device_loader
-            self.model = self.wrapped_model.to(device)
+            # self.model = self.wrapped_model.to(device)
+            self.model = self.model.to(device)
             if self.params.compile_backend is not None:
                 import torch._dynamo
                 torch._dynamo.config.verbose=True
@@ -295,6 +296,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging' ,
     if run.params.use_xla:
         # num_cores = 8 if os.environ.get('TPU_NAME', None) else 1
         # xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
+        # if you use MpModelWrapper, use 'fork' method
+        # xmp.spawn(_mp_fn, args=(run,), nprocs=None, start_method='fork')
         xmp.spawn(_mp_fn, args=(run,), nprocs=None)
 
 
