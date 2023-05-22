@@ -154,26 +154,25 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
     
 def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
-    for enc_input, dec_input, step, epoch in run.loader:
+    print(f'{run.params.sub_batch_size=}, {run.shard_size=}, {run.params.batch_size=}')
+    run.model.train()
 
+    batch_shape = (run.shard_size // run.params.sub_batch_size, run.params.sub_batch_size)
+    sub_batch_fraction = run.params.sub_batch_size / run.shard_size
+    sub_loss = torch.tensor(0.0)
+
+    for enc_input, dec_input, step, epoch in run.loader:
         lr = run.sched.current_lr()
-        
-        batch_shape = (run.shard_size // run.params.sub_batch_size,
-                run.params.sub_batch_size)
 
         # allows sub-batching
         enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
         dec_input = dec_input.reshape(*batch_shape, *dec_input.shape[1:])
-
-        sub_loss = torch.tensor(0.0)
-
         # enc_layer0 = r'encoder.body.0.att.wq'
         # layer0_norms = torch.empty(batch_shape)
 
         # accumulate gradients over sub-batches
-        sub_batch_fraction = run.params.sub_batch_size / run.shard_size
-
         run.opt.zero_grad()
+        sub_loss.fill_(0.0)
         # run.model.zero_grad()
 
         for sub_batch in range(batch_shape[0]):
