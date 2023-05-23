@@ -237,7 +237,7 @@ def train_loop_xla(run):
         """
 
         if step % run.params.report_every == 0:
-            xm.add_step_closure(collect_log, args=(loss,))
+            xm.add_step_closure(collect_log, args=(loss, step))
             # xm.master_print(f'{epoch=}, {step=}, {lr=:7.6f}, {loss=:5.4f}', flush=True) 
 
         if step % run.params.ckpt_every == 0 and step > 0 and step != run.params.resume_ckpt:
