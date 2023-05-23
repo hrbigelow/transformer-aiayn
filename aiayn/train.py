@@ -155,6 +155,13 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
 
     # run.model.to(device) doesn't work? 
     train_loop_xla(run)
+
+def collect_log(tensor, step):
+    result = xm.all_reduce('REDUCE_SUM', tensor, 1.0 / xm.xrt_world_size())
+    if xm.is_master_ordinal():
+        result = result.cpu().tolist()
+        for s, item in enumerate(result, step):
+            xm.master_print(f'step: {s}, {item:5.4f}')
     
 def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
@@ -163,12 +170,12 @@ def train_loop_xla(run):
 
     batch_shape = (run.shard_size // run.params.sub_batch_size, run.params.sub_batch_size)
     sub_batch_fraction = run.params.sub_batch_size / run.shard_size
-    sub_loss = torch.tensor(0.0)
+    loss = torch.empty(run.params.report_every)
 
     for enc_input, dec_input, step, epoch in run.loader:
         lr = run.sched.current_lr()
-        param = run.model.get_parameter('encoder.body.0.att.wq') 
-        print(f'xla:{xm.get_ordinal()}: {param[0,0,0:5]}')
+        # param = run.model.get_parameter('encoder.body.0.att.wq') 
+        # print(f'xla:{xm.get_ordinal()}: {param[0,0,0:5]}')
 
         # allows sub-batching
         enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
@@ -178,7 +185,7 @@ def train_loop_xla(run):
 
         # accumulate gradients over sub-batches
         run.opt.zero_grad()
-        sub_loss.fill_(0.0)
+        loss[step % run.params.report_every] = 0.0
         # run.model.zero_grad()
 
         for sub_batch in range(batch_shape[0]):
@@ -203,7 +210,7 @@ def train_loop_xla(run):
             # run.model.add_gradients(layer0_grads)
 
             with torch.no_grad():
-                sub_loss.add_(xent)
+                loss[step % run.params.report_every] += xent
 
         # protect to avoid partial update
         # old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -213,19 +220,7 @@ def train_loop_xla(run):
         # run.opt.step()
         run.sched.update(step)
         # signal.signal(signal.SIGTERM, old_handler)
-        """
-        if xm.is_master_ordinal():
-            try:
-                msg = queue.get(block=False)
-                if msg is not None:
-                    print(f'received parent message {msg=}, shutting down.')
-                    q.put('child shutdown complete')
-                    sys.exit(1)
-            except queue.Empty:
-                pass
-        """
 
-        loss = sub_loss.item()
         """
         loss_metrics = [loss]
         run.logger.tandem_lines('loss', step, loss_metrics, 'Viridis256')
@@ -242,7 +237,8 @@ def train_loop_xla(run):
         """
 
         if step % run.params.report_every == 0:
-            xm.master_print(f'{epoch=}, {step=}, {lr=:7.6f}, {loss=:5.4f}', flush=True) 
+            xm.add_step_closure(collect_log, args=(loss,))
+            # xm.master_print(f'{epoch=}, {step=}, {lr=:7.6f}, {loss=:5.4f}', flush=True) 
 
         if step % run.params.ckpt_every == 0 and step > 0 and step != run.params.resume_ckpt:
             path = run.params.ckpt_templ.format(step)
