@@ -157,12 +157,14 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
     train_loop_xla(run)
 
 def collect_log(tensor, step):
-    result = xm.all_reduce('REDUCE_SUM', tensor, 1.0 / xm.xrt_world_size())
+    result = xm.all_reduce(reduce_type=xm.REDUCE_SUM, inputs=tensor)
+    xm.mark_step()
+    print(f'got here in collect_log: xla:{xm.get_ordinal()}, {xm.is_master_ordinal()=}', flush=True)
     if xm.is_master_ordinal():
-        result = result.cpu().tolist()
-        for s, item in enumerate(result, step):
-            xm.master_print(f'step: {s}, {item:5.4f}')
-    
+        cpu_result = result.cpu().tolist()
+        for s, item in enumerate(cpu_result, step):
+            xm.master_print(f'step: {s}, {item:5.4f}', flush=True)
+
 def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
     # print(f'{run.params.sub_batch_size=}, {run.shard_size=}, {run.params.batch_size=}')
