@@ -170,7 +170,7 @@ def train_loop_xla(run):
 
     batch_shape = (run.shard_size // run.params.sub_batch_size, run.params.sub_batch_size)
     sub_batch_fraction = run.params.sub_batch_size / run.shard_size
-    loss = torch.empty(run.params.report_every)
+    loss = torch.empty(run.params.report_every, xm.xla_device())
 
     for enc_input, dec_input, step, epoch in run.loader:
         lr = run.sched.current_lr()
