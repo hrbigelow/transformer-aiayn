@@ -78,12 +78,7 @@ class Run(pause.Pause):
                     f'batch_size {self.params.batch_size} not divisible by {num_shards=}')
 
             self.shard_size = self.params.batch_size // num_shards
-            if self.shard_size % self.params.sub_batch_size != 0:
-                raise RuntimeError(
-                    f'shard_size {self.shard_size} not divisible by sub_batch_size '
-                    f'{self.params.sub_batch_size}.  shard_size is equal to '
-                    f'batch_size // num_shards '
-                    f'({self.params.batch_size} // {num_shards})')
+            self.num_shards = num_shards
 
             def get_ds():
                 return data.get_dataset(self.params.data_path,
@@ -167,60 +162,54 @@ def collect_log(tensor, step):
 
 def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
-    # print(f'{run.params.sub_batch_size=}, {run.shard_size=}, {run.params.batch_size=}')
     run.model.train()
 
-    batch_shape = (run.shard_size // run.params.sub_batch_size, run.params.sub_batch_size)
-    sub_batch_fraction = run.params.sub_batch_size / run.shard_size
-    loss = torch.empty(run.params.report_every, device=xm.xla_device())
+    loss = torch.zeros(run.params.report_every, device=xm.xla_device())
+    loss_fraction = (run.params.update_every * run.num_shards) ** -1
 
-    for enc_input, dec_input, step, epoch in run.loader:
-        lr = run.sched.current_lr()
+    for enc_input, dec_input, load_step, epoch in run.loader:
+        step = load_step // run.params.update_every
+        run.sched.update(step)
         # param = run.model.get_parameter('encoder.body.0.att.wq') 
         # print(f'xla:{xm.get_ordinal()}: {param[0,0,0:5]}')
 
-        # allows sub-batching
-        enc_input = enc_input.reshape(*batch_shape, *enc_input.shape[1:])
-        dec_input = dec_input.reshape(*batch_shape, *dec_input.shape[1:])
         # enc_layer0 = r'encoder.body.0.att.wq'
         # layer0_norms = torch.empty(batch_shape)
+        dec_output = run.model(enc_input, dec_input)
+
+        # scale loss by batch_fraction
+        xent = run.model.loss(dec_input, dec_output) * loss_fraction
+        xent.backward()
+
+        with torch.no_grad():
+            loss[step % run.params.report_every] += xent
 
         # accumulate gradients over sub-batches
-        run.opt.zero_grad()
-        loss[step % run.params.report_every] = 0.0
-        # run.model.zero_grad()
+        if load_step % run.params.update_every == 0:
+            xm.optimizer_step(run.opt)
+            run.opt.zero_grad()
 
-        for sub_batch in range(batch_shape[0]):
-            sub_enc_input = enc_input[sub_batch]
-            sub_dec_input = dec_input[sub_batch]
-            sub_dec_output = run.model(sub_enc_input, sub_dec_input)
+            if step % run.params.report_every == 0 and step > 0:
+                combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
+                loss_vals = combined_loss.cpu()
+                lr = run.sched.current_lr()
+                xm.master_print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={loss_vals}')
+                loss.fill_(0.0)
 
-            # zero out specific gradients for later inspection
-            # layer0_grads = run.model.zero_gradients(enc_layer0)
+        # zero out specific gradients for later inspection
+        # layer0_grads = run.model.zero_gradients(enc_layer0)
 
-            # scale loss by batch_fraction
-            xent = run.model.loss(sub_dec_input, sub_dec_output) * sub_batch_fraction 
 
-            # copy gradients
-            xent.backward()
+        # norms: pat, B (only one pat here)
+        # norms = run.model.grad_norms(enc_layer0, index_dims=(0,)) 
+        # layer0_norms[sub_batch,:] = norms[0]
 
-            # norms: pat, B (only one pat here)
-            # norms = run.model.grad_norms(enc_layer0, index_dims=(0,)) 
-            # layer0_norms[sub_batch,:] = norms[0]
-
-            # add back copied gradients
-            # run.model.add_gradients(layer0_grads)
-
-            with torch.no_grad():
-                loss[step % run.params.report_every] += xent
+        # add back copied gradients
+        # run.model.add_gradients(layer0_grads)
 
         # protect to avoid partial update
         # old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-        # this averages gradients?
-        xm.optimizer_step(run.opt)
-        # run.opt.step()
-        run.sched.update(step)
         # signal.signal(signal.SIGTERM, old_handler)
 
         """
@@ -237,9 +226,13 @@ def train_loop_xla(run):
             norms = run.model.grad_norms(pattern) 
             run.logger.tandem_lines(plot, step, norms, 'Viridis256')
         """
+        # combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
+        # xm.master_print(f'{epoch=}, {step=}, {loss=}', flush=True)
+        # combined_loss_cpu = combined_loss.cpu()
+        # xm.master_print(f'{step=}, {combined_loss_cpu=}', flush=True)
 
-        if step % run.params.report_every == 0:
-            xm.add_step_closure(collect_log, args=(loss, step))
+        # if step % run.params.report_every == 0:
+            # xm.add_step_closure(collect_log, args=(loss, step))
             # xm.master_print(f'{epoch=}, {step=}, {lr=:7.6f}, {loss=:5.4f}', flush=True) 
 
         if step % run.params.ckpt_every == 0 and step > 0 and step != run.params.resume_ckpt:
@@ -254,7 +247,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
         resume_ckpt: str = None,
         data_path: str = None, 
         batch_size: int = None,
-        sub_batch_size: int = None,
+        update_every: int = None,
         ckpt_templ: str = None,
         max_sentence_length: int = None,
         report_every: int = None,
@@ -275,8 +268,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
 
     # optional command-line overrides
     :param batch_size: SGD batch size
-    :param sub_batch_size: size used for a single forward pass to accumulate
-                           gradients.  must be factor of batch_size
+    :param update_every: number of loader steps to accumulate gradients for before
+                         taking an optimizer step
     :param ckpt_templ: checkpoint file path containing literal {} to be substituted with 
                        step value
     :param max_sentence_length: skip data batches containing token sequences longer
