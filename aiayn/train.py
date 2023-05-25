@@ -49,7 +49,7 @@ class Run(pause.Pause):
             self.serial_exec = xmp.MpSerialExecutor()
             # self.wrapped_model = xmp.MpModelWrapper(self.model)
 
-        self.logger = DataLogger('aiayn')
+        self.logger = DataLogger(params.streamvis_run_name)
         if params.pubsub_project is not None:
             self.logger.init_pubsub(params.pubsub_project, params.pubsub_topic)
         if params.streamvis_log_file is not None:
@@ -193,6 +193,9 @@ def train_loop_xla(run):
                 combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
                 loss_vals = combined_loss.cpu()
                 lr = run.sched.current_lr()
+                for plot_step, el in enumerate(loss_vals.tolist(), step -
+                        run.params.report_every):
+                    run.logger.tandem_lines('loss', plot_step, [el])
                 xm.master_print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={loss_vals}')
                 loss.fill_(0.0)
 
@@ -240,8 +243,8 @@ def train_loop_xla(run):
             print(f'Saving {path}', flush=True)
             run.save(path)
 
-        if step % 50 == 0 and step > 0:
-            xm.master_print(met.metrics_report(), flush=True)
+        # if step == 50:
+            # xm.master_print(met.metrics_report(), flush=True)
 
 def main(hps_keys: str = 'arch,reg,train,data,logging', 
         resume_ckpt: str = None,
@@ -255,6 +258,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
         pubsub_project: str = None,
         pubsub_topic: str = None,
         streamvis_log_file: str = None,
+        streamvis_run_name: str = None,
         infra_mode: str = None,
         compile_backend: str = None):
     """
@@ -262,6 +266,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
            if present, resume from this checkpoint
     :param data_path:
            path to dataset prepared using python -m aiayn.data script
+    :param streamvis_run_name: name for scoping the run for visualization
     :param pubsub_project: the GCP project with Cloud Pub/Sub API enabled
     :param pubsub_topic: the GCP topic associated with pubsub_project
     :param streamvis_log_file: path to streamvis log file (optional) 
