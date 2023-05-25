@@ -75,7 +75,8 @@ logging = Hyperparams(
     report_every = 100,
     pubsub_project = None,
     pubsub_topic = None,
-    streamvis_log_file = None
+    streamvis_log_file = None,
+    streamvis_run_name = None
     )
 
 data = Hyperparams(
