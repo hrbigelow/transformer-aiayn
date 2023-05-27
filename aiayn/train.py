@@ -185,23 +185,23 @@ def train_loop_xla(run):
         # param = run.model.get_parameter('encoder.body.0.att.wq') 
         # print(f'xla:{xm.get_ordinal()}: {param[0,0,0:5]}')
 
-        if step > 0 and update_stage == 0 and report == 0:
-            combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
-            if xm.is_master_ordinal():
-                # 1, R, 2
-                loss_plot = torch.stack((steps, combined_loss), dim=1).unsqueeze(0)
-                run.logger.tandem_lines('loss', loss_plot.cpu())
-
-                lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
-                run.logger.tandem_lines('lr', lr_plot.cpu())
-                combined_loss = combined_loss.cpu()
-                print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={combined_loss}')
-            loss.fill_(0.0)
-
         # accumulate gradients over sub-batches
         if step > 0 and update_stage == 0:
             xm.optimizer_step(run.opt)
             run.opt.zero_grad()
+
+            if report == 0:
+                combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
+                if xm.is_master_ordinal():
+                    # 1, R, 2
+                    loss_plot = torch.stack((steps, combined_loss), dim=1).unsqueeze(0)
+                    run.logger.tandem_lines('loss', loss_plot.cpu())
+
+                    lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
+                    run.logger.tandem_lines('lr', lr_plot.cpu())
+                    combined_loss = combined_loss.cpu()
+                    print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={combined_loss}')
+                loss.fill_(0.0)
 
         # enc_layer0 = r'encoder.body.0.att.wq'
         # layer0_norms = torch.empty(batch_shape)
