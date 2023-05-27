@@ -13,6 +13,7 @@ dependencies = [
   "transformers",
   "fire",
   "numpy",
+  "google-cloud-pubsub",
   "streamvis @ git+https://github.com/hrbigelow/streamvis.git"
 ]
 

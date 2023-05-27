@@ -163,45 +163,60 @@ def collect_log(tensor, step):
 def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
     run.model.train()
+    run.opt.zero_grad()
 
     loss = torch.zeros(run.params.report_every, device=xm.xla_device())
+    steps = torch.zeros(run.params.report_every, device=xm.xla_device())
+    learn_rates = torch.zeros(run.params.report_every, device=xm.xla_device())
+
+    # fraction of each shard and update_stage contributing to a gradient update
     loss_fraction = (run.params.update_every * run.num_shards) ** -1
 
+    """
+    - Every iteration, performs forward and backward, and accumulates gradients
+    - Every `update_every` iterations, takes an optimizer step and zeros grad
+    - Every `report_every` * `update_every` iterations, issues a report
+    """
     for enc_input, dec_input, load_step, epoch in run.loader:
-        step = load_step // run.params.update_every
+        step, update_stage = divmod(load_step, run.params.update_every)
+        report = step % run.params.report_every
         run.sched.update(step)
+        lr = run.sched.current_lr()
         # param = run.model.get_parameter('encoder.body.0.att.wq') 
         # print(f'xla:{xm.get_ordinal()}: {param[0,0,0:5]}')
+
+        if step > 0 and update_stage == 0 and report == 0:
+            combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
+            if xm.is_master_ordinal():
+                # 1, R, 2
+                loss_plot = torch.stack((steps, combined_loss), dim=1).unsqueeze(0)
+                run.logger.tandem_lines('loss', loss_plot.cpu())
+
+                lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
+                run.logger.tandem_lines('lr', lr_plot.cpu())
+                combined_loss = combined_loss.cpu()
+                print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={combined_loss}')
+            loss.fill_(0.0)
+
+        # accumulate gradients over sub-batches
+        if step > 0 and update_stage == 0:
+            xm.optimizer_step(run.opt)
+            run.opt.zero_grad()
 
         # enc_layer0 = r'encoder.body.0.att.wq'
         # layer0_norms = torch.empty(batch_shape)
         dec_output = run.model(enc_input, dec_input)
-
-        # scale loss by batch_fraction
         xent = run.model.loss(dec_input, dec_output) * loss_fraction
         xent.backward()
 
         with torch.no_grad():
-            loss[step % run.params.report_every] += xent
+            steps[report] = step
+            loss[report] += xent
+            learn_rates[report] = lr
 
-        # accumulate gradients over sub-batches
-        if load_step % run.params.update_every == 0:
-            xm.optimizer_step(run.opt)
-            run.opt.zero_grad()
-
-            if step % run.params.report_every == 0 and step > 0:
-                combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
-                loss_vals = combined_loss.cpu()
-                lr = run.sched.current_lr()
-                for plot_step, el in enumerate(loss_vals.tolist(), step -
-                        run.params.report_every):
-                    run.logger.tandem_lines('loss', plot_step, [el])
-                xm.master_print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={loss_vals}')
-                loss.fill_(0.0)
 
         # zero out specific gradients for later inspection
         # layer0_grads = run.model.zero_gradients(enc_layer0)
-
 
         # norms: pat, B (only one pat here)
         # norms = run.model.grad_norms(enc_layer0, index_dims=(0,)) 

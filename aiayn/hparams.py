@@ -48,6 +48,15 @@ arch = Hyperparams(
     num_layers = 6
 )
 
+tiny = Hyperparams(
+    H = 2, # heads
+    K = 8, # key (d_k in paper)
+    V = 8, # value (d_v in paper)
+    M = 32, # model (d_model in paper)
+    F = 128, # feed-forward dimension (d_ff in paper)
+    num_layers = 2
+)
+
 reg = Hyperparams(
     # Section 5.4: Regularization (P_drop = 0.1)
     dropout_rate = 0.1,
@@ -88,6 +97,7 @@ data = Hyperparams(
     )
 
 
+HPARAMS_REGISTRY['tiny'] = tiny
 HPARAMS_REGISTRY['arch'] = arch
 HPARAMS_REGISTRY['reg'] = reg
 HPARAMS_REGISTRY['train'] = train
