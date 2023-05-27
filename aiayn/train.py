@@ -164,6 +164,7 @@ def train_loop_xla(run):
     print(f'xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
     run.model.train()
     run.opt.zero_grad()
+    xm.mark_step()
 
     loss = torch.zeros(run.params.report_every, device=xm.xla_device())
     steps = torch.zeros(run.params.report_every, device=xm.xla_device())
