@@ -190,6 +190,7 @@ def train_loop_xla(run):
             xm.optimizer_step(run.opt)
             run.opt.zero_grad()
 
+            """
             if report == 0:
                 combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
                 if xm.is_master_ordinal():
@@ -202,6 +203,7 @@ def train_loop_xla(run):
                     combined_loss = combined_loss.cpu()
                     print(f'{epoch=}, {step=}, {lr=:6.5f}, loss={combined_loss}')
                 loss.fill_(0.0)
+            """
 
         # enc_layer0 = r'encoder.body.0.att.wq'
         # layer0_norms = torch.empty(batch_shape)
@@ -209,10 +211,12 @@ def train_loop_xla(run):
         xent = run.model.loss(dec_input, dec_output) * loss_fraction
         xent.backward()
 
+        """
         with torch.no_grad():
             steps[report] = step
             loss[report] += xent
             learn_rates[report] = lr
+        """
 
 
         # zero out specific gradients for later inspection
