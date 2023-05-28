@@ -378,7 +378,7 @@ class Loss(nn.Module):
     def forward(self, dec_input, dec_output):
         """
         dec_input: bc
-        dec_output: bct
+        dec_output: ()
         """
         # bc
         labels = dec_input[:,1:]
@@ -392,7 +392,10 @@ class Loss(nn.Module):
         total_targets = dec_mask.sum()
         # target_fraction = total_targets / dec_mask.numel()
         # print(f'{total_targets=}, {target_fraction=}')
-        return masked.sum() / total_targets
+        loss = masked.sum() / total_targets
+        # print(f'{loss=}')
+        return loss
+
 
 class CustomScheduler:
     def __init__(self, optimizer, M, warmup_steps):

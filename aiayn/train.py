@@ -162,10 +162,10 @@ def report_fn(logger, epoch, steps, loss, learn_rates):
 
         lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
         logger.tandem_lines('lr', lr_plot)
-        print(f'{time.time()}: {epoch=}, {steps=}, {loss=}')
+        print(f'{time.time():.0f}: {epoch=}, {steps=}, {loss=}')
 
-def element_sum_fn(tensors):
-    return torch.stack(tensors).sum(dim=0)
+def element_mean_fn(tensors):
+    return torch.stack(tensors).to(torch.float32).mean(dim=0)
 
 def train_loop_xla(run):
     print(f'{time.ctime()}: xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
@@ -179,9 +179,8 @@ def train_loop_xla(run):
     learn_rates = torch.zeros(R, device=dev)
     scalar_loss = torch.zeros((), device=dev)
 
-
     # fraction of each shard and update_stage contributing to a gradient update
-    loss_fraction = (run.params.update_every * run.num_shards) ** -1
+    loss_fraction = run.params.update_every ** -1
 
     """
     - Every iteration, performs forward and backward, and accumulates gradients
@@ -194,10 +193,11 @@ def train_loop_xla(run):
         stage_start_time = time.time()
         scalar_loss.fill_(0.0)
 
+        # accumulate gradients over `update_every` iterations
         for update_stage in range(run.params.update_every):
             enc_input, dec_input, load_step, epoch = next(run.loader)
             dec_output = run.model(enc_input, dec_input)
-            xent = run.model.loss(dec_input, dec_output) * loss_fraction
+            xent = run.model.loss(dec_input, dec_output) * loss_fraction 
             xent.backward()
             with torch.no_grad():
                 scalar_loss.add_(xent)
@@ -212,7 +212,7 @@ def train_loop_xla(run):
         stage_end_time = time.time()
 
         if step > 0 and report ==  R - 1:
-            combined_loss = xm.mesh_reduce('cl', loss, element_sum_fn)
+            combined_loss = xm.mesh_reduce('cl', loss, element_mean_fn)
             args = (run.logger, epoch, steps, loss, learn_rates)
             xm.add_step_closure(report_fn, args, run_async=True)
         
@@ -229,11 +229,6 @@ def train_loop_xla(run):
         # add back copied gradients
         # run.model.add_gradients(layer0_grads)
 
-        # protect to avoid partial update
-        # old_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-
-        # signal.signal(signal.SIGTERM, old_handler)
-
         """
         loss_metrics = [loss]
         # run.logger.tandem_lines('en_lengths', step, en_lengths, 'Viridis256')
@@ -245,15 +240,6 @@ def train_loop_xla(run):
             norms = run.model.grad_norms(pattern) 
             run.logger.tandem_lines(plot, step, norms, 'Viridis256')
         """
-        # combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
-        # xm.master_print(f'{epoch=}, {step=}, {loss=}', flush=True)
-        # combined_loss_cpu = combined_loss.cpu()
-        # xm.master_print(f'{step=}, {combined_loss_cpu=}', flush=True)
-
-        # if step % run.params.report_every == 0:
-            # xm.add_step_closure(collect_log, args=(loss, step))
-            # xm.master_print(f'{epoch=}, {step=}, {lr=:7.6f}, {loss=:5.4f}', flush=True) 
-
         if step % run.params.ckpt_every == 0 and step > 0 and step != run.params.resume_ckpt:
             path = run.params.ckpt_templ.format(step)
             print(f'Saving {path}', flush=True)
