@@ -125,14 +125,13 @@ class Run(pause.Pause):
 def test_handler(signum, frame):
     print(f'in test_handler')
 
-def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
+def _mp_fn(rank, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
     if use_pjrt:
         dist.init_process_group('xla', init_method='pjrt://')
     # signal.signal(signal.SIGINT, test_handler)
     run = Run(True)
 
     if resume_ckpt is None:
-        hps_keys = hps_overrides.pop('hps_keys')
         hps = setup_hparams(hps_keys, hps_overrides)
         run.init(hps)
     else:
@@ -152,23 +151,34 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_overrides):
     # run.model.to(device) doesn't work? 
     train_loop_xla(run)
 
-def collect_log(tensor, step):
-    result = xm.all_reduce(reduce_type=xm.REDUCE_SUM, inputs=tensor)
-    xm.mark_step()
-    print(f'got here in collect_log: xla:{xm.get_ordinal()}, {xm.is_master_ordinal()=}', flush=True)
+def report_fn(logger, epoch, steps, loss, learn_rates):
     if xm.is_master_ordinal():
-        cpu_result = result.cpu().tolist()
-        for s, item in enumerate(cpu_result, step):
-            xm.master_print(f'step: {s}, {item:5.4f}', flush=True)
+        # 1, R, 2
+        steps = steps.cpu()
+        loss = loss.cpu()
+        learn_rates = learn_rates.cpu()
+        loss_plot = torch.stack((steps, loss), dim=1).unsqueeze(0)
+        logger.tandem_lines('loss', loss_plot)
+
+        lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
+        logger.tandem_lines('lr', lr_plot)
+        print(f'{time.time()}: {epoch=}, {steps=}, {loss=}')
+
+def element_sum_fn(tensors):
+    return torch.stack(tensors).sum(dim=0)
 
 def train_loop_xla(run):
     print(f'{time.ctime()}: xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
     run.model.train()
     run.opt.zero_grad()
+    dev = xm.xla_device()
+    R = run.params.report_every
 
-    loss = torch.zeros(run.params.report_every, device=xm.xla_device())
-    steps = torch.zeros(run.params.report_every, device=xm.xla_device())
-    learn_rates = torch.zeros(run.params.report_every, device=xm.xla_device())
+    loss = torch.zeros(R, device=dev)
+    steps = torch.zeros(R, device=dev)
+    learn_rates = torch.zeros(R, device=dev)
+    scalar_loss = torch.zeros((), device=dev)
+
 
     # fraction of each shard and update_stage contributing to a gradient update
     loss_fraction = (run.params.update_every * run.num_shards) ** -1
@@ -180,36 +190,31 @@ def train_loop_xla(run):
     """
     step = 0
     while True:
-        report = step % run.params.report_every
+        report = step % R 
+        stage_start_time = time.time()
+        scalar_loss.fill_(0.0)
 
         for update_stage in range(run.params.update_every):
             enc_input, dec_input, load_step, epoch = next(run.loader)
             dec_output = run.model(enc_input, dec_input)
             xent = run.model.loss(dec_input, dec_output) * loss_fraction
             xent.backward()
-            loss[report] += xent
+            with torch.no_grad():
+                scalar_loss.add_(xent)
+
+        steps[report] = step
+        loss[report] = scalar_loss
+        learn_rates[report] = run.sched.current_lr()
 
         xm.optimizer_step(run.opt)
         run.opt.zero_grad()
-        # xm.master_print(f'{epoch=}, {step=}')
 
-        with torch.no_grad():
-            steps[report] = step
-            learn_rates[report] = run.sched.current_lr()
+        stage_end_time = time.time()
 
-        if step > 0 and report == run.params.report_every - 1:
-            combined_loss = xm.all_reduce(xm.REDUCE_SUM, loss)
-            if xm.is_master_ordinal():
-                # 1, R, 2
-                loss_plot = torch.stack((steps, combined_loss), dim=1).unsqueeze(0)
-                run.logger.tandem_lines('loss', loss_plot.cpu())
-
-                lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
-                run.logger.tandem_lines('lr', lr_plot.cpu())
-                combined_loss = combined_loss.cpu()
-                lr = run.sched.current_lr()
-                print(f'{time.ctime()}: {epoch=}, {step=}, {lr=:6.5f}, loss={combined_loss}')
-            loss.fill_(0.0)
+        if step > 0 and report ==  R - 1:
+            combined_loss = xm.mesh_reduce('cl', loss, element_sum_fn)
+            args = (run.logger, epoch, steps, loss, learn_rates)
+            xm.add_step_closure(report_fn, args, run_async=True)
         
         step += 1
         run.sched.update(step)
@@ -231,9 +236,6 @@ def train_loop_xla(run):
 
         """
         loss_metrics = [loss]
-        run.logger.tandem_lines('loss', step, loss_metrics, 'Viridis256')
-        run.logger.tandem_lines('lr', step, [lr], 'Viridis256')
-        run.logger.tandem_lines('epoch', step, [epoch])
         # run.logger.tandem_lines('en_lengths', step, en_lengths, 'Viridis256')
         # run.logger.tandem_lines('de_lengths', step, de_lengths, 'Viridis256')
 
@@ -302,6 +304,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
     """
     hps_overrides = { k: v for k, v in locals().items() if v is not None }
     hps_overrides.pop('resume_ckpt', None)
+    hps_overrides.pop('hps_keys', None)
     # make a copy
 
     """
@@ -334,21 +337,16 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
     # signal.signal(signal.SIGINT, shutdown_handler)
 
     if infra_mode == 'tpu_colab':
-        args = False, resume_ckpt, hps_overrides
+        args = False, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
     elif infra_mode == 'tpu_vm':
-        args = True, resume_ckpt, hps_overrides
+        args = True, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args)
     elif infra_mode == 'gpu':
         pass
     else:
         raise RuntimeError(
             f'Got {infra_mode=}, but must be one of \'tpu_colab\', \'tpu_vm\', or \'gpu\'')
-        # num_cores = 8 if os.environ.get('TPU_NAME', None) else 1
-        # xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
-        # if you use MpModelWrapper, use 'fork' method
-        # xmp.spawn(_mp_fn, args=(run,), nprocs=None, start_method='fork')
-        # xmp.spawn(_mp_fn, args=(resume_ckpt, hps_overrides), nprocs=None)
 
 
 if __name__ == '__main__':
