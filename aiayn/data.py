@@ -144,30 +144,32 @@ class BatchedSampler(torch.utils.data.Sampler):
     Infinitely generates batch_size batches of indices in range(dataset_size)
     uniformly, even if dataset_size % batch_size != 0.
     """
-    def __init__(self, dataset_size, batch_size, bin_size, rand_seed, shard,
-            num_shards):
+    def __init__(self, batch_size, bin_size, rand_seed):
         """
         batch_size: total number of samples for one step
         bin_size: number of dataset entries in each sentence-length bin
-        shard: number in [0, num_shards) to shard the batch_size elements
-        num_shards: total number of shards (must evenly divide batch_size)
         """
         super().__init__(data_source=None)
-        if batch_size % num_shards != 0:
-            raise RuntimeError(f'{batch_size=} is not evenly divisible by {num_shards=}')
-        if shard not in range(num_shards):
-            raise RuntimeError(f'{shard=} not in range [0, {num_shards=})')
-
-        self.dataset_size = dataset_size 
         self.batch_size = batch_size
-        self.shard_size = batch_size // num_shards
         self.bin_size = bin_size
         self.rng = np.random.mtrand.RandomState(rand_seed)
-        self.shard = shard
-        self.num_shards = num_shards
         self.offset = 0
         self.step = 0
         self.epoch = 0
+
+    def set_replica_info(self, dataset_size, num_shards, shard):
+        """
+        shard: number in [0, num_shards) to shard the batch_size elements
+        num_shards: total number of shards (must evenly divide batch_size)
+        """
+        if self.batch_size % num_shards != 0:
+            raise RuntimeError(f'{self.batch_size=} is not evenly divisible by {num_shards=}')
+        if shard not in range(num_shards):
+            raise RuntimeError(f'{shard=} not in range [0, {num_shards=})')
+        self.dataset_size = dataset_size
+        self.shard = shard
+        self.num_shards = num_shards
+        self.shard_size = self.batch_size // num_shards
 
     def load(self, state):
         self.rng.set_state(state['randstate'])

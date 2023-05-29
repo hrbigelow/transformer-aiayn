@@ -1,6 +1,8 @@
+import torch
+from aiayn import hparams
 from abc import ABC, abstractmethod
 from inspect import signature
-from collections import OrderedDict
+
 try:
     import torch_xla.core.xla_model as xm
 except ImportError:
@@ -9,14 +11,15 @@ except ImportError:
 class Pause(ABC):
     """
     """
-    def __init__(self, use_xla=False):
+    def __init__(self, device, use_xla=False):
         if use_xla:
             try:
                 import torch_xla.core.xla_model as xm
             except ImportError:
                 raise RuntimeError(f'`use_xla was set, but couldn\'t import torch_xla')
+        self.device = device
         self.use_xla = use_xla
-        self.check_sig(self._make, ('params', 'state'))
+        self.check_sig(self._make, ('state',))
         self.check_sig(self._get_state, ())
 
     def check_sig(self, func, expected_args):
@@ -29,7 +32,7 @@ class Pause(ABC):
                 f'Found \'{", ".join(args)}\'')
 
     @abstractmethod
-    def _make(self, params, state=None):
+    def _make(self, state=None):
         """
         If `state` is provided, we are restoring from a checkpoint
         Private helper method for the public methods init and load.
@@ -49,16 +52,16 @@ class Pause(ABC):
         Instantiate all class members, storing each instance as a named member
         """
         self.params = params
-        return self._make(params)
+        return self._make()
 
     def load(self, path, **param_overrides):
         """
         Instantiate all target classes from information in the file at `path` 
         """
         ckpt = torch.load(path)
-        ckpt['params'].update(param_overrides)
-        self.params = ckpt['params']
-        return self._make(ckpt['params'], ckpt['state'])
+        self.params = hparams.Hyperparams(ckpt['params'])
+        self.params.update(param_overrides)
+        return self._make(ckpt['state'])
 
     def save(self, path):
         """
@@ -68,11 +71,8 @@ class Pause(ABC):
         ckpt = dict(state=state, params=self.params)
         if self.use_xla:
             xm.save(ckpt, path)
+            xm.master_print(f'Saved checkpoint {path} using xm.save')
         else:
             torch.save(ckpt, path)
-
-        if self.use_xla and not xm.is_master_ordinal():
-            return
-        print(f'Saved final checkpoint to {path}')
-        print(f'Exiting after receiving {signal.Signals(signum).name}')
+            print(f'Saved checkpoint {path}')
 

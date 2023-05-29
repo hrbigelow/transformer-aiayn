@@ -1,3 +1,6 @@
+import torch as t
+import torch.distributed as dist
+from torch.optim import Adam
 import os
 import signal
 import queue
@@ -5,13 +8,8 @@ import time
 import sys
 import fire
 import numpy as np
-from aiayn import model, data, pause
-from aiayn.data import load_token_histo
-import torch
-import torch.distributed as dist
-from torch.optim import Adam
 from streamvis import DataLogger 
-from aiayn.hparams import setup_hparams, Hyperparams
+from aiayn import model, data, pause, hparams
 
 try:
     import torch_xla.core.xla_model as xm
@@ -20,15 +18,16 @@ try:
     import torch_xla.distributed.xla_multiprocessing as xmp
     import torch_xla.experimental.pjrt_backend
 except ImportError:
-    pass
+    print(f'Warning: could not import libraries from torch_xla')
+
 
 class Run(pause.Pause):
     """
     Encapsulates all hyperparams and state information for the whole run.
     Pause implements the checkpointing save/restore operation.
     """
-    def __init__(self, use_xla):
-        super().__init__(use_xla)
+    def __init__(self, device, use_xla):
+        super().__init__(device, use_xla)
 
     def _validate(self, params):
         if params.pubsub_project is None and params.streamvis_log_file is None:
@@ -39,38 +38,44 @@ class Run(pause.Pause):
             raise RuntimeError(
                 f'{params.batch_size=} must be disivible by {params.sub_batch_size=}')
 
-    def _make(self, params, state=None):
-        torch.manual_seed(self.params.random_seed)
-        token_info = load_token_histo(params.data_path) 
+    def _make(self, state=None):
+        if state is not None:
+            self.step = state['step']
+        else:
+            self.step = 0
+
+        t.manual_seed(self.params.random_seed)
+        token_info = data.load_token_histo(self.params.data_path) 
         pad_token_id = token_info['pad_token_id']
-        self.model = model.Model(params, token_info) 
 
+        # model
+        self.model = model.Model(self.params, token_info) 
+        if state is not None:
+            model_state = state['model']
+            self.model.load_state_dict(model_state['weights'])
+            self.model.rng.set_state(model_state['rng'])
+        self.model = self.model.to(self.device)
 
-        if params.infra_mode in ('tpu_colab', 'tpu_vm'):
+        # optimizer
+        betas = self.params.adam_beta1, self.params.adam_beta2
+        self.opt = Adam(self.model.parameters(), betas=betas, eps=self.params.adam_eps)
+        if state is not None:
+            self.opt.load_state_dict(state['optim'])
+
+        # sampler
+        self.sampler = data.BatchedSampler(self.params.batch_size,
+                self.params.bin_size, self.params.random_seed)
+        if state is not None:
+            self.sampler.load(state['sampler'])
+
+        if self.params.infra_mode in ('tpu_colab', 'tpu_vm'):
             self.serial_exec = xmp.MpSerialExecutor()
-            # self.wrapped_model = xmp.MpModelWrapper(self.model)
 
-        self.logger = DataLogger(params.streamvis_run_name)
-        if params.pubsub_project is not None:
-            self.logger.init_pubsub(params.pubsub_project, params.pubsub_topic)
-        if params.streamvis_log_file is not None:
-            self.logger.init_write_log(params.streamvis_log_file)
-
-        if state is None:
-            return
-
-        model_state = state['model']
-        self.model.load_state_dict(model_state['weights'])
-        self.model.rng.set_state(model_state['rng'])
-        self.sampler.load(state['sampler'])
-        self.opt.load_state_dict(state['optim'])
-
-    def device_init(self, device):
-        """
-        Device specific initialization
-        If on single GPU, called once.
-        If on TPU, called in each spawned process
-        """
+        self.logger = DataLogger(self.params.streamvis_run_name)
+        if self.params.pubsub_project is not None:
+            self.logger.init_pubsub(self.params.pubsub_project, self.params.pubsub_topic)
+        if self.params.streamvis_log_file is not None:
+            self.logger.init_write_log(self.params.streamvis_log_file)
 
         if self.use_xla:
             shard, num_shards = xm.get_ordinal(), xm.xrt_world_size()
@@ -86,18 +91,13 @@ class Run(pause.Pause):
                         self.params.max_sentence_length, num_proc=4)
             self.dataset = self.serial_exec.run(get_ds)
             dataset_size = len(self.dataset)
-            self.sampler = data.BatchedSampler(dataset_size, self.params.batch_size,
-                    self.params.bin_size, self.params.random_seed, shard, num_shards)
+            self.sampler.set_replica_info(dataset_size, num_shards, shard)
             pad_loader = data.PadLoader(self.params.max_sentence_length,
                     self.model.pad_token_id, self.dataset, self.sampler) 
-            para_loader = pl.ParallelLoader(pad_loader, [device])
-            per_device_loader = para_loader.per_device_loader(device)
+            para_loader = pl.ParallelLoader(pad_loader, [self.device])
+            per_device_loader = para_loader.per_device_loader(self.device)
             self.loader = per_device_loader
-            # self.model = self.wrapped_model.to(device)
-            self.model = self.model.to(device)
 
-            betas = self.params.adam_beta1, self.params.adam_beta2
-            self.opt = Adam(self.model.parameters(), betas=betas, eps=self.params.adam_eps)
             self.sched = model.CustomScheduler(self.opt, self.params.M,
                     self.params.warmup_steps)
 
@@ -112,15 +112,11 @@ class Run(pause.Pause):
 
     def _get_state(self):
         state = {}
+        state['step'] = self.step
         state['model'] = self.model.get_state() 
         state['sampler'] = self.sampler.state()
         state['optim'] = self.opt.state_dict()
         return state
-
-    def to(self, device):
-        self.model.to(device)
-        # self.loader.dataset.to(device)
-        # self.opt.to(device)
 
 def test_handler(signum, frame):
     print(f'in test_handler')
@@ -128,23 +124,19 @@ def test_handler(signum, frame):
 def _mp_fn(rank, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
     if use_pjrt:
         dist.init_process_group('xla', init_method='pjrt://')
-    # signal.signal(signal.SIGINT, test_handler)
-    run = Run(True)
+    run = Run(xm.xla_device(), True)
 
     if resume_ckpt is None:
-        hps = setup_hparams(hps_keys, hps_overrides)
+        hps = hparams.setup_hparams(hps_keys, hps_overrides)
         run.init(hps)
     else:
         # print(f'Resuming from {path}')
         run.load(resume_ckpt, **hps_overrides)
 
-    device = xm.xla_device()
-
     xm.master_print('Running with parameters:')
     xm.master_print(run.params)
     xm.master_print(f'Total model params: {run.model.total_params()}')
 
-    run.device_init(device)
     # TODO: should be set according to save/restore
     run.sched.update(0)
 
@@ -157,15 +149,15 @@ def report_fn(logger, epoch, steps, loss, learn_rates):
         steps = steps.cpu()
         loss = loss.cpu()
         learn_rates = learn_rates.cpu()
-        loss_plot = torch.stack((steps, loss), dim=1).unsqueeze(0)
+        loss_plot = t.stack((steps, loss), dim=1).unsqueeze(0)
         logger.tandem_lines('loss', loss_plot)
 
-        lr_plot = torch.stack((steps, learn_rates), dim=1).unsqueeze(0)
+        lr_plot = t.stack((steps, learn_rates), dim=1).unsqueeze(0)
         logger.tandem_lines('lr', lr_plot)
         print(f'{time.time():.0f}: {epoch=}, {steps=}, {loss=}')
 
 def element_mean_fn(tensors):
-    return torch.stack(tensors).to(torch.float32).mean(dim=0)
+    return t.stack(tensors).to(t.float32).mean(dim=0)
 
 def train_loop_xla(run):
     print(f'{time.ctime()}: xla:{xm.get_ordinal()}: In train_loop_xla', flush=True)
@@ -174,10 +166,10 @@ def train_loop_xla(run):
     dev = xm.xla_device()
     R = run.params.report_every
 
-    loss = torch.zeros(R, device=dev)
-    steps = torch.zeros(R, device=dev)
-    learn_rates = torch.zeros(R, device=dev)
-    scalar_loss = torch.zeros((), device=dev)
+    loss = t.zeros(R, device=dev)
+    steps = t.zeros(R, device=dev)
+    learn_rates = t.zeros(R, device=dev)
+    scalar_loss = t.zeros((), device=dev)
 
     # fraction of each shard and update_stage contributing to a gradient update
     loss_fraction = run.params.update_every ** -1
@@ -187,9 +179,8 @@ def train_loop_xla(run):
     - Every `update_every` iterations, takes an optimizer step and zeros grad
     - Every `report_every` * `update_every` iterations, issues a report
     """
-    step = 0
     while True:
-        report = step % R 
+        report = run.step % R 
         stage_start_time = time.time()
         scalar_loss.fill_(0.0)
 
@@ -199,10 +190,10 @@ def train_loop_xla(run):
             dec_output = run.model(enc_input, dec_input)
             xent = run.model.loss(dec_input, dec_output) * loss_fraction 
             xent.backward()
-            with torch.no_grad():
+            with t.no_grad():
                 scalar_loss.add_(xent)
 
-        steps[report] = step
+        steps[report] = run.step
         loss[report] = scalar_loss
         learn_rates[report] = run.sched.current_lr()
 
@@ -211,13 +202,19 @@ def train_loop_xla(run):
 
         stage_end_time = time.time()
 
-        if step > 0 and report ==  R - 1:
+        if (run.step % run.params.ckpt_every == 0 and 
+                run.step > 0 and run.step != run.params.resume_ckpt):
+            path = run.params.ckpt_templ.format(run.step)
+            # this crashes if not in a step closure
+            xm.add_step_closure(run.save, args=(path,))
+
+        if run.step > 0 and report ==  R - 1:
             combined_loss = xm.mesh_reduce('cl', loss, element_mean_fn)
             args = (run.logger, epoch, steps, loss, learn_rates)
             xm.add_step_closure(report_fn, args, run_async=True)
         
-        step += 1
-        run.sched.update(step)
+        run.step += 1
+        run.sched.update(run.step)
 
         # zero out specific gradients for later inspection
         # layer0_grads = run.model.zero_gradients(enc_layer0)
@@ -240,11 +237,6 @@ def train_loop_xla(run):
             norms = run.model.grad_norms(pattern) 
             run.logger.tandem_lines(plot, step, norms, 'Viridis256')
         """
-        if step % run.params.ckpt_every == 0 and step > 0 and step != run.params.resume_ckpt:
-            path = run.params.ckpt_templ.format(step)
-            print(f'Saving {path}', flush=True)
-            run.save(path)
-
         # if step == 50:
             # xm.master_print(met.metrics_report(), flush=True)
 
@@ -319,8 +311,6 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
     # qu = mp.Queue()
     # def shutdown_handler(signum, frame):
         # parent.send('cleanup')
-
-    # signal.signal(signal.SIGINT, shutdown_handler)
 
     if infra_mode == 'tpu_colab':
         args = False, resume_ckpt, hps_keys, hps_overrides
