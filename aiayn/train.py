@@ -42,6 +42,10 @@ class Run(pause.Pause):
             raise RuntimeError(
                 f'{params.batch_size=} must be disivible by {params.sub_batch_size=}')
 
+        if params.infra_mode not in ('tpu_vm', 'tpu_colab', 'gpu'):
+            raise RuntimeError(
+                f'infra_mode must be one of \'tpu_vm\', \'tpu_colab\', or \'gpu\'')
+
     def _make(self, state=None):
         if state is not None:
             self.step = state['step']
@@ -243,21 +247,7 @@ def train_loop_xla(run):
         # if step == 50:
             # xm.master_print(met.metrics_report(), flush=True)
 
-def main(hps_keys: str = 'arch,reg,train,data,logging', 
-        resume_ckpt: str = None,
-        data_path: str = None, 
-        batch_size: int = None,
-        update_every: int = None,
-        ckpt_templ: str = None,
-        max_sentence_length: int = None,
-        report_every: int = None,
-        ckpt_every: int = None,
-        pubsub_project: str = None,
-        pubsub_topic: str = None,
-        streamvis_log_file: str = None,
-        streamvis_run_name: str = None,
-        infra_mode: str = None,
-        compile_backend: str = None):
+def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     """
     :param resume_ckpt:
            if present, resume from this checkpoint
@@ -283,24 +273,11 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
     :param compile_backend: torch.compile backend name to use.  Do not compile if None 
     :param infra_mode: one of tpu_colab, tpu_vm, gpu
     """
-    hps_overrides = { k: v for k, v in locals().items() if v is not None }
-    hps_overrides.pop('resume_ckpt', None)
-    hps_overrides.pop('hps_keys', None)
+    # hps_overrides = { k: v for k, v in locals().items() if v is not None }
+    # hps_overrides.pop('resume_ckpt', None)
     # make a copy
 
     """
-    def shutdown_handler(signum, frame):
-        run.logger.shutdown()
-        if run.sched.step > 1000:
-            path = run.params.ckpt_templ.format(run.sched.step)
-            run.save(path)
-        sys.exit(0)
-
-    # signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
-    run.sched.update(0)
-
     param_patterns = dict(
         decoder_masked_attention = r'decoder.body.(\d+).mask_att..*',
         decoder_attention2 = r'decoder.body.(\d+).att2..*',
@@ -311,9 +288,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging',
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
     """
-    # qu = mp.Queue()
-    # def shutdown_handler(signum, frame):
-        # parent.send('cleanup')
+    hps_overrides['infra_mode'] = infra_mode
 
     if infra_mode == 'tpu_colab':
         args = False, resume_ckpt, hps_keys, hps_overrides
