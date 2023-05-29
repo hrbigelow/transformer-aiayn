@@ -28,6 +28,10 @@ class Run(pause.Pause):
     """
     def __init__(self, device, use_xla):
         super().__init__(device, use_xla)
+        self.start_time = time.time()
+
+    def elapsed(self):
+        return int(time.time() - self.start_time)
 
     def _validate(self, params):
         if params.pubsub_project is None and params.streamvis_log_file is None:
@@ -181,7 +185,6 @@ def train_loop_xla(run):
     """
     while True:
         report = run.step % R 
-        stage_start_time = time.time()
         scalar_loss.fill_(0.0)
 
         # accumulate gradients over `update_every` iterations
@@ -200,18 +203,18 @@ def train_loop_xla(run):
         xm.optimizer_step(run.opt)
         run.opt.zero_grad()
 
-        stage_end_time = time.time()
-
         if (run.step % run.params.ckpt_every == 0 and 
                 run.step > 0 and run.step != run.params.resume_ckpt):
             path = run.params.ckpt_templ.format(run.step)
             # this crashes if not in a step closure
-            xm.add_step_closure(run.save, args=(path,))
+            xm.add_step_closure(run.save, args=(path,), run_async=False)
 
         if run.step > 0 and report ==  R - 1:
             combined_loss = xm.mesh_reduce('cl', loss, element_mean_fn)
             args = (run.logger, epoch, steps, loss, learn_rates)
-            xm.add_step_closure(report_fn, args, run_async=True)
+            xm.add_step_closure(report_fn, args, run_async=False)
+
+        xm.mark_step(wait=True)
         
         run.step += 1
         run.sched.update(run.step)
