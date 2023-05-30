@@ -94,7 +94,7 @@ class Pause(ABC):
 
         if self.use_xla:
             xm.save(ckpt, path)
-            xm.rendezvous('torch_xla.core.xla_model.save')
+            # xm.rendezvous('torch_xla.core.xla_model.save')
             # torch.save(ckpt, path)
             # xm_save(ckpt, path)
             xm.master_print(f'Saved checkpoint {path} using xm.save')
