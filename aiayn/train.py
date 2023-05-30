@@ -129,27 +129,6 @@ class Run(pause.Pause):
 def test_handler(signum, frame):
     print(f'in test_handler')
 
-def _mp_fn(rank, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
-    if use_pjrt:
-        dist.init_process_group('xla', init_method='pjrt://')
-    run = Run(xm.xla_device(), True)
-
-    if resume_ckpt is None:
-        hps = hparams.setup_hparams(hps_keys, hps_overrides)
-        run.init(hps)
-    else:
-        # print(f'Resuming from {path}')
-        run.load(resume_ckpt, **hps_overrides)
-
-    xm.master_print('Running with parameters:')
-    xm.master_print(run.params)
-    xm.master_print(f'Total model params: {run.model.total_params()}')
-
-    # TODO: should be set according to save/restore
-    run.sched.update(0)
-
-    # run.model.to(device) doesn't work? 
-    train_loop_xla(run)
 
 def report_fn(logger, epoch, steps, loss, learn_rates):
     if xm.is_master_ordinal():
@@ -247,6 +226,28 @@ def train_loop_xla(run):
         # if step == 50:
             # xm.master_print(met.metrics_report(), flush=True)
 
+def _mp_fn(rank, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
+    if use_pjrt:
+        dist.init_process_group('xla', init_method='pjrt://')
+    run = Run(xm.xla_device(), True)
+
+    if resume_ckpt is None:
+        hps = hparams.setup_hparams(hps_keys, hps_overrides)
+        run.init(hps)
+    else:
+        # print(f'Resuming from {path}')
+        run.load(resume_ckpt, **hps_overrides)
+
+    xm.master_print('Running with parameters:')
+    xm.master_print(run.params)
+    xm.master_print(f'Total model params: {run.model.total_params()}')
+
+    # TODO: should be set according to save/restore
+    run.sched.update(0)
+
+    # run.model.to(device) doesn't work? 
+    train_loop_xla(run)
+
 def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     """
     :param resume_ckpt:
@@ -292,6 +293,9 @@ def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging',
 
     if infra_mode == 'tpu_colab':
         args = False, resume_ckpt, hps_keys, hps_overrides
+        xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
+    elif infra_mode == 'tpu_kaggle':
+        args = True, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
     elif infra_mode == 'tpu_vm':
         args = True, resume_ckpt, hps_keys, hps_overrides
