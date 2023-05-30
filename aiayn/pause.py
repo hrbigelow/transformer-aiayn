@@ -93,7 +93,8 @@ class Pause(ABC):
         ckpt = dict(state=state, params=self.params)
 
         if self.use_xla:
-            xm_save(ckpt, path)
+            torch.save(ckpt, path)
+            # xm_save(ckpt, path)
             xm.master_print(f'Saved checkpoint {path} using xm.save')
         else:
             torch.save(ckpt, path)
