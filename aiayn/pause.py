@@ -4,9 +4,31 @@ from abc import ABC, abstractmethod
 from inspect import signature
 
 try:
+    import torch_xla
     import torch_xla.core.xla_model as xm
 except ImportError:
     pass
+
+def xm_save(data, file_or_path, master_only=True, global_master=False):
+    should_write_data = not master_only or xm.is_master_ordinal(
+        local=not global_master)
+
+    cpu_data = _maybe_convert_to_cpu(data, convert=should_write_data)
+    if should_write_data:
+        torch.save(cpu_data, file_or_path)
+
+def _maybe_convert_to_cpu(data, convert=True):
+    def convert_fn(tensors):
+        torch_xla._XLAC._xla_sync_multi(
+                tensors, devices=[], wait=True, sync_xla_data=True)
+        if not convert:
+            return tensors
+        return torch_xla._XLAC._xla_get_cpu_tensors(tensors)
+
+    def select_fn(v):
+        return type(v) == torch.Tensor and xm.is_xla_tensor(v)
+
+    return xm.ToXlaTensorArena(convert_fn, select_fn).transform(data)
 
 class Pause(ABC):
     """
@@ -69,8 +91,9 @@ class Pause(ABC):
         """
         state = self._get_state()
         ckpt = dict(state=state, params=self.params)
+
         if self.use_xla:
-            xm.save(ckpt, path)
+            xm_save(ckpt, path)
             xm.master_print(f'Saved checkpoint {path} using xm.save')
         else:
             torch.save(ckpt, path)
