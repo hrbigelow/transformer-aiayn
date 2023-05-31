@@ -27,6 +27,16 @@ def beam_search_score(alpha, beta, out_len, log_prob, in_out_attn):
 
     return log_prob / lp(out_len) + cp(in_out_attn)
 
+def extend_paths(model, live_seq, live_logprob):
+    """
+    model: conditional model log P(token | prev_seq, encoder_seq)
+    live_seq: [batch_size, beam_size, seq_len]
+    live_logprob: [batch_size, beam_size]
+    Returns:
+    ext_logprob: [batch_size, beam_size, num_tokens]
+    """
+
+
 """
 From the authors of https://arxiv.org/pdf/1609.08144.pdf: 
 

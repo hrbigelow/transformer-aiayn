@@ -105,6 +105,11 @@ def tokenize_data(dataset, num_proc):
 
 def preprocess(cache_dir, data_dir, num_proc=8, shard=None):
     """
+    :param cache_dir:  Huggingface cache directory 
+    :param data_dir: final destination for dataset
+    :num_proc: number of processes for parallel data processing
+    :shard:  if present, format is (`total_shards`, `shard_number`)
+       For example '(100, 5)' means take the 5th shard out of 100
     """
     import os
     if not os.path.exists(data_dir):

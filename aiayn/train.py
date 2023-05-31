@@ -248,18 +248,21 @@ def _mp_fn(rank, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
     # run.model.to(device) doesn't work? 
     train_loop_xla(run)
 
-def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
+def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', 
+        **hps_overrides):
     """
     :param resume_ckpt:
-           if present, resume from this checkpoint
-    :param data_path:
-           path to dataset prepared using python -m aiayn.data script
+Full path to a checkpoint file.  Use `None` (without quotes) for absent.
+A second line of documentation
+A third line
+    :param hps_overrides: Can be any of the following:
+           data_path
+              path to dataset prepared using python -m aiayn.data script
     :param streamvis_run_name: name for scoping the run for visualization
     :param pubsub_project: the GCP project with Cloud Pub/Sub API enabled
     :param pubsub_topic: the GCP topic associated with pubsub_project
     :param streamvis_log_file: path to streamvis log file (optional) 
 
-    # optional command-line overrides
     :param batch_size: SGD batch size
     :param update_every: number of loader steps to accumulate gradients for before
                          taking an optimizer step
@@ -274,9 +277,6 @@ def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging',
     :param compile_backend: torch.compile backend name to use.  Do not compile if None 
     :param infra_mode: one of tpu_colab, tpu_vm, gpu
     """
-    # hps_overrides = { k: v for k, v in locals().items() if v is not None }
-    # hps_overrides.pop('resume_ckpt', None)
-    # make a copy
 
     """
     param_patterns = dict(
@@ -289,6 +289,10 @@ def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging',
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
     """
+    # do final filtering of the dataset
+    _ = data.get_dataset(hps_overrides['data_path'],
+            hps_overrides['max_sentence_length'], num_proc=4)
+
     hps_overrides['infra_mode'] = infra_mode
 
     if infra_mode == 'tpu_colab':
@@ -296,7 +300,7 @@ def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging',
         xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
     elif infra_mode == 'tpu_kaggle':
         args = True, resume_ckpt, hps_keys, hps_overrides
-        xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
+        xmp.spawn(_mp_fn, args=args, start_method='fork')
     elif infra_mode == 'tpu_vm':
         args = True, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args)
