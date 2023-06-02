@@ -211,9 +211,11 @@ class Model(nn.Module):
         super().__init__()
         self.rng = t.Generator()
         self.rng.manual_seed(hps.random_seed)
+        self.hps = hps
         token_histo = token_info['histo']
         self.pad_token_id = token_info['pad_token_id']
         T = token_histo.shape[0]
+
         self.embed_matrix = nn.Embedding(T,hps.M)
         self.encoder = Encoder(hps, self.embed_matrix)
         self.decoder = Decoder(hps, T, self.embed_matrix)
@@ -228,7 +230,7 @@ class Model(nn.Module):
         shape_map = Counter(tuple(par.shape) for par in self.parameters())
         return
 
-    def input_output_attention(self, enc_input, dec_input):
+    def dec_enc_attention(self, enc_input, dec_input):
         """
         c, d are lengths in tokens
         enc_input: bc
@@ -237,6 +239,7 @@ class Model(nn.Module):
 
         Needed for beam search
         """
+        # I will assume the attention used should be over the last layer
         pass
 
     def regex_params(self, pat):
@@ -343,6 +346,14 @@ class Model(nn.Module):
         dec_output = self.decoder(enc_output, dec_input)
         return dec_output
 
+    def predict(self, enc_input):
+        alpha = self.hps.beam_search_alpha
+        beta = self.hps.beam_search_beta
+        beam_size = self.hps.beam_size
+        max_length = self.hps.beam_search_maxlen 
+        seq, score = funcs.beam_search(self, alpha, beta, beam_size, max_length, enc_input)
+        return seq
+
 class Loss(nn.Module):
     def __init__(self, token_histo, T, pad_value, smoothing_eps=0.1):
         """
@@ -378,7 +389,7 @@ class Loss(nn.Module):
     def forward(self, dec_input, dec_output):
         """
         dec_input: bc
-        dec_output: ()
+        dec_output: bct
         """
         # bc
         labels = dec_input[:,1:]

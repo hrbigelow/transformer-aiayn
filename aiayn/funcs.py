@@ -1,11 +1,57 @@
 import heapq
+import torch.nn.functional as F
+import torch
+import numpy as np
 
-def beam_search_score(alpha, beta, out_len, log_prob, in_out_attn):
+import pdb
+
+def gather_nd(value, index, axes):
+    """
+    value: any shape
+    index: [*dest, d]
+    axes: tuple of d axes into value
+
+    For some setting of the tuple `dest`, index[*dest,:] gives a tuple of d
+    coordinates.  Combining those d coordinates with ':' in the shape of value: 
+
+    addr = index[*dest,:]
+    output[*dest] = value[interp(*addr,:)]
+    """
+    # check `axes` are valid relative to `value` shape
+    # check `index` shape is valid relative to `axes`
+    if any(a not in range(value.ndim) for a in axes):
+        raise RuntimeError(
+            f'axes should all be valid axes into `value`.  Got {axes=}, '
+            f'{value.shape=}')
+    if index.ndim == 0 or index.shape[-1] != len(axes):
+        raise RuntimeError(
+            f'index.shape[0] must equal number of axes.  Got {index.shape=}, '
+            f'{axes=}')
+    if index.dtype.is_floating_point or index.dtype.is_complex:
+        raise RuntimeError(
+            f'index.dtype must be integral.  Got {index.dtype=}')
+
+    # do not check for out-of-bounds?
+    num_axes = len(axes)
+    perm = axes + tuple(i for i in range(value.ndim) if i not in axes)
+    perm_value = value.permute(*perm)
+    num_slice = np.prod(perm_value.shape[:num_axes])
+    slice_shape = perm_value.shape[num_axes:]
+    flat_value = perm_value.reshape(num_slice, *slice_shape)
+    cumul_axes = [np.prod(axes[i+1:], initial=1) for i in range(num_axes)]
+    cumul_axes = torch.tensor(cumul_axes, dtype=torch.int64)
+    flat_index = torch.einsum('...k,k->...', index, cumul_axes)
+    out_shape = list(flat_index.shape)
+    flat_result = torch.index_select(flat_value, 0, flat_index.flatten())
+    result = flat_result.reshape(*out_shape, *slice_shape)
+    return result
+
+def beam_search_score(alpha, beta, out_len, log_prob, dec_enc_attn):
     """
     Scoring function used by beam search, see eq 14 from
     https://arxiv.org/pdf/1609.08144.pdf, as referenced by original AIAYN paper.
     
-    in_out_attn: shape I,J.  p[i,j] is attention probability of j'th output token on 
+    dec_enc_attn: shape I,J.  p[i,j] is attention probability of j'th output token on 
                  i'th input token 
                  sum_i(p[i,j]) = 1 by construction
     log_prob: log(P(output|input)), the log probability assigned by the model
@@ -20,22 +66,77 @@ def beam_search_score(alpha, beta, out_len, log_prob, in_out_attn):
         denom = 6.0 ** alpha
         return numer / denom
 
-    def cp(in_out_attention):
-        # the function scoring the input-to-output attention matrix (p, in the paper)
-        term = t.log(t.min(in_out_attention.sum(axis=1), 1.0))
-        return beta * term.sum(axis=0)
+    def coverage_penalty(dec_enc_attention):
+        """
+        dec_enc_attention: [batch, in_positions, out_positions]
+        each slice [b, :, j] is normalized
 
-    return log_prob / lp(out_len) + cp(in_out_attn)
+        Returns:
+        penalty: [batch]
+        """
+        term = torch.log(torch.min(dec_enc_attention.sum(axis=2), 1.0))
+        return beta * term.sum(axis=1)
 
-def extend_paths(model, live_seq, live_logprob):
+    return log_prob / lp(out_len) + coverage_penalty(dec_enc_attn)
+
+def extend_paths(i, model, enc_seq, live_seq, live_logprob):
     """
+    Computes the conditional log probability of each possible final token conditioned
+    on all previously generated decoder sequence and the encoder sequence.
+
+    i: new sequence position index to create prediction for
     model: conditional model log P(token | prev_seq, encoder_seq)
-    live_seq: [batch_size, beam_size, seq_len]
+    live_seq: [batch_size, beam_size, max_seq_len]
+       token sequences predicted by the decoder so far
+       live_seq[:,:,:i] are populated, while the rest are filled with a PAD token
     live_logprob: [batch_size, beam_size]
     Returns:
     ext_logprob: [batch_size, beam_size, num_tokens]
     """
+    log_prob = model(enc_seq, live_seq)
+    return live_logprob * log_prob[:,i,:].unsqueeze(1)
 
+
+def topk_seqs(seqs, scores, k):
+    """
+    seqs: [batch_size, other, context_size]
+    scores: [batch_size, other]
+
+    Return the top-k scoring seqs and scores for each batch
+    """
+    top_scores, inds = torch.topk(scores, k, dim=1)
+    top_seqs = gather_nd(seqs, inds, axes=(1,))
+    return top_seqs, top_scores
+
+def merge_extended(i, model, ext_seq, ext_logprob, complete_seq, complete_scores, k):
+    """
+    ext_seq: [batch_size, 2*beam_size, max_seq_len]
+    ext_logprob: [batch_size, 2*beam_size]
+    complete_seq [batch_size, beam_size, max_seq_len]
+    complete_scores [batch_size, beam_size] 
+
+    Identifies the subset of ext_seq that end in EOS
+    Computes length-normalized scores for those sequences
+    Takes top k among the newly completed sequences and existing complete_seq
+    Returns:
+
+    merged_seq [batch_size, beam_size, max_seq_len]
+    merged_scores [batch_size, beam_size]
+    """
+    eos_token = 5000 # FIXME
+    current_seqlen = i + 1
+    # compute adjusted scores for all ext_seq
+    dec_enc_att = model.dec_enc_attention()
+    ext_score = adjusted_score(alpha, beta, current_seqlen, ext_logprob, dec_enc_att)
+    ext_score = torch.where(ext_seq[:,:,i] == eos_token, -torch.inf, ext_score)
+    # need to pad complete_seq
+
+    # batch_size, 3*beam_size
+    all_seq = torch.concat((ext_seq, complete_seq), dim=1)
+    all_score = torch.concat((ext_score, complete_score), dim=1)
+    new_seq, new_score = topk_seqs(all_seq, all_score, k)
+    return new_seq, new_score
+   
 
 """
 From the authors of https://arxiv.org/pdf/1609.08144.pdf: 
@@ -49,36 +150,22 @@ From the authors of https://arxiv.org/pdf/1609.08144.pdf:
  also has the effect that very quickly no more hypotheses will be generated once a
  sufficiently good hypothesis has been found, so the search will end quickly
 """
-
-def beam_search(model, beam_width, length_penalty, x):
+def beam_search(model, alpha, beta, beam_size, max_length, enc_input):
     """
-    model(x, y) -> T probabilities
-    x: input token sequence
-    beam_width: max number of states stored at any given time
-    a `state` is a single path ending on a node of the T-ary tree 
-
-    Also, assume model.attn_probs(x, y) -> p
     """
-    # the set of complete sentences (ending with eos_token), 
-    # paired with beam_search_score
-    complete = [(0, None) for _ in range(beam_width)]
+    # initialize
+    batch_size = enc_input.shape[0]
+    live_seq = t.full((batch_size, 2*beam_size, max_length, pad_token_id)
+    live_logprob = t.full(live_seq.shape[:2], 0.0)
 
-    # current set of partial sentences (not ending with eos_token)
-    # paired with log_prob score
-    partial = [(0, None) for _ in range(beam_width)]
+    complete_seq = t.full((batch_size, beam_size, max_length), pad_token_id)
+    complete_score = t.full(complete_seq.shape[:2], 0.0)
 
-    begin_tok = 0
-    dq = [(begin_tok, 0)]  # (token, depth)
-    path = []
-    while dq:
-        node, depth = dq.pop(0)
-        if depth == len(path):
-            path.append(node)
-        path[depth] = node
-        for nbor in neighbors(n):
-            if PASSED(heap, path, nbor): # score path + nbor
-                dq.append((nbor, depth+1))
-
-
-
+    for i in range(max_length):
+        ext_logprob = extend_paths(i, model, enc_input, live_seq, live_logprob)
+        ext_seq, ext_logprob = topk_seqs(live_seq, ext_logprob, 2*beam_size)
+        complete_seq, complete_score = \
+            merge_extended(i, model, ext_seq, ext_logprob, complete_seq,
+                    complete_score, beam_size)
+    return complete_seq, complete_score
 

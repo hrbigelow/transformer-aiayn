@@ -45,7 +45,11 @@ arch = Hyperparams(
     V = 64, # value (d_v in paper)
     M = 512, # model (d_model in paper)
     F = 2048, # feed-forward dimension (d_ff in paper)
-    num_layers = 6
+    num_layers = 6,
+    beam_size = 4, # From section 6.1
+    beam_search_alpha = 0.6, # From section 6.1 
+    beam_search_beta = 0.0, # Not mentioned in paper (FIXME)
+    beam_search_maxlen = 100 
 )
 
 tiny = Hyperparams(
@@ -54,7 +58,11 @@ tiny = Hyperparams(
     V = 8, # value (d_v in paper)
     M = 32, # model (d_model in paper)
     F = 128, # feed-forward dimension (d_ff in paper)
-    num_layers = 2
+    num_layers = 2,
+    beam_size = 4, # From section 6.1
+    beam_search_alpha = 0.6, # From section 6.1 
+    beam_search_beta = 0.0, # Not mentioned in paper
+    beam_search_maxlen = 100
 )
 
 reg = Hyperparams(

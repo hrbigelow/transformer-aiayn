@@ -183,8 +183,10 @@ def train_loop_xla(run):
         loss[report] = scalar_loss
         learn_rates[report] = run.sched.current_lr()
 
-        xm.optimizer_step(run.opt)
-        run.opt.zero_grad()
+        if run.step > 0 and report ==  R - 1:
+            combined_loss = xm.mesh_reduce('cl', loss, element_mean_fn)
+            args = (run.logger, epoch, steps, loss, learn_rates)
+            xm.add_step_closure(report_fn, args, run_async=False)
 
         if (run.step % run.params.ckpt_every == 0 and 
                 run.step > 0 and run.step != run.params.resume_ckpt):
@@ -192,12 +194,9 @@ def train_loop_xla(run):
             # this crashes if not in a step closure
             xm.add_step_closure(run.save, args=(path,), run_async=False)
 
-        if run.step > 0 and report ==  R - 1:
-            combined_loss = xm.mesh_reduce('cl', loss, element_mean_fn)
-            args = (run.logger, epoch, steps, loss, learn_rates)
-            xm.add_step_closure(report_fn, args, run_async=False)
+        xm.optimizer_step(run.opt, barrier=True)
+        run.opt.zero_grad()
 
-        xm.mark_step(wait=True)
         
         run.step += 1
         run.sched.update(run.step)
@@ -226,17 +225,26 @@ def train_loop_xla(run):
         # if step == 50:
             # xm.master_print(met.metrics_report(), flush=True)
 
-def _mp_fn(rank, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
+def _mp_fn(rank, lock, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
     if use_pjrt:
         dist.init_process_group('xla', init_method='pjrt://')
     run = Run(xm.xla_device(), True)
 
     if resume_ckpt is None:
         hps = hparams.setup_hparams(hps_keys, hps_overrides)
-        run.init(hps)
+        if lock:
+            with lock:
+                run.init(hps)
+        else:
+            run.init(hps)
     else:
         # print(f'Resuming from {path}')
-        run.load(resume_ckpt, **hps_overrides)
+        if lock:
+            with lock:
+                run.load(resume_ckpt, **hps_overrides)
+        else:
+            run.load(resume_ckpt, **hps_overrides)
+
 
     xm.master_print('Running with parameters:')
     xm.master_print(run.params)
@@ -252,9 +260,9 @@ def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging',
         **hps_overrides):
     """
     :param resume_ckpt:
-Full path to a checkpoint file.  Use `None` (without quotes) for absent.
-A second line of documentation
-A third line
+        Full path to a checkpoint file.  Use `None` (without quotes) for absent.
+        A second line of documentation
+        A third line
     :param hps_overrides: Can be any of the following:
            data_path
               path to dataset prepared using python -m aiayn.data script
@@ -289,6 +297,7 @@ A third line
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
     """
+    lock = t.multiprocessing.Lock()
     # do final filtering of the dataset
     _ = data.get_dataset(hps_overrides['data_path'],
             hps_overrides['max_sentence_length'], num_proc=4)
@@ -296,13 +305,13 @@ A third line
     hps_overrides['infra_mode'] = infra_mode
 
     if infra_mode == 'tpu_colab':
-        args = False, resume_ckpt, hps_keys, hps_overrides
+        args = lock, False, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
     elif infra_mode == 'tpu_kaggle':
-        args = True, resume_ckpt, hps_keys, hps_overrides
+        args = lock, True, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args, start_method='fork')
     elif infra_mode == 'tpu_vm':
-        args = True, resume_ckpt, hps_keys, hps_overrides
+        args = None, True, resume_ckpt, hps_keys, hps_overrides
         xmp.spawn(_mp_fn, args=args)
     elif infra_mode == 'gpu':
         pass
