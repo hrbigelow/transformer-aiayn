@@ -50,9 +50,10 @@ class Run(pause.Pause):
     Encapsulates all hyperparams and state information for the whole run.
     Pause implements the checkpointing save/restore operation.
     """
-    def __init__(self, device, lock, use_xla):
+    def __init__(self, device, model_lock, print_lock, use_xla):
         super().__init__(device, use_xla)
-        self.lock = lock
+        self.model_lock = model_lock
+        self.print_lock = print_lock
         self.start_time = time.time()
 
     def elapsed(self):
@@ -72,7 +73,7 @@ class Run(pause.Pause):
                 f'infra_mode must be one of \'tpu_vm\', \'tpu_colab\', or \'gpu\'')
 
     def _make(self, state=None):
-        print_with_mem(f'Started run._make', self.lock)
+        print_with_mem(f'Started run._make', self.print_lock)
         if state is not None:
             self.step = state['step']
         else:
@@ -84,25 +85,25 @@ class Run(pause.Pause):
 
         # model
         self.model = model.Model(self.params, token_info) 
-        print_with_mem(f'Instantiated model on CPU', self.lock)
+        print_with_mem(f'Instantiated model on CPU', self.print_lock)
         if state is not None:
             model_state = state['model']
             self.model.load_state_dict(model_state['weights'])
             self.model.rng.set_state(model_state['rng'])
         self.model = self.model.to(self.device)
-        print_with_mem(f'Moved model to device', self.lock)
+        print_with_mem(f'Moved model to device', self.print_lock)
 
         # optimizer
         betas = self.params.adam_beta1, self.params.adam_beta2
         self.opt = Adam(self.model.parameters(), betas=betas, eps=self.params.adam_eps)
-        print_with_mem(f'Instantiated Adam optimizer', self.lock)
+        print_with_mem(f'Instantiated Adam optimizer', self.print_lock)
         if state is not None:
             self.opt.load_state_dict(state['optim'])
 
         # sampler
         self.sampler = data.BatchedSampler(self.params.batch_size,
                 self.params.bin_size, self.params.random_seed)
-        print_with_mem(f'Instantiated data.BatchedSampler', self.lock)
+        print_with_mem(f'Instantiated data.BatchedSampler', self.print_lock)
         if state is not None:
             self.sampler.load(state['sampler'])
 
@@ -111,7 +112,7 @@ class Run(pause.Pause):
 
         if self.params.streamvis_run_name is not None: 
             self.logger = DataLogger(self.params.streamvis_run_name)
-            print_with_mem(f'Instantiatated DataLogger', self.lock)
+            print_with_mem(f'Instantiatated DataLogger', self.print_lock)
             if self.params.pubsub_project is not None:
                 self.logger.init_pubsub(self.params.pubsub_project, self.params.pubsub_topic)
             if self.params.streamvis_log_file is not None:
@@ -132,15 +133,15 @@ class Run(pause.Pause):
                 return data.get_dataset(self.params.data_path,
                         self.params.max_sentence_length, num_proc=4)
             self.dataset = self.serial_exec.run(get_ds)
-            print_with_mem(f'Loaded dataset', self.lock)
+            print_with_mem(f'Loaded dataset', self.print_lock)
             dataset_size = len(self.dataset)
             self.sampler.set_replica_info(dataset_size, num_shards, shard)
             pad_loader = data.PadLoader(self.params.max_sentence_length,
                     self.model.pad_token_id, self.dataset, self.sampler) 
-            print_with_mem(f'Instantiated data.PadLoader', self.lock)
+            print_with_mem(f'Instantiated data.PadLoader', self.print_lock)
             para_loader = pl.ParallelLoader(pad_loader, [self.device])
             per_device_loader = para_loader.per_device_loader(self.device)
-            print_with_mem(f'Instaitated pl.ParallelLoader', self.lock)
+            print_with_mem(f'Instaitated pl.ParallelLoader', self.print_lock)
             self.loader = per_device_loader
 
             self.sched = model.CustomScheduler(self.opt, self.params.M,
@@ -268,22 +269,22 @@ def train_loop_xla(run):
         # if step == 50:
             # xm.master_print(met.metrics_report(), flush=True)
 
-def _mp_fn(rank, lock, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
+def _mp_fn(rank, model_lock, print_lock, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
     if use_pjrt:
         dist.init_process_group('xla', init_method='pjrt://')
-    run = Run(xm.xla_device(), lock, True)
+    run = Run(xm.xla_device(), model_lock, print_lock, True)
 
     if resume_ckpt is None:
         hps = hparams.setup_hparams(hps_keys, hps_overrides)
-        if lock:
-            with lock:
+        if model_lock:
+            with model_lock:
                 run.init(hps)
         else:
             run.init(hps)
     else:
         # print(f'Resuming from {path}')
-        if lock:
-            with lock:
+        if model_lock:
+            with model_lock:
                 run.load(resume_ckpt, **hps_overrides)
         else:
             run.load(resume_ckpt, **hps_overrides)
@@ -340,22 +341,27 @@ def main(infra_mode, resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging',
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
     """
-    lock = t.multiprocessing.Lock()
+    model_lock = t.multiprocessing.Lock()
+    print_lock = t.multiprocessing.Lock()
     # do final filtering of the dataset
     _ = data.get_dataset(hps_overrides['data_path'],
             hps_overrides['max_sentence_length'], num_proc=4)
 
     hps_overrides['infra_mode'] = infra_mode
 
+    def get_args(use_lock, use_pjrt):
+        if use_lock:
+            locks = model_lock, print_lock
+        else:
+            locks = None, None
+        return *locks, use_pjrt, resume_ckpt, hps_keys, hps_overrides
+
     if infra_mode == 'tpu_colab':
-        args = lock, False, resume_ckpt, hps_keys, hps_overrides
-        xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
+        xmp.spawn(_mp_fn, args=get_args(True, False), nprocs=8, start_method='fork')
     elif infra_mode == 'tpu_kaggle':
-        args = lock, True, resume_ckpt, hps_keys, hps_overrides
-        xmp.spawn(_mp_fn, args=args, start_method='fork')
+        xmp.spawn(_mp_fn, args=get_args(True, True), start_method='fork')
     elif infra_mode == 'tpu_vm':
-        args = None, True, resume_ckpt, hps_keys, hps_overrides
-        xmp.spawn(_mp_fn, args=args)
+        xmp.spawn(_mp_fn, args=get_args(False, True))
     elif infra_mode == 'gpu':
         pass
     else:
