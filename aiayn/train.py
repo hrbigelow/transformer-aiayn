@@ -1,3 +1,4 @@
+import psutil
 import torch as t
 import torch.distributed as dist
 from torch.optim import Adam
@@ -20,14 +21,38 @@ try:
 except ImportError:
     print(f'Warning: could not import libraries from torch_xla')
 
+def print_with_mem(preamble, lock=None):
+    if xm.get_ordinal() not in (0, 1):
+        return
+    psinfo = psutil.Process().memory_info()
+    cpu_rss_gb = psinfo.rss / 1024 ** 3
+    cpu_mem_info = psutil.virtual_memory()
+    cpu_gb = (cpu_mem_info.total - cpu_mem_info.available) / 1024 ** 3
+    # cpu_gb = cpu_mem_info.used / 1024 ** 3
+    rank = xm.get_ordinal()
+    msg = f'{preamble:70} rank:{rank} (GB Mem): {cpu_rss_gb:.2f} (RSS) {cpu_gb:.2f} (Virt)'
+    try:
+        tpu_mem_info = xm.get_memory_info(xm.xla_device())
+    except RuntimeError:
+        tpu_mem_info = None
+    if tpu_mem_info:
+        tpu_gb = (tpu_mem_info["kb_total"] - tpu_mem_info["kb_free"]) / (1024 ** 2)
+        msg += f'{tpu_gb:.2f} TPU'
+
+    if lock:
+        with lock:
+            print(msg, flush=True)
+    else:
+        print(msg, flush=True)
 
 class Run(pause.Pause):
     """
     Encapsulates all hyperparams and state information for the whole run.
     Pause implements the checkpointing save/restore operation.
     """
-    def __init__(self, device, use_xla):
+    def __init__(self, device, lock, use_xla):
         super().__init__(device, use_xla)
+        self.lock = lock
         self.start_time = time.time()
 
     def elapsed(self):
@@ -47,6 +72,7 @@ class Run(pause.Pause):
                 f'infra_mode must be one of \'tpu_vm\', \'tpu_colab\', or \'gpu\'')
 
     def _make(self, state=None):
+        print_with_mem(f'Started run._make', self.lock)
         if state is not None:
             self.step = state['step']
         else:
@@ -58,32 +84,40 @@ class Run(pause.Pause):
 
         # model
         self.model = model.Model(self.params, token_info) 
+        print_with_mem(f'Instantiated model on CPU', self.lock)
         if state is not None:
             model_state = state['model']
             self.model.load_state_dict(model_state['weights'])
             self.model.rng.set_state(model_state['rng'])
         self.model = self.model.to(self.device)
+        print_with_mem(f'Moved model to device', self.lock)
 
         # optimizer
         betas = self.params.adam_beta1, self.params.adam_beta2
         self.opt = Adam(self.model.parameters(), betas=betas, eps=self.params.adam_eps)
+        print_with_mem(f'Instantiated Adam optimizer', self.lock)
         if state is not None:
             self.opt.load_state_dict(state['optim'])
 
         # sampler
         self.sampler = data.BatchedSampler(self.params.batch_size,
                 self.params.bin_size, self.params.random_seed)
+        print_with_mem(f'Instantiated data.BatchedSampler', self.lock)
         if state is not None:
             self.sampler.load(state['sampler'])
 
         if self.params.infra_mode in ('tpu_colab', 'tpu_vm'):
             self.serial_exec = xmp.MpSerialExecutor()
 
-        self.logger = DataLogger(self.params.streamvis_run_name)
-        if self.params.pubsub_project is not None:
-            self.logger.init_pubsub(self.params.pubsub_project, self.params.pubsub_topic)
-        if self.params.streamvis_log_file is not None:
-            self.logger.init_write_log(self.params.streamvis_log_file)
+        if self.params.streamvis_run_name is not None: 
+            self.logger = DataLogger(self.params.streamvis_run_name)
+            print_with_mem(f'Instantiatated DataLogger', self.lock)
+            if self.params.pubsub_project is not None:
+                self.logger.init_pubsub(self.params.pubsub_project, self.params.pubsub_topic)
+            if self.params.streamvis_log_file is not None:
+                self.logger.init_write_log(self.params.streamvis_log_file)
+        else:
+            self.logger = None
 
         if self.use_xla:
             shard, num_shards = xm.get_ordinal(), xm.xrt_world_size()
@@ -98,12 +132,15 @@ class Run(pause.Pause):
                 return data.get_dataset(self.params.data_path,
                         self.params.max_sentence_length, num_proc=4)
             self.dataset = self.serial_exec.run(get_ds)
+            print_with_mem(f'Loaded dataset', self.lock)
             dataset_size = len(self.dataset)
             self.sampler.set_replica_info(dataset_size, num_shards, shard)
             pad_loader = data.PadLoader(self.params.max_sentence_length,
                     self.model.pad_token_id, self.dataset, self.sampler) 
+            print_with_mem(f'Instantiated data.PadLoader', self.lock)
             para_loader = pl.ParallelLoader(pad_loader, [self.device])
             per_device_loader = para_loader.per_device_loader(self.device)
+            print_with_mem(f'Instaitated pl.ParallelLoader', self.lock)
             self.loader = per_device_loader
 
             self.sched = model.CustomScheduler(self.opt, self.params.M,
@@ -131,6 +168,8 @@ def test_handler(signum, frame):
 
 
 def report_fn(logger, epoch, steps, loss, learn_rates):
+    if logger is None:
+        return
     if xm.is_master_ordinal():
         # 1, R, 2
         steps = steps.cpu()
@@ -183,19 +222,23 @@ def train_loop_xla(run):
         loss[report] = scalar_loss
         learn_rates[report] = run.sched.current_lr()
 
+        xm.optimizer_step(run.opt, barrier=True)
+        run.opt.zero_grad()
+
         if run.step > 0 and report ==  R - 1:
             combined_loss = xm.mesh_reduce('cl', loss, element_mean_fn)
             args = (run.logger, epoch, steps, loss, learn_rates)
             xm.add_step_closure(report_fn, args, run_async=False)
+            print_with_mem(f'After optimizer step {run.step}')
 
         if (run.step % run.params.ckpt_every == 0 and 
                 run.step > 0 and run.step != run.params.resume_ckpt):
             path = run.params.ckpt_templ.format(run.step)
+            print_with_mem('Saving checkpoint')
+            run.save(path)
             # this crashes if not in a step closure
-            xm.add_step_closure(run.save, args=(path,), run_async=False)
+            # xm.add_step_closure(run.save, args=(path,), run_async=False)
 
-        xm.optimizer_step(run.opt, barrier=True)
-        run.opt.zero_grad()
 
         
         run.step += 1
@@ -228,7 +271,7 @@ def train_loop_xla(run):
 def _mp_fn(rank, lock, use_pjrt, resume_ckpt, hps_keys, hps_overrides):
     if use_pjrt:
         dist.init_process_group('xla', init_method='pjrt://')
-    run = Run(xm.xla_device(), True)
+    run = Run(xm.xla_device(), lock, True)
 
     if resume_ckpt is None:
         hps = hparams.setup_hparams(hps_keys, hps_overrides)
