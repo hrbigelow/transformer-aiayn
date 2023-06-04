@@ -30,14 +30,14 @@ def print_with_mem(preamble, lock=None):
     cpu_gb = (cpu_mem_info.total - cpu_mem_info.available) / 1024 ** 3
     # cpu_gb = cpu_mem_info.used / 1024 ** 3
     rank = xm.get_ordinal()
-    msg = f'{preamble:70} rank:{rank} (GB Mem): {cpu_rss_gb:.2f} (RSS) {cpu_gb:.2f} (Virt)'
+    msg = f'{preamble:70} rank:{rank} (GB Mem): ({cpu_rss_gb:.2f} RSS), ({cpu_gb:.2f} Virt)'
     try:
         tpu_mem_info = xm.get_memory_info(xm.xla_device())
     except RuntimeError:
         tpu_mem_info = None
     if tpu_mem_info:
         tpu_gb = (tpu_mem_info["kb_total"] - tpu_mem_info["kb_free"]) / (1024 ** 2)
-        msg += f'{tpu_gb:.2f} TPU'
+        msg += f', ({tpu_gb:.2f} TPU)'
 
     if lock:
         with lock:

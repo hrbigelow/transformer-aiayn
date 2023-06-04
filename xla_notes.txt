@@ -1,30 +1,234 @@
-main process (on the host node)
-
-- Instantiate the model
-- Instantiate the wrapped model using xmp.MpModelWrapper (optional)
-
-Data pipeline
-- Instantiate an xmp.MpSerialExecutor() for use later
-- instantiate Dataset
-
-Within each spawned process, setup (the _mp_fn)
-
-- call torch.manual_seed(...)
-- obtain the device (xm.xla_device())
-- move the model to the device
-
-Data pipeline
-- dataset = xmp.MpSerialExecutor.run(dataset) (optional)
-- instantiate the distributed sampler
-- instantiate a DataLoader 
-- instantiate pl.ParallelLoader (pl.ParallelLoader(loader, [device])  )
-- obtain a per-device loader using para_loader.per_device_loader(device)
+From the original paper: https://arxiv.org/pdf/2102.13267.pdf
 
 
-- call the train_loop function
+The LazyTensor implementation includes an additional “barrier” API (mark step() in
+PyTorch, LazyTensorBarrier() in Swift for TensorFlow). This API completes the current
+in-progress IR graph construction, and dispatches it to the runtime for compilation
+and execution. The barrier API takes a boolean parameter to control whether the call
+should block until IR graph execution has completed and all Tensor data has been
+materialized in memory. Implementations of IR incompatible operations call the
+barrier API with the blocking bit set before proceeding with their implementation.
+Future work can remove the barrier API from the public interface.
 
-Within each spawned process, train_loop:
 
-- call xm.optimizer_step(optimizer)
+New error:
+
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/multiprocessing/queues.py", line 244, in _feed
+    obj = _ForkingPickler.dumps(obj)
+  File "/usr/lib/python3.10/multiprocessing/reduction.py", line 51, in dumps
+    cls(buf, protocol).dump(obj)
+TypeError: cannot pickle 'torch._C.Generator' object
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 288, in <module>
+    fire.Fire(main)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 141, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 475, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 691, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 284, in main
+    xmp.spawn(_mp_fn, args=(run,), nprocs=num_cores, start_method='fork')
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 386, in spawn
+    return pjrt.spawn(fn, nprocs, start_method, args)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/experimental/pjrt.py", line 365, in spawn
+    _run_multiprocess(spawn_fn, start_method=start_method)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/experimental/pjrt.py", line 92, in wrapper
+    return fn(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/experimental/pjrt.py", line 322, in _run_multiprocess
+    replica_results = list(
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/experimental/pjrt.py", line 323, in <genexpr>
+    itertools.chain.from_iterable(
+  File "/usr/lib/python3.10/concurrent/futures/process.py", line 575, in _chain_from_iterable_of_lists
+    for element in iterable:
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 621, in result_iterator
+    yield _result_or_cancel(fs.pop())
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 319, in _result_or_cancel
+    return fut.result(timeout)
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 458, in result
+    return self.__get_result()
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.10/multiprocessing/queues.py", line 244, in _feed
+    obj = _ForkingPickler.dumps(obj)
+  File "/usr/lib/python3.10/multiprocessing/reduction.py", line 51, in dumps
+    cls(buf, protocol).dump(obj)
+TypeError: cannot pickle 'torch._C.Generator' object
+
+
+This error happens when setting PJRT_DEVICE=TPU
+
+To configure a GCP TPU VM once logged in, do:
+
+export XRT_TPU_CONFIG="tpu_worker;0;$TPU_IP_ADDRESS:8470"
+
+
+where TPU_IP_ADDRESS can be found with:
+gcloud compute tpus tpu-vm describe tpuvm-pt2-preemp --zone us-central1-b
+
+
+Now getting a new error on my laptop, just appeared out of nowhere:
+export PJRT_DEVICE=GPU
+(does not happen with PJRT_DEVICE=CPU)
+2023-05-21 14:54:18.117875: E tensorflow/compiler/xla/stream_executor/cuda/cuda_dnn.cc:429] Could not create cudnn handle: CUDNN_STATUS_NOT_INITIALIZED
+2023-05-21 14:54:18.117930: E tensorflow/compiler/xla/stream_executor/cuda/cuda_dnn.cc:438] Possibly insufficient driver version: 525.105.17
+2023-05-21 14:54:18.132715: E tensorflow/compiler/xla/status_macros.cc:57] INTERNAL: RET_CHECK failure (tensorflow/compiler/xla/service/gpu/gpu_compiler.cc:626) dnn != nullptr
+
+
+Okay, got a scary error:
+
+  File "<string>", line 1, in <module>
+  File "/usr/lib/python3.10/multiprocessing/spawn.py", line 116, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+  File "/usr/lib/python3.10/multiprocessing/spawn.py", line 126, in _main
+    self = reduction.pickle.load(from_parent)
+  File "/usr/local/lib/python3.10/dist-packages/torch/multiprocessing/reductions.py", line 312, in rebuild_storage_fd
+    storage = cls._new_shared_fd_cpu(fd, size)
+RuntimeError: unable to resize file <filename not specified> to the right size: Invalid argument (22)
+
+This happens whether or not the start_method is fork or spawn.
+
+Note that all of the xla/test scripts use the 'spawn' method, and do not use
+MpModelWrapper.
+
+after trying to run with the __getstate__ and __setstate__ removing the
+torch.Generator()
+
+Instead, I will try to just not keep the Generator object as part of the state.
+
+
+Rendezvous error during saving a checkpoint (the second checkpoint)
+
+Exception in device=TPU:7: tensorflow/compiler/xla/xla_client/mesh_service.cc:377 : Failed to meet rendezvous 'torch_xla.core.xla_model.save': Socket closed (14)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 334, in _mp_start_fn
+    _start_fn(index, pf_cfg, fn, args)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 328, in _start_fn
+    fn(gindex, *args)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 144, in _mp_fn
+    train_loop_xla(run)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 189, in train_loop_xla
+    enc_input, dec_input, load_step, epoch = next(run.loader)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/parallel_loader.py", line 30, in __next__
+    return self.next()
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/parallel_loader.py", line 42, in next
+    xm.mark_step()
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/core/xla_model.py", line 956, in mark_step
+    devctx = _run_step_closures()
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/core/xla_model.py", line 938, in _run_step_closures
+    closure()
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/core/xla_model.py", line 920, in <lambda>
+    step_closures.append(lambda a=args: closure(*a))
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/pause.py", line 73, in save
+    xm.save(ckpt, path)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/core/xla_model.py", line 1065, in save
+    rendezvous('torch_xla.core.xla_model.save')
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/core/xla_model.py", line 1112, in rendezvous
+    return torch_xla._XLAC._xla_rendezvous(get_ordinal(), tag, payload, replicas)
+RuntimeError: tensorflow/compiler/xla/xla_client/mesh_service.cc:377 : Failed to meet rendezvous 'torch_xla.core.xla_model.save': Socket closed (14)
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 329, in <module>
+    fire.Fire(main)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 141, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 475, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 691, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 317, in main
+    xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 397, in spawn
+    result = torch.multiprocessing.start_processes(
+  File "/usr/local/lib/python3.10/dist-packages/torch/multiprocessing/spawn.py", line 197, in start_processes
+    while not context.join():
+  File "/usr/local/lib/python3.10/dist-packages/torch/multiprocessing/spawn.py", line 140, in join
+    raise ProcessExitedException(
+torch.multiprocessing.spawn.ProcessExitedException: process 0 terminated with signal SIGKILL
+
+
+After running commit 3bec96a9ea, with 
+
+
+Exception in device=TPU:0: 'set' object has no attribute 'seek'. You can only torch.load from a file that is seekable. Please pre-load the data into a buffer like io.BytesIO and try to load from it instead.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/torch/serialization.py", line 354, in _check_seekable
+    f.seek(f.tell())
+AttributeError: 'set' object has no attribute 'seek'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 334, in _mp_start_fn
+    _start_fn(index, pf_cfg, fn, args)
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 328, in _start_fn
+    fn(gindex, *args)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 142, in _mp_fn
+    run.load(resume_ckpt, **hps_overrides)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/pause.py", line 61, in load
+    ckpt = torch.load(path)
+  File "/usr/local/lib/python3.10/dist-packages/torch/serialization.py", line 791, in load
+    with _open_file_like(f, 'rb') as opened_file:
+  File "/usr/local/lib/python3.10/dist-packages/torch/serialization.py", line 276, in _open_file_like
+    return _open_buffer_reader(name_or_buffer)
+  File "/usr/local/lib/python3.10/dist-packages/torch/serialization.py", line 261, in __init__
+    _check_seekable(buffer)
+  File "/usr/local/lib/python3.10/dist-packages/torch/serialization.py", line 357, in _check_seekable
+    raise_err_msg(["seek", "tell"], e)
+  File "/usr/local/lib/python3.10/dist-packages/torch/serialization.py", line 350, in raise_err_msg
+    raise type(e)(msg)
+AttributeError: 'set' object has no attribute 'seek'. You can only torch.load from a file that is seekable. Please pre-load the data into a buffer like io.BytesIO and try to load from it instead.
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 307, in <module>
+    fire.Fire(main)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 141, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 475, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 691, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/aiayn/train.py", line 295, in main
+    xmp.spawn(_mp_fn, args=args, nprocs=8, start_method='fork')
+  File "/usr/local/lib/python3.10/dist-packages/torch_xla/distributed/xla_multiprocessing.py", line 397, in spawn
+    result = torch.multiprocessing.start_processes(
+  File "/usr/local/lib/python3.10/dist-packages/torch/multiprocessing/spawn.py", line 197, in start_processes
+    while not context.join():
+  File "/usr/local/lib/python3.10/dist-packages/torch/multiprocessing/spawn.py", line 149, in join
+    raise ProcessExitedException(
+torch.multiprocessing.spawn.ProcessExitedException: process 0 terminated with exit code 17
+
+
+
+Save test:
+
+M = 490
+params: 91512756   
+
+1685393668: epoch=0, steps=tensor([0., 1., 2., 3., 4., 5., 6., 7., 8., 9.]), loss=tensor([10.0071, 10.0179, 10.0119, 10.0033,  9.9986,  9.9991,  9.9923,  9.9633,
+         9.9646,  9.9493])
+Saved checkpoint /content/drive/MyDrive/ai/ckpt/aiayn/may29-10.pt using xm.save
+1685393933: epoch=0, steps=tensor([10., 11., 12., 13., 14., 15., 16., 17., 18., 19.]), loss=tensor([9.9341, 9.9122, 9.9017, 9.8819, 9.8588, 9.8497, 9.8301, 9.8035, 9.7870,
+        9.7782])
+Traceback (most recent call last):
+
+
+M = 400
+params: 74718036
 
 
