@@ -1,6 +1,4 @@
-import heapq
-import torch.nn.functional as F
-import torch
+import tensorflow as tf
 import numpy as np
 
 import pdb
@@ -74,7 +72,7 @@ def beam_search_score(alpha, beta, out_len, log_prob, dec_enc_attn):
         Returns:
         penalty: [batch]
         """
-        term = torch.log(torch.min(dec_enc_attention.sum(axis=2), 1.0))
+        term = tf.log(tf.min(dec_enc_attention.sum(axis=2), 1.0))
         return beta * term.sum(axis=1)
 
     return log_prob / lp(out_len) + coverage_penalty(dec_enc_attn)
@@ -104,7 +102,7 @@ def topk_seqs(seqs, scores, k):
 
     Return the top-k scoring seqs and scores for each batch
     """
-    top_scores, inds = torch.topk(scores, k, dim=1)
+    top_scores, inds = tf.topk(scores, k, dim=1)
     top_seqs = gather_nd(seqs, inds, axes=(1,))
     return top_seqs, top_scores
 
@@ -128,12 +126,12 @@ def merge_extended(i, model, ext_seq, ext_logprob, complete_seq, complete_scores
     # compute adjusted scores for all ext_seq
     dec_enc_att = model.dec_enc_attention()
     ext_score = adjusted_score(alpha, beta, current_seqlen, ext_logprob, dec_enc_att)
-    ext_score = torch.where(ext_seq[:,:,i] == eos_token, -torch.inf, ext_score)
+    ext_score = tf.where(ext_seq[:,:,i] == eos_token, -tf.inf, ext_score)
     # need to pad complete_seq
 
     # batch_size, 3*beam_size
-    all_seq = torch.concat((ext_seq, complete_seq), dim=1)
-    all_score = torch.concat((ext_score, complete_score), dim=1)
+    all_seq = tf.concat((ext_seq, complete_seq), dim=1)
+    all_score = tf.concat((ext_score, complete_score), dim=1)
     new_seq, new_score = topk_seqs(all_seq, all_score, k)
     return new_seq, new_score
    

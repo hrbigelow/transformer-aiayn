@@ -1,128 +1,116 @@
 from dataclasses import dataclass
 import re
 import numpy as np
+import torch as t
+import torch.nn as nn
+from torch import optim
+from torch.linalg import vector_norm
+import torch.nn.functional as F
+from .data import load_token_histo
 from . import hparams
 import pdb
-import jax
-import jax.numpy as jnp
-import haiku as hk
 
-def prepare(hkmod, instance_args, *call_args):
-    def _fn(*call_args):
-        mod = hkmod(*instance_args)
-        return mod(*call_args)
-    return hk.transform(_fn)
-
-class MultiHeadAttention(hk.Module):
+class MultiHeadAttentionBck(nn.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, hps, masked=True):
-        super().__init__(name=None)
-        self.mscale = np.sqrt(hps.M) ** -1
-        self.vscale = np.sqrt(hps.V) ** -1
+    def __init__(self, hps, masked=False):
+        super().__init__()
+        mscale = np.sqrt(hps.M) ** -1
+        vscale = np.sqrt(hps.V) ** -1
+        self.wq = nn.Parameter(t.randn(hps.H,hps.M,hps.K) * mscale)
+        self.wk = nn.Parameter(t.randn(hps.H,hps.M,hps.K) * mscale)
+        self.wv = nn.Parameter(t.randn(hps.H,hps.M,hps.V) * mscale)
+        self.wo = nn.Parameter(t.randn(hps.H,hps.V,hps.M) * vscale)
         self.scale_factor = np.sqrt(hps.K)
+        self.M = hps.M
+        self.masked = masked
+        # TODO: incorporate this into forward (use masked_fill)
+        self.register_buffer('triu', t.triu(t.ones(hps.M, hps.M)))
 
-    def __call__(self, kvinput, qinput):
+    def forward(self, kvinput, qinput):
         """
         kvinput: bcm 
         qinput: bcm 
         output: bcm 
         """
-        kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
-        o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
-        dtype = kvinput.dtype
-
-        wq = hk.get_parameter('wq', [hps.H,hps.M,hps.K], dtype, kqv_init)
-        wk = hk.get_parameter('wk', [hps.H,hps.M,hps.K], dtype, kqv_init)
-        wv = hk.get_parameter('wv', [hps.H,hps.M,hps.V], dtype, kqv_init)
-        wo = hk.get_parameter('wo', [hps.H,hps.V,hps.M], dtype, o_init)
-
-        kval = jnp.einsum('bcm,hmk->bhck', kvinput, wk)
-        qval = jnp.einsum('bcm,hmk->bhck', qinput, wq)
-        vval = jnp.einsum('bcm,hmv->bhcv', kvinput, wv)
-        alogit = jnp.einsum('bhck,bhdk->bhcd', kval, qval)
+        kval = t.einsum('bcm,hmk->bhck', kvinput, self.wk)
+        qval = t.einsum('bcm,hmk->bhck', qinput, self.wq)
+        vval = t.einsum('bcm,hmv->bhcv', kvinput, self.wv)
+        alogit = t.einsum('bhck,bhdk->bhcd', kval, qval)
         if self.masked:
-            # query (d) can only attend to keys (c) at or before it 
-            upper_tri = (jnp.tri(a.logit.shape[2], k=-1) - 1.0) * 100.0
-            alogit += upper_tri 
-        att = jax.nn.softmax(alogit * self.scale_factor ** -1, dim=2)
-        pre = jnp.einsum('bhcd,bhcv->bhdv', att, vval)
-        out = jnp.einsum('bhcv,hvm->bcm', pre, wo)
+            side = kvinput.shape[1]
+            alogit += t.full_like(alogit, -100.0).triu()
+        att = t.softmax(alogit * self.scale_factor ** -1, dim=2)
+        pre = t.einsum('bhcd,bhcv->bhdv', att, vval)
+        out = t.einsum('bhcv,hvm->bcm', pre, self.wo)
+        return out
 
-class PositionwiseFF(hk.Module):
+class PositionwiseFF(nn.Module):
     """
     Implements equation 2 (section 3.3)
     """
     def __init__(self, hps):
         super().__init__()
-        self.mscale = np.sqrt(hps.M) ** -1
-        self.fscale = np.sqrt(hps.F) ** -1
+        mscale = np.sqrt(hps.M) ** -1
+        fscale = np.sqrt(hps.F) ** -1
+        self.w1 = nn.Parameter(t.randn(hps.M,hps.F) * mscale)
+        self.b1 = nn.Parameter(t.zeros(hps.F))
+        self.w2 = nn.Parameter(t.randn(hps.F,hps.M) * fscale)
+        self.b2 = nn.Parameter(t.zeros(hps.M))
         self.M = hps.M
 
     def forward(self, input):
         """
         input: bcm
         """
-        dtype = input.dtype
-        norm_init = hk.initializers.RandomNormal()
-        w1 = hk.get_parameter('w1', [hps.M,hps.F], dtype, norm_init * self.mscale)
-        b1 = hk.get_parameter('b1', [hps.F], jnp.zeros)
-        w2 = hk.get_parameter('w2', [hps.F,hps.M], dtype, norm_init * fscale)
-        b2 = hk.get_parameter('b2', [hps.M], jnp.zeros)
-        s = F.relu(t.einsum('bcm,mf->bcf', input, w1) + b1)
-        out = t.einsum('bcf,fm->bcm', s, w2) + b2
+        s = F.relu(t.einsum('bcm,mf->bcf', input, self.w1) + self.b1)
+        out = t.einsum('bcf,fm->bcm', s, self.w2) + self.b2
         return out
 
-class DropoutAddAndNorm(hk.Module):
+class DropoutAddAndNorm(nn.Module):
     def __init__(self, hps):
         super().__init__()
-        self.rate = hps.dropout_rate
-        self.dropout = hk.dropout(hps.dropout_rate)
-        self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True)
+        self.dropout = nn.Dropout(hps.dropout_rate)
+        self.layer_norm = nn.LayerNorm(hps.M)
 
-    def __call__(self, residual, proximal, is_training):
-        """
-        residual: bdm
-        proximal: bdm
-        output: bdm
-        """
-        if is_training:
-            proximal = self.dropout(hk.next_rng_key(), self.rate, proximal)
+    def forward(self, residual, proximal):
+        proximal = self.dropout(proximal)
         return self.layer_norm(residual + proximal)
 
-class InputEmbedding(hk.Module):
-    def __init__(self, embedding, hps):
+class InputEmbedding(nn.Module):
+    def __init__(self, embedding: t.nn.Embedding, hps):
         super().__init__()
         self.embedding = embedding # T,M
-        self.T = self.embedding.shape[0] 
-        self.M = self.embedding.shape[1]
+        self.T = self.embedding.num_embeddings
+        self.M = self.embedding.embedding_dim
         self.scale_factor = np.sqrt(self.T) ** -1 # my experiment
         self.pos_factor = hps.pos_encoding_factor
 
     def positional_embedding(self, num_positions):
-        pos = jnp.arange(num_positions)
-        denom = 10000 ** jnp.linspace(0, 1, self.M)
+        pos = t.arange(num_positions)
+        denom = 10000 ** t.linspace(0, 1, self.M)
         arg = pos.unsqueeze(-1) / denom.unsqueeze(0)
         # it shouldn't matter what order embeddings are placed but here I follow
         # the paper, and alternate sin with cos
-        pos_emb = jnp.empty(num_positions,self.M)
-        pos_emb[:,::2] = jnp.sin(arg[:,::2])
-        pos_emb[:,1::2] = jnp.cos(arg[:,1::2])
+        pos_emb = t.empty(num_positions,self.M)
+        pos_emb[:,::2] = t.sin(arg[:,::2])
+        pos_emb[:,1::2] = t.cos(arg[:,1::2])
         return pos_emb
 
-    def __call__(self, input):
+    def forward(self, input):
         """
         input: bc (values: integer-encoded token ID)
         output: bcm
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
+        pos_embed = pos_embed.to(input.device)
         # embed = self.embedding(input) * self.scale_factor
-        embed = jnp.take(self.embedding, input, axis=1)
+        embed = self.embedding(input)
         return embed + pos_embed * self.pos_factor
 
-class EncoderLayer(hk.Module):
+class EncoderLayer(nn.Module):
     def __init__(self, hps):
         super().__init__()
         self.att = MultiHeadAttention(hps)
@@ -130,25 +118,25 @@ class EncoderLayer(hk.Module):
         self.ff = PositionwiseFF(hps)
         self.norm2 = DropoutAddAndNorm(hps)
 
-    def __call__(self, input, is_train):
+    def forward(self, input):
         """
         input: bcm
         returns: bcm
         """
         att = self.att(input, input)
-        norm = self.norm1(input, att, is_train)
+        norm = self.norm1(input, att)
         ff = self.ff(norm)
-        out = self.norm2(norm, ff, is_train)
+        out = self.norm2(norm, ff)
         return out
 
-class Encoder(hk.Module):
+class Encoder(nn.Module):
     def __init__(self, hps, embed_matrix):
         super().__init__()
         self.embed_layer = InputEmbedding(embed_matrix, hps)
         mods = (EncoderLayer(hps) for _ in range(hps.num_layers))
-        self.body = hk.Sequential(*mods)
+        self.body = nn.Sequential(*mods)
 
-    def __call__(self, input, is_train):
+    def forward(self, input):
         """
         input: bc
         returns: bcm
@@ -157,7 +145,7 @@ class Encoder(hk.Module):
         out = self.body(out)
         return out
 
-class DecoderLayer(hk.Module):
+class DecoderLayer(nn.Module):
     def __init__(self, hps):
         super().__init__()
         self.mask_att = MultiHeadAttention(hps, masked=True)
@@ -167,58 +155,62 @@ class DecoderLayer(hk.Module):
         self.ff = PositionwiseFF(hps)
         self.norm3 = DropoutAddAndNorm(hps)
 
-    def __call__(self, enc_out, input, is_train):
+    def forward(self, enc_out, input):
         """
         enc_out: bcm
         queries: bcm
         """
         att1 = self.mask_att(input, input)
-        norm1 = self.norm1(input, att1, is_train)
+        norm1 = self.norm1(input, att1)
         att2 = self.att2(enc_out, norm1)
-        norm2 = self.norm2(norm1, att2, is_train)
+        norm2 = self.norm2(norm1, att2)
         ff = self.ff(norm2)
-        out = self.norm3(norm2, ff, is_train)
+        out = self.norm3(norm2, ff)
         return out
 
-class TeeSequential(hk.Module):
+class TeeSequential(nn.Module):
     """
     Like nn.Sequential, but accepts an additional global input in each
-    module.  This is used for the Decoder, with the side-input being the Encoder
-    output representation.
+    module
     """
     def __init__(self, *mods):
         super().__init__()
-        self.layers = mods
+        for l, mod in enumerate(mods):
+            super().add_module(f'{l}', mod)
+        # self.mods = mods
 
-    def __call__(self, side_input, input, is_train):
+    def forward(self, side_input, input):
         out = input
-        for mod in self.layers:
-            out = mod(side_input, out, is_train)
+        for mod in self.children():
+            out = mod(side_input, out)
         return out
 
-class Decoder(hk.Module):
+class Decoder(nn.Module):
     def __init__(self, hps, T, embed_matrix):
         super().__init__()
         self.embed_layer = InputEmbedding(embed_matrix, hps)
-        self.body = TeeSequential(*(DecoderLayer(hps) for _ in range(hps.num_layers)))
+        self.body = TeeSequential(*(DecoderLayer(hps) for _ in
+            range(hps.num_layers)))
         self.linear_final = nn.Linear(hps.M, T)
         self.softmax = nn.Softmax(dim=2)
 
-    def __call__(self, enc_out, dec_in, is_train):
+    def forward(self, enc_out, dec_in):
         """
         enc_out: bcm 
         dec_in: bc
         returns: bct
         """
         out = self.embed_layer(dec_in)
-        out = self.body(enc_out, out, is_train)
+        out = self.body(enc_out, out)
         out = self.linear_final(out)
         out = self.softmax(out)
         return out
 
-class Model(hk.Module):
+class Model(nn.Module):
     def __init__(self, hps, token_info):
         super().__init__()
+        self.rng = t.Generator()
+        self.rng.manual_seed(hps.random_seed)
         self.hps = hps
         token_histo = token_info['histo']
         self.pad_token_id = token_info['pad_token_id']
@@ -229,23 +221,13 @@ class Model(hk.Module):
         self.decoder = Decoder(hps, T, self.embed_matrix)
         self.loss = Loss(token_histo, T, self.pad_token_id) 
 
-    def __call__(self, is_train, enc_input, dec_input, rng_key):
-        """
-        enc_input: bc
-        dec_input: bc
-        returns: bct
-        """
-        enc_output = self.encoder(enc_input, is_train)
-        dec_output = self.decoder(enc_output, dec_input, is_train)
-        return dec_output
-
     def total_params(self):
         # get total number of parameters
-        return sum(par.size for par in self.params_dict().values())
+        return sum(par.numel() for par in self.parameters())
 
     def param_shape_map(self):
         from collections import Counter
-        shape_map = Counter(tuple(par.shape) for par in self.params_dict().values())
+        shape_map = Counter(tuple(par.shape) for par in self.parameters())
         return
 
     def dec_enc_attention(self, enc_input, dec_input):
@@ -266,7 +248,7 @@ class Model(hk.Module):
         name => (*captures)
         """
         ret = {}
-        for name, par in self.params_dict():
+        for name, par in self.named_parameters():
             m = re.match(pat, name)
             if m:
                 ret[name] = m.groups()
@@ -354,6 +336,16 @@ class Model(hk.Module):
         state['rng'] = gen
         self.__dict__.update(state)
 
+    def forward(self, enc_input, dec_input):
+        """
+        enc_input: bc
+        dec_input: bc
+        returns: bct
+        """
+        enc_output = self.encoder(enc_input)
+        dec_output = self.decoder(enc_output, dec_input)
+        return dec_output
+
     def predict(self, enc_input):
         alpha = self.hps.beam_search_alpha
         beta = self.hps.beam_search_beta
@@ -362,20 +354,19 @@ class Model(hk.Module):
         seq, score = funcs.beam_search(self, alpha, beta, beam_size, max_length, enc_input)
         return seq
 
-class Objective(hk.Module):
-    def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
+class Loss(nn.Module):
+    def __init__(self, token_histo, T, pad_value, smoothing_eps=0.1):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
         super().__init__()
         # self.eps = smoothing_eps
         self.pad_value = pad_value
-        token_histo = token_histo.astype(jnp.float32)
-        self.u = token_histo / jnp.sum(token_histo)
-        self.eps = smoothing_eps
-        # self.register_buffer('u', token_histo, persistent=False)
+        token_histo = F.normalize(token_histo.to(t.float64), p=1.0, dim=0)
+        self.register_buffer('u', token_histo, persistent=False)
+        self.register_buffer('eps', t.tensor(smoothing_eps), persistent=False)
         # self.register_buffer('vocab_size', t.tensor(T), persistent=False)
-        self.T = token_histo.shape[0] 
+        self.T = T 
 
     @staticmethod
     def kldiv(q, p, axis):
@@ -388,11 +379,14 @@ class Objective(hk.Module):
         labels: bc
         returns: bct
         """
-        one_hot = jax.nn.one_hot(labels, self.T, -1)
+        B, C = labels.shape
+        zeros = t.zeros(B, C, self.T, device=labels.device)
+        ones = t.ones(B, C, self.T, device=labels.device)
+        one_hot = t.scatter(zeros, 2, labels.unsqueeze(-1), ones)
         smoothed = (1.0 - self.eps) * one_hot + self.eps * self.u
         return smoothed
 
-    def __call__(self, dec_input, dec_output):
+    def forward(self, dec_input, dec_output):
         """
         dec_input: bc
         dec_output: bct
@@ -400,8 +394,7 @@ class Objective(hk.Module):
         # bc
         labels = dec_input[:,1:]
         smoothed_labels = self.label_smooth(labels)
-        dec_mask = jnp.not_equal(labels, self.pad_value).astype(jnp.float64)
-        # dec_mask = t.ne(labels, self.pad_value).to(t.float64)
+        dec_mask = t.ne(labels, self.pad_value).to(t.float64)
 
         # bct
         dec_pred = dec_output[:,:-1,:]
@@ -414,15 +407,22 @@ class Objective(hk.Module):
         # print(f'{loss=}')
         return loss
 
-def _wrap_haiku(mod_cls, *args):
-    def wrapped_fn(*call_args):
-        mod = mod_cls(*args)
-        return mod(call_args)
-    return wrapped_fn
 
-def make_model(hps, token_info):
-    return hk.transform(_wrap_haiku(Model, hps, token_info))
+class CustomScheduler:
+    def __init__(self, optimizer, M, warmup_steps):
+        self.M = M
+        # from section 5.3, page 7, equation 3
+        self.warmup_steps = warmup_steps
+        self.optimizer = optimizer
 
-def make_objective(token_histo, pad_value):
-    return hk.transform(_wrap_haiku(Objective, token_histo, pad_value))
+    def update(self, step): 
+        self.step = step
+        ord_step = step + 1
+        factor = min(ord_step ** -0.5, ord_step * self.warmup_steps ** -1.5)
+        new_lr = self.M ** -0.5 * factor
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = new_lr
+
+    def current_lr(self):
+        return self.optimizer.param_groups[0]['lr']
 
