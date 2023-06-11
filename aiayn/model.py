@@ -92,11 +92,10 @@ class DropoutAddAndNorm(hk.Module):
         return self.layer_norm(residual + proximal)
 
 class InputEmbedding(hk.Module):
-    def __init__(self, embedding, hps):
+    def __init__(self, T, hps):
         super().__init__()
-        self.embedding = embedding # T,M
-        self.T = self.embedding.shape[0] 
-        self.M = self.embedding.shape[1]
+        self.T = T
+        self.M = hps.M
         self.scale_factor = np.sqrt(self.T) ** -1 # my experiment
         self.pos_factor = hps.pos_encoding_factor
 
@@ -118,8 +117,10 @@ class InputEmbedding(hk.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
+        init = hk.initializers.RandomNormal(1.0, 0.0)
+        embed_matrix = hk.get_parameter('emb', [self.T, self.M], init)
         # embed = self.embedding(input) * self.scale_factor
-        embed = jnp.take(self.embedding, input, axis=1)
+        embed = jnp.take(embed_matrix, input, axis=1)
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
@@ -142,9 +143,9 @@ class EncoderLayer(hk.Module):
         return out
 
 class Encoder(hk.Module):
-    def __init__(self, hps, embed_matrix):
+    def __init__(self, hps, embed_layer):
         super().__init__()
-        self.embed_layer = InputEmbedding(embed_matrix, hps)
+        self.embed_layer = embed_layer 
         mods = (EncoderLayer(hps) for _ in range(hps.num_layers))
         self.body = hk.Sequential(*mods)
 
@@ -197,12 +198,12 @@ class TeeSequential(hk.Module):
         return out
 
 class Decoder(hk.Module):
-    def __init__(self, hps, T, embed_matrix):
+    def __init__(self, hps, T, embed_layer):
         super().__init__()
-        self.embed_layer = InputEmbedding(embed_matrix, hps)
+        self.embed_layer = embed_layer 
         self.body = TeeSequential(*(DecoderLayer(hps) for _ in range(hps.num_layers)))
-        self.linear_final = nn.Linear(hps.M, T)
-        self.softmax = nn.Softmax(dim=2)
+        self.linear_final = jax.nn.Linear(hps.M, T)
+        self.softmax = jax.nn.Softmax(dim=2)
 
     def __call__(self, enc_out, dec_in, is_train):
         """
@@ -216,18 +217,28 @@ class Decoder(hk.Module):
         out = self.softmax(out)
         return out
 
+class Embed(hk.Module):
+    def __init__(self, n_vocab, d_model):
+        super().__init__()
+        self.n_vocab = n_vocab
+        self.d_model = d_model
+
+    def __call__(self, tokens):
+        init = hk.initializers.RandomNormal(1.0, 0.0)
+        embed_matrix = hk.get_parameter('emb', [self.T, self.M], init)
+        return 
+
 class Model(hk.Module):
-    def __init__(self, hps, token_info):
+    def __init__(self, hps, token_histo, pad_token_id):
         super().__init__()
         self.hps = hps
-        token_histo = token_info['histo']
-        self.pad_token_id = token_info['pad_token_id']
+        self.pad_token_id = pad_token_id 
         T = token_histo.shape[0]
 
-        self.embed_matrix = nn.Embedding(T,hps.M)
-        self.encoder = Encoder(hps, self.embed_matrix)
-        self.decoder = Decoder(hps, T, self.embed_matrix)
-        self.loss = Loss(token_histo, T, self.pad_token_id) 
+        self.embed_layer = InputEmbedding(T, hps) 
+        self.encoder = Encoder(hps, self.embed_layer)
+        self.decoder = Decoder(hps, T, self.embed_layer)
+        self.loss = Objective(token_histo, self.pad_token_id) 
 
     def __call__(self, is_train, enc_input, dec_input, rng_key):
         """
@@ -421,8 +432,10 @@ def _wrap_haiku(mod_cls, *args):
     return wrapped_fn
 
 def make_model(hps, token_info):
-    return hk.transform(_wrap_haiku(Model, hps, token_info))
+    return hk.transform(_wrap_haiku(Model, hps, token_info['de'],
+        token_info['pad_token_id']))
 
-def make_objective(token_histo, pad_value):
-    return hk.transform(_wrap_haiku(Objective, token_histo, pad_value))
+def make_objective(token_info):
+    return hk.transform(_wrap_haiku(Objective, token_info['de'],
+        token_info['pad_token_id']))
 

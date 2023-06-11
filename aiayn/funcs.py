@@ -37,10 +37,10 @@ def gather_nd(value, index, axes):
     slice_shape = perm_value.shape[num_axes:]
     flat_value = perm_value.reshape(num_slice, *slice_shape)
     cumul_axes = [np.prod(axes[i+1:], initial=1) for i in range(num_axes)]
-    cumul_axes = torch.tensor(cumul_axes, dtype=torch.int64)
-    flat_index = torch.einsum('...k,k->...', index, cumul_axes)
+    cumul_axes = tf.constant(cumul_axes, dtype=tf.int64)
+    flat_index = tf.einsum('...k,k->...', index, cumul_axes)
     out_shape = list(flat_index.shape)
-    flat_result = torch.index_select(flat_value, 0, flat_index.flatten())
+    flat_result = tf.index_select(flat_value, 0, flat_index.flatten())
     result = flat_result.reshape(*out_shape, *slice_shape)
     return result
 

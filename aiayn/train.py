@@ -1,5 +1,7 @@
 import psutil
 import jax
+import jax.numpy as jnp
+import flax
 import optax
 import haiku as hk
 import os
@@ -103,6 +105,7 @@ def make_update_fn(apply_fn, accum_steps, tx):
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
         return params, opt_state, l, new_rng_key
+    return update_fn
 
 def report(logger, epoch, steps, losses):
     loss_plot = jnp.stack((steps, loss), dim=1).unsqueeze(0)
@@ -110,18 +113,35 @@ def report(logger, epoch, steps, losses):
     lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
     logger.tandem_lines('lr', lr_plot)
 
+def init_params(model, enc_input, dec_input, rng_key):
+    # get dummy data for its shape
+    params = model.init(True, enc_input, dec_input, rng_key)
+    return params
+
+def restore_params(ckpt_path):
+    zfile = np.load(ckpt_path)
 
 def train_loop(hps, model, objective, tx, dataset, rng_key):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_size // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
+    enc_input, dec_input = next(iter(dataset))
+    enc_input = enc_input.reshape(shape)
+    dec_input = dec_input.reshape(shape)
+    
+    if hps.resume_ckpt:
+        pass
+    else:
+        params = init_params(model, enc_input[0], dec_input[0], rng_key)
+        initial_step = 0
+
 
     update_fn_repl = jax.pmap(make_update_fn(model.apply, hps.accum_steps, tx))
     params_repl = flax.jax_utils.replicate(params)
     rng_key_repl = flax.jax_utils.replicate(rng_key)
 
     step = initial_step 
-    for enc_input, dec_input in dataset:
+    for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
         params_repl, opt_state_repl, loss, rng_key_repl = (
@@ -183,19 +203,17 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
     dataset, ds_info = data.base_dataset(hps.data_path, 'train', 2)
     dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_size)
 
-    """
     tx = optax.chain(
             optax.adam(learning_rate=make_learning_rate_fn(hps.warmup_steps, hps.M),
                 b1=hps.adam_beta1, b2=hps.adam_beta2, eps=hps.adam_eps)
             )
-    """
 
     token_info = data.load_token_info(hps.data_path) 
-    mod = model.make_model(hps, token_info['de'])
-    objective = model.make_objective(token_info['de'], token_info['pad_token_id'])
+    mod = model.make_model(hps, token_info)
+    objective = model.make_objective(token_info)
 
     rng_key = jax.random.PRNGKey(42)
-    # train_loop(hps, mod, objective, tx, dataset, rng_key)
+    train_loop(hps, mod, objective, tx, dataset, rng_key)
 
 if __name__ == '__main__':
     fire.Fire(main)
