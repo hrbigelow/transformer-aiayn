@@ -47,7 +47,7 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
 
     ds = dataset.filter(maxlen_fn)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
-    ds = ds.shuffle(ds_info.splits['train'].num_examples)
+    # ds = ds.shuffle(ds_info.splits['train'].num_examples)
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = tfds.as_numpy(ds)

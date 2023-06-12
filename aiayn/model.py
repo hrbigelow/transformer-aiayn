@@ -19,9 +19,14 @@ class MultiHeadAttention(hk.Module):
     """
     def __init__(self, hps, masked=True):
         super().__init__(name=None)
-        self.mscale = np.sqrt(hps.M) ** -1
-        self.vscale = np.sqrt(hps.V) ** -1
-        self.scale_factor = np.sqrt(hps.K)
+        self.H = hps.H
+        self.M = hps.M
+        self.K = hps.K
+        self.V = hps.V
+        self.masked = masked
+        self.mscale = np.sqrt(self.M) ** -1
+        self.vscale = np.sqrt(self.V) ** -1
+        self.scale_factor = np.sqrt(self.K)
 
     def __call__(self, kvinput, qinput):
         """
@@ -33,10 +38,10 @@ class MultiHeadAttention(hk.Module):
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
         dtype = kvinput.dtype
 
-        wq = hk.get_parameter('wq', [hps.H,hps.M,hps.K], dtype, kqv_init)
-        wk = hk.get_parameter('wk', [hps.H,hps.M,hps.K], dtype, kqv_init)
-        wv = hk.get_parameter('wv', [hps.H,hps.M,hps.V], dtype, kqv_init)
-        wo = hk.get_parameter('wo', [hps.H,hps.V,hps.M], dtype, o_init)
+        wq = hk.get_parameter('wq', [self.H,self.M,self.K], dtype, kqv_init)
+        wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
+        wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
+        wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
         kval = jnp.einsum('bcm,hmk->bhck', kvinput, wk)
         qval = jnp.einsum('bcm,hmk->bhck', qinput, wq)
@@ -44,11 +49,12 @@ class MultiHeadAttention(hk.Module):
         alogit = jnp.einsum('bhck,bhdk->bhcd', kval, qval)
         if self.masked:
             # query (d) can only attend to keys (c) at or before it 
-            upper_tri = (jnp.tri(a.logit.shape[2], k=-1) - 1.0) * 100.0
+            upper_tri = (jnp.tri(alogit.shape[2], k=-1) - 1.0) * 100.0
             alogit += upper_tri 
-        att = jax.nn.softmax(alogit * self.scale_factor ** -1, dim=2)
+        att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
         pre = jnp.einsum('bhcd,bhcv->bhdv', att, vval)
         out = jnp.einsum('bhcv,hvm->bcm', pre, wo)
+        return out
 
 class PositionwiseFF(hk.Module):
     """
@@ -59,36 +65,38 @@ class PositionwiseFF(hk.Module):
         self.mscale = np.sqrt(hps.M) ** -1
         self.fscale = np.sqrt(hps.F) ** -1
         self.M = hps.M
+        self.F = hps.F
 
-    def forward(self, input):
+    def __call__(self, input):
         """
         input: bcm
         """
         dtype = input.dtype
-        norm_init = hk.initializers.RandomNormal()
-        w1 = hk.get_parameter('w1', [hps.M,hps.F], dtype, norm_init * self.mscale)
-        b1 = hk.get_parameter('b1', [hps.F], jnp.zeros)
-        w2 = hk.get_parameter('w2', [hps.F,hps.M], dtype, norm_init * fscale)
-        b2 = hk.get_parameter('b2', [hps.M], jnp.zeros)
-        s = F.relu(t.einsum('bcm,mf->bcf', input, w1) + b1)
-        out = t.einsum('bcf,fm->bcm', s, w2) + b2
+        w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
+        w2_init = hk.initializers.RandomNormal(self.fscale, 0.0)
+        w1 = hk.get_parameter('w1', [self.M,self.F], dtype, w1_init)
+        b1 = hk.get_parameter('b1', [self.F], dtype, jnp.zeros)
+        w2 = hk.get_parameter('w2', [self.F,self.M], dtype, w2_init)
+        b2 = hk.get_parameter('b2', [self.M], dtype, jnp.zeros)
+        s = jax.nn.relu(jnp.einsum('bcm,mf->bcf', input, w1) + b1)
+        out = jnp.einsum('bcf,fm->bcm', s, w2) + b2
         return out
 
 class DropoutAddAndNorm(hk.Module):
-    def __init__(self, hps):
+    def __init__(self, hps, is_train):
         super().__init__()
+        self.is_train = is_train
         self.rate = hps.dropout_rate
-        self.dropout = hk.dropout(hps.dropout_rate)
         self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True)
 
-    def __call__(self, residual, proximal, is_training):
+    def __call__(self, residual, proximal):
         """
         residual: bdm
         proximal: bdm
         output: bdm
         """
-        if is_training:
-            proximal = self.dropout(hk.next_rng_key(), self.rate, proximal)
+        if self.is_train:
+            proximal = hk.dropout(hk.next_rng_key(), self.rate, proximal)
         return self.layer_norm(residual + proximal)
 
 class InputEmbedding(hk.Module):
@@ -102,12 +110,13 @@ class InputEmbedding(hk.Module):
     def positional_embedding(self, num_positions):
         pos = jnp.arange(num_positions)
         denom = 10000 ** jnp.linspace(0, 1, self.M)
-        arg = pos.unsqueeze(-1) / denom.unsqueeze(0)
+        arg = jnp.expand_dims(pos, 1) / jnp.expand_dims(denom, 0)
         # it shouldn't matter what order embeddings are placed but here I follow
         # the paper, and alternate sin with cos
-        pos_emb = jnp.empty(num_positions,self.M)
-        pos_emb[:,::2] = jnp.sin(arg[:,::2])
-        pos_emb[:,1::2] = jnp.cos(arg[:,1::2])
+        pos_emb = jnp.empty((num_positions,self.M), np.float32)
+        pos_emb = pos_emb.at[:,::2].set(jnp.sin(arg[:,::2]))
+        pos_emb = pos_emb.at[:,1::2].set(jnp.cos(arg[:,1::2]))
+        # C, M
         return pos_emb
 
     def __call__(self, input):
@@ -118,67 +127,67 @@ class InputEmbedding(hk.Module):
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
         init = hk.initializers.RandomNormal(1.0, 0.0)
-        embed_matrix = hk.get_parameter('emb', [self.T, self.M], init)
+        embed_matrix = hk.get_parameter('emb', [self.T, self.M], pos_embed.dtype, init)
         # embed = self.embedding(input) * self.scale_factor
-        embed = jnp.take(embed_matrix, input, axis=1)
+        embed = jnp.take(embed_matrix, input, axis=0)
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
-    def __init__(self, hps):
+    def __init__(self, hps, is_train):
         super().__init__()
         self.att = MultiHeadAttention(hps)
-        self.norm1 = DropoutAddAndNorm(hps)
+        self.norm1 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
-        self.norm2 = DropoutAddAndNorm(hps)
+        self.norm2 = DropoutAddAndNorm(hps, is_train)
 
-    def __call__(self, input, is_train):
+    def __call__(self, input):
         """
         input: bcm
         returns: bcm
         """
         att = self.att(input, input)
-        norm = self.norm1(input, att, is_train)
+        norm = self.norm1(input, att)
         ff = self.ff(norm)
-        out = self.norm2(norm, ff, is_train)
+        out = self.norm2(norm, ff)
         return out
 
 class Encoder(hk.Module):
-    def __init__(self, hps, embed_layer):
+    def __init__(self, hps, is_train, embed_layer):
         super().__init__()
         self.embed_layer = embed_layer 
-        mods = (EncoderLayer(hps) for _ in range(hps.num_layers))
-        self.body = hk.Sequential(*mods)
+        self.layers = [EncoderLayer(hps, is_train) for _ in range(hps.num_layers)]
 
-    def __call__(self, input, is_train):
+    def __call__(self, input):
         """
         input: bc
         returns: bcm
         """
         out = self.embed_layer(input)
-        out = self.body(out)
+        for mod in self.layers:
+            out = mod(out)
         return out
 
 class DecoderLayer(hk.Module):
-    def __init__(self, hps):
+    def __init__(self, hps, is_train):
         super().__init__()
         self.mask_att = MultiHeadAttention(hps, masked=True)
-        self.norm1 = DropoutAddAndNorm(hps)
+        self.norm1 = DropoutAddAndNorm(hps, is_train)
         self.att2 = MultiHeadAttention(hps)
-        self.norm2 = DropoutAddAndNorm(hps)
+        self.norm2 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
-        self.norm3 = DropoutAddAndNorm(hps)
+        self.norm3 = DropoutAddAndNorm(hps, is_train)
 
-    def __call__(self, enc_out, input, is_train):
+    def __call__(self, enc_out, input):
         """
         enc_out: bcm
         queries: bcm
         """
         att1 = self.mask_att(input, input)
-        norm1 = self.norm1(input, att1, is_train)
+        norm1 = self.norm1(input, att1)
         att2 = self.att2(enc_out, norm1)
-        norm2 = self.norm2(norm1, att2, is_train)
+        norm2 = self.norm2(norm1, att2)
         ff = self.ff(norm2)
-        out = self.norm3(norm2, ff, is_train)
+        out = self.norm3(norm2, ff)
         return out
 
 class TeeSequential(hk.Module):
@@ -191,63 +200,50 @@ class TeeSequential(hk.Module):
         super().__init__()
         self.layers = mods
 
-    def __call__(self, side_input, input, is_train):
+    def __call__(self, side_input, input):
         out = input
         for mod in self.layers:
-            out = mod(side_input, out, is_train)
+            out = mod(side_input, out)
         return out
 
 class Decoder(hk.Module):
-    def __init__(self, hps, T, embed_layer):
+    def __init__(self, hps, is_train, T, embed_layer):
         super().__init__()
         self.embed_layer = embed_layer 
-        self.body = TeeSequential(*(DecoderLayer(hps) for _ in range(hps.num_layers)))
-        self.linear_final = jax.nn.Linear(hps.M, T)
-        self.softmax = jax.nn.Softmax(dim=2)
+        self.body = TeeSequential(*(DecoderLayer(hps, is_train) for _ in range(hps.num_layers)))
+        self.linear_final = hk.Linear(T)
 
-    def __call__(self, enc_out, dec_in, is_train):
+    def __call__(self, enc_out, dec_in):
         """
         enc_out: bcm 
         dec_in: bc
         returns: bct
         """
         out = self.embed_layer(dec_in)
-        out = self.body(enc_out, out, is_train)
+        out = self.body(enc_out, out)
         out = self.linear_final(out)
-        out = self.softmax(out)
+        out = jax.nn.softmax(out, axis=2)
         return out
 
-class Embed(hk.Module):
-    def __init__(self, n_vocab, d_model):
-        super().__init__()
-        self.n_vocab = n_vocab
-        self.d_model = d_model
-
-    def __call__(self, tokens):
-        init = hk.initializers.RandomNormal(1.0, 0.0)
-        embed_matrix = hk.get_parameter('emb', [self.T, self.M], init)
-        return 
-
 class Model(hk.Module):
-    def __init__(self, hps, token_histo, pad_token_id):
+    def __init__(self, hps, is_train, token_histo, pad_token_id):
         super().__init__()
         self.hps = hps
         self.pad_token_id = pad_token_id 
         T = token_histo.shape[0]
 
         self.embed_layer = InputEmbedding(T, hps) 
-        self.encoder = Encoder(hps, self.embed_layer)
-        self.decoder = Decoder(hps, T, self.embed_layer)
-        self.loss = Objective(token_histo, self.pad_token_id) 
+        self.encoder = Encoder(hps, is_train, self.embed_layer)
+        self.decoder = Decoder(hps, is_train, T, self.embed_layer)
 
-    def __call__(self, is_train, enc_input, dec_input, rng_key):
+    def __call__(self, enc_input, dec_input):
         """
         enc_input: bc
         dec_input: bc
         returns: bct
         """
-        enc_output = self.encoder(enc_input, is_train)
-        dec_output = self.decoder(enc_output, dec_input, is_train)
+        enc_output = self.encoder(enc_input)
+        dec_output = self.decoder(enc_output, dec_input)
         return dec_output
 
     def total_params(self):
@@ -347,24 +343,6 @@ class Model(hk.Module):
             norms.append(vector_norm(par.grad, dim=dims).item())
         return norms
 
-    def get_state(self):
-        return dict(weights=self.state_dict(), rng=self.rng.get_state())
-
-    def __getstate__(self):
-        """
-        Provided for pickle since torch.Generator cannot be pickled
-        """
-        print('in Model::__getstate__')
-        d = dict.copy(self.__dict__)
-        d['rng'] = self.rng.get_state()
-        return d
-
-    def __setstate__(self, state):
-        gen = t.Generator()
-        gen.set_state(state['rng'])
-        state['rng'] = gen
-        self.__dict__.update(state)
-
     def predict(self, enc_input):
         alpha = self.hps.beam_search_alpha
         beta = self.hps.beam_search_beta
@@ -391,7 +369,7 @@ class Objective(hk.Module):
     @staticmethod
     def kldiv(q, p, axis):
         # compute D[q(x) || p(x)] over the axis dimension
-        terms = t.special.xlogy(q, q) - (q * p.log())
+        terms = jax.scipy.special.xlogy(q, q) - (q * jnp.log(p))
         return terms.sum(axis=axis)
 
     def label_smooth(self, labels):
@@ -399,7 +377,7 @@ class Objective(hk.Module):
         labels: bc
         returns: bct
         """
-        one_hot = jax.nn.one_hot(labels, self.T, -1)
+        one_hot = jax.nn.one_hot(labels, self.T, axis=-1)
         smoothed = (1.0 - self.eps) * one_hot + self.eps * self.u
         return smoothed
 
@@ -428,11 +406,11 @@ class Objective(hk.Module):
 def _wrap_haiku(mod_cls, *args):
     def wrapped_fn(*call_args):
         mod = mod_cls(*args)
-        return mod(call_args)
+        return mod(*call_args)
     return wrapped_fn
 
-def make_model(hps, token_info):
-    return hk.transform(_wrap_haiku(Model, hps, token_info['de'],
+def make_model(hps, is_train, token_info):
+    return hk.transform(_wrap_haiku(Model, hps, is_train, token_info['de'],
         token_info['pad_token_id']))
 
 def make_objective(token_info):

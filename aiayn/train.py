@@ -11,7 +11,6 @@ import time
 import sys
 import fire
 import numpy as np
-from streamvis import DataLogger 
 from aiayn import model, data, hparams
 
 def report_fn(logger, epoch, steps, loss, learn_rates):
@@ -62,9 +61,9 @@ def accumulate_gradient(loss_and_grad_fn, params, enc_input, dec_input, accum_st
         l, g = loss_and_grad_fn(params, enc_input[:step_size], dec_input[:step_size])
 
         def acc_grad_and_loss(i, l_and_g):
-            encs = jax.lax.dynamic_slice(enc_input, (i * step_size, 0, 0),
+            encs = jax.lax.dynamic_slice(enc_input, (i * step_size, 0),
                     (step_size,) + enc_input.shape[1:])
-            decs = jax.lax.dynamic_slice(dec_input, (i * step_size, 0, 0),
+            decs = jax.lax.dynamic_slice(dec_input, (i * step_size, 0),
                     (step_size,) + dec_input.shape[1:])
             li, gi = loss_and_grad_fn(params, encs, decs)
             l, g = l_and_g
@@ -77,8 +76,7 @@ def accumulate_gradient(loss_and_grad_fn, params, enc_input, dec_input, accum_st
         return loss_and_grad_fn(params, enc_input, dec_input)
 
 
-def make_update_fn(apply_fn, accum_steps, tx):
-
+def make_update_fn(model, objective, accum_steps, tx):
     def update_fn(params, opt_state, enc_input, dec_input, rng_key):
         """
         The function to pass into jax.pmap
@@ -93,12 +91,12 @@ def make_update_fn(apply_fn, accum_steps, tx):
         dropout_rng = jax.random.fold_in(rng_key, jax.lax.axis_index('batch'))
 
         def loss_fn(params, enc_input, dec_input):
-            dec_output = model.apply_fn(params, enc_input, dec_input, rng=dropout_rng)
-            loss = objective.apply_fn(dec_input, dec_output)
+            dec_output = model.apply(params, dropout_rng, enc_input, dec_input)
+            loss = objective.apply(None, None, dec_input, dec_output)
             return loss
 
-        l, g = accumulate_gradient(jax.value_and_grad(loss_fn), state, enc_input,
-                dec_input, hps.accum_steps)
+        lg_fn = jax.value_and_grad(loss_fn)
+        l, g = accumulate_gradient(lg_fn, params, enc_input, dec_input, accum_steps)
         # averages l and g across replicas, then broadcasts the average
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
@@ -112,11 +110,6 @@ def report(logger, epoch, steps, losses):
     logger.tandem_lines('loss', loss_plot)
     lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
     logger.tandem_lines('lr', lr_plot)
-
-def init_params(model, enc_input, dec_input, rng_key):
-    # get dummy data for its shape
-    params = model.init(True, enc_input, dec_input, rng_key)
-    return params
 
 def restore_params(ckpt_path):
     zfile = np.load(ckpt_path)
@@ -132,13 +125,19 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
     if hps.resume_ckpt:
         pass
     else:
-        params = init_params(model, enc_input[0], dec_input[0], rng_key)
+        params = model.init(rng_key, enc_input[0], dec_input[0])
+        opt_state = tx.init(params)
         initial_step = 0
+    print('Initialized model')
 
-
-    update_fn_repl = jax.pmap(make_update_fn(model.apply, hps.accum_steps, tx))
+    update_fn = make_update_fn(model, objective, hps.accum_steps, tx)
+    # TODO: how to use donate_argnums? 
+    update_fn_repl = jax.pmap(update_fn, axis_name='batch')
+    print('Compiled model')
     params_repl = flax.jax_utils.replicate(params)
+    opt_state_repl = flax.jax_utils.replicate(opt_state)
     rng_key_repl = flax.jax_utils.replicate(rng_key)
+    print('Replicated params across devices')
 
     step = initial_step 
     for enc_input, dec_input in iter(dataset):
@@ -197,22 +196,25 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
     """
     hps = hparams.setup_hparams(hps_keys, hps_overrides)
 
+    rng_key = jax.random.PRNGKey(42)
+
     # if hps.pubsub_project is None and hps.streamvis_log_file is None:
         # raise RuntimeError(
             # f'At least one of `pubsub_project` or `streamvis_log_file` must be provided')
     dataset, ds_info = data.base_dataset(hps.data_path, 'train', 2)
     dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_size)
 
+    # lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
+    lr_fn = 0.001 
     tx = optax.chain(
-            optax.adam(learning_rate=make_learning_rate_fn(hps.warmup_steps, hps.M),
-                b1=hps.adam_beta1, b2=hps.adam_beta2, eps=hps.adam_eps)
+            optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
+                eps=hps.adam_eps)
             )
 
     token_info = data.load_token_info(hps.data_path) 
-    mod = model.make_model(hps, token_info)
+    mod = model.make_model(hps, True, token_info)
     objective = model.make_objective(token_info)
 
-    rng_key = jax.random.PRNGKey(42)
     train_loop(hps, mod, objective, tx, dataset, rng_key)
 
 if __name__ == '__main__':
