@@ -1,8 +1,7 @@
 import sys
 import fire
 import numpy as np
-from collections import defaultdict, Counter
-import datasets
+from collections import Counter
 from transformers import GPT2TokenizerFast
 import tensorflow as tf
 import tensorflow_datasets as tfds

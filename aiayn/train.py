@@ -28,13 +28,10 @@ def report_fn(logger, epoch, steps, loss, learn_rates):
         logger.tandem_lines('lr', lr_plot)
         print(f'{time.time():.0f}: {epoch=}, {steps=}, {loss=}')
 
-def element_mean_fn(tensors):
-    return t.stack(tensors).to(t.float32).mean(dim=0)
-
 def make_learning_rate_fn(warmup_steps, M):
     # from section 5.3, page 7, equation 3
     def lr_fn(step):
-        factor = min(step ** -0.5, step * warmup_steps ** -1.5)
+        factor = jax.lax.max(step ** -0.5, step * warmup_steps ** -1.5)
         new_lr = M ** -0.5 * factor
         return new_lr
     return lr_fn
@@ -146,7 +143,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
         params_repl, opt_state_repl, loss, rng_key_repl = (
                 update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
                     rng_key_repl))
-        print(f'step {step}, loss={loss:%3.2f}')
+        print(f'step {step}, loss={loss.item():3.2f}')
 
         if step > 0 and report ==  hps.report_every - 1:
             report(logger, epoch, steps, losses) 
@@ -155,6 +152,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
             path = hps.ckpt_templ.format(step)
             params = flax.jax_utils.unreplicate(params_repl) 
             # save(path)
+        step += 1
 
 def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     """
@@ -204,8 +202,7 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
     dataset, ds_info = data.base_dataset(hps.data_path, 'train', 2)
     dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_size)
 
-    # lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
-    lr_fn = 0.001 
+    lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
     tx = optax.chain(
             optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
                 eps=hps.adam_eps)

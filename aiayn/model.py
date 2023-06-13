@@ -363,7 +363,6 @@ class Objective(hk.Module):
         self.u = token_histo / jnp.sum(token_histo)
         self.eps = smoothing_eps
         # self.register_buffer('u', token_histo, persistent=False)
-        # self.register_buffer('vocab_size', t.tensor(T), persistent=False)
         self.T = token_histo.shape[0] 
 
     @staticmethod
