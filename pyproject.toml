@@ -11,6 +11,7 @@ dependencies = [
   "transformers",
   "flax",
   "optax",
+  "tensorflow",
   "tensorflow-datasets>=4.9.2",
   "dm-haiku @ git+https://github.com/deepmind/dm-haiku",
   "fire",

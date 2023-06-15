@@ -222,7 +222,7 @@ class Decoder(hk.Module):
         out = self.embed_layer(dec_in)
         out = self.body(enc_out, out)
         out = self.linear_final(out)
-        out = jax.nn.softmax(out, axis=2)
+        # out = jax.nn.softmax(out, axis=2)
         return out
 
 class Model(hk.Module):
@@ -366,6 +366,14 @@ class Objective(hk.Module):
         self.T = token_histo.shape[0] 
 
     @staticmethod
+    def fused_kldiv_softmax(q, p_logits, axis):
+        # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
+        log_normalizer = jnp.log(jnp.sum(jnp.exp(p_logits), axis))
+        q_entropy = - jnp.sum(jax.scipy.special.xlogy(q, q), axis)
+        cross_entropy = - (jnp.sum(q * p_logits, axis) - log_normalizer)
+        return cross_entropy - q_entropy
+
+    @staticmethod
     def kldiv(q, p, axis):
         # compute D[q(x) || p(x)] over the axis dimension
         terms = jax.scipy.special.xlogy(q, q) - (q * jnp.log(p))
@@ -380,7 +388,7 @@ class Objective(hk.Module):
         smoothed = (1.0 - self.eps) * one_hot + self.eps * self.u
         return smoothed
 
-    def __call__(self, dec_input, dec_output):
+    def __call__(self, dec_input, dec_output_logits):
         """
         dec_input: bc
         dec_output: bct
@@ -392,10 +400,15 @@ class Objective(hk.Module):
         # dec_mask = t.ne(labels, self.pad_value).to(t.float64)
 
         # bct
-        dec_pred = dec_output[:,:-1,:]
-        kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
+        dec_pred_logits = dec_output_logits[:,:-1,:]
+        kldiv = self.fused_kldiv_softmax(smoothed_labels, dec_pred_logits, 2)
+        # kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
         masked = kldiv * dec_mask
         total_targets = dec_mask.sum()
+        # jax.debug.print("masked: {}", masked[0,:])
+        # jax.debug.print("dec_pred: {}", dec_pred[0,:])
+        # jax.debug.print("smoothed_labels: {}", smoothed_labels[0,:])
+    
         # target_fraction = total_targets / dec_mask.numel()
         # print(f'{total_targets=}, {target_fraction=}')
         loss = masked.sum() / total_targets

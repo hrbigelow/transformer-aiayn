@@ -28,11 +28,28 @@ def report_fn(logger, epoch, steps, loss, learn_rates):
         logger.tandem_lines('lr', lr_plot)
         print(f'{time.time():.0f}: {epoch=}, {steps=}, {loss=}')
 
+def print_tree_summary(tree, summary_fn):
+    def join_path(path):
+        return '->'.join([el.key for el in path])
+    flat, _ = jax.tree_util.tree_flatten_with_path(tree)
+    summary = [(join_path(path), summary_fn(leaf)) for path, leaf in flat]
+    for name, val in summary:
+        jax.debug.print(name + ': {}', val)
+
+def print_range(pfx, tree):
+    def fn(acc, x):
+        return jnp.minimum(jnp.min(x), acc[0]), jnp.maximum(jnp.max(x), acc[1])
+    amin = jnp.array(float('inf'))
+    amax = jnp.array(-float('inf'))
+    tmin, tmax = jax.tree_util.tree_reduce(fn, tree, (amin, amax))
+    jax.debug.print(pfx + ': {}, {}', tmin, tmax)
+
 def make_learning_rate_fn(warmup_steps, M):
     # from section 5.3, page 7, equation 3
     def lr_fn(step):
-        factor = jax.lax.max(step ** -0.5, step * warmup_steps ** -1.5)
+        factor = jax.lax.min(step ** -0.5, step * warmup_steps ** -1.5)
         new_lr = M ** -0.5 * factor
+        jax.debug.print('learn_rate: {}', new_lr)
         return new_lr
     return lr_fn
 
@@ -89,16 +106,22 @@ def make_update_fn(model, objective, accum_steps, tx):
 
         def loss_fn(params, enc_input, dec_input):
             dec_output = model.apply(params, dropout_rng, enc_input, dec_input)
+            # print_range('dec_output', dec_output)
             loss = objective.apply(None, None, dec_input, dec_output)
             return loss
 
         lg_fn = jax.value_and_grad(loss_fn)
+        # print_range('enc_input', enc_input)
+        # print_range('dec_input', dec_input)
         l, g = accumulate_gradient(lg_fn, params, enc_input, dec_input, accum_steps)
         # averages l and g across replicas, then broadcasts the average
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
+        # print_tree_summary(g, lambda v: v.mean())
+        print_range('gradients', g)
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
+        print_range('params after apply_updates', params)
         return params, opt_state, l, new_rng_key
     return update_fn
 
@@ -193,6 +216,8 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
         )
     """
     hps = hparams.setup_hparams(hps_keys, hps_overrides)
+    print('Running with parameters:')
+    print(hps)
 
     rng_key = jax.random.PRNGKey(42)
 
