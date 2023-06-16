@@ -106,7 +106,7 @@ def get_tokenizer():
     return tokenizer
 
 if __name__ == '__main__':
-    ds = fire.Fire(make_dataset)
+    ds = fire.Fire(base_dataset)
     it = iter(ds)
     print(next(it))
 
