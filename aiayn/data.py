@@ -1,31 +1,90 @@
+import sys
 import fire
 import numpy as np
-import torch
-from torch.utils.data import Sampler
-from collections import defaultdict, Counter
-import datasets
+from collections import Counter
 from transformers import GPT2TokenizerFast
+import tensorflow as tf
+import tensorflow_datasets as tfds
 
+def base_dataset(download_dir, split, nproc):
+    tokenizer = get_tokenizer()
+    builder = tfds.builder('wmt14_translate/de-en')
+    builder.download_and_prepare(download_dir=download_dir)
+    ds = builder.as_dataset(split=split, shuffle_files=True)
+    ds_info = builder.info
 
-def token_histo(dataset, column):
+    def tokenize_fn(item):
+        def _py_fn(en, de):
+            en = tokenizer(en.numpy().decode())['input_ids']
+            de = tokenizer(de.numpy().decode())['input_ids']
+            return tf.constant(en), tf.constant(de)
+        return tf.py_function(_py_fn, inp=item.values(), Tout=[tf.int32, tf.int32])
+
+    ds = ds.map(tokenize_fn, num_parallel_calls=nproc, deterministic=False)
+    ds.prefetch(ds_info.splits[split].num_examples)
+    ds = ds.cache(f'{download_dir}/wmt14_cache')
+    return ds, ds_info
+
+def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
+    tokenizer = get_tokenizer()
+
+    def maxlen_fn(tok1, tok2):
+        return tf.maximum(tf.shape(tok1)[0], tf.shape(tok2)[0]) <= max_sentence_length - 2
+
+    bos = tf.constant([tokenizer.bos_token_id])
+    eos = tf.constant([tokenizer.eos_token_id])
+    pad_id = tokenizer.pad_token_id
+
+    def pad_tokens_fn(tok1, tok2):
+        l1 = max_sentence_length - tf.shape(tok1)[0] - 2
+        l2 = max_sentence_length - tf.shape(tok2)[0] - 2
+        pad1 = tf.fill((l1,), pad_id)
+        pad2 = tf.fill((l2,), pad_id)
+        tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
+        tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
+        return tok1, tok2 
+
+    ds = dataset.filter(maxlen_fn)
+    ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
+    # ds = ds.shuffle(ds_info.splits['train'].num_examples)
+    ds = ds.batch(batch_size)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    ds = tfds.as_numpy(ds)
+    return ds
+
+def token_histo(dataset):
+    """
+    Compute the token histograms for each column
+    """
     tokenizer = get_tokenizer()
     vocab_size = len(tokenizer)
+    histo1 = tf.zeros((vocab_size,), dtype=tf.int32)
+    histo2 = tf.zeros((vocab_size,), dtype=tf.int32)
 
-    # get histogram of tokens for token column
-    def map_fn(toks, cts):
-        all_toks = torch.cat(toks)
-        cts.scatter_add_(0, all_toks, torch.ones_like(all_toks))
+    def histo_fn(histos, toks):
+        h1, h2 = histos
+        t1, t2 = toks
+        h1 = tf.tensor_scatter_nd_add(h1, tf.expand_dims(t1, -1), tf.ones_like(t1))
+        h2 = tf.tensor_scatter_nd_add(h2, tf.expand_dims(t2, -1), tf.ones_like(t2))
+        return h1, h2
+    return dataset.reduce((histo1, histo2), histo_fn)
 
-    cts = torch.zeros(vocab_size, dtype=torch.int64)
-    kwargs = dict(cts=cts)
-    # dataset = dataset.shard(100, 1)
-    dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=kwargs)
-            # with_rank=True, num_proc=num_proc)
-    return dict(
-            pad_token_id = tokenizer.pad_token_id,
-            bos_token_id = tokenizer.bos_token_id,
-            eos_token_id = tokenizer.eos_token_id,
-            histo = cts)
+def save_token_info(dataset, data_dir):
+    tokenizer = get_tokenizer()
+    cts1, cts2 = token_histo(dataset)
+    cts1 = tf.cast(cts1, tf.float32)
+    cts2 = tf.cast(cts2, tf.float32)
+    h1 = cts1 / tf.reduce_sum(cts1)
+    h2 = cts2 / tf.reduce_sum(cts2)
+    np.savez(f'{data_dir}/token_info.npz', 
+            en=h1.numpy(), de=h2.numpy(),
+            pad_token_id=tz.pad_token_id,
+            bos_token_id=tz.bos_token_id,
+            eos_token_id=tz.eos_token_id)
+
+def load_token_info(data_dir):
+    path = f'{data_dir}/token_info.npz'
+    return np.load(path)
 
 def column_counts(dataset, column):
     def map_fn(examples, accu):
@@ -33,35 +92,6 @@ def column_counts(dataset, column):
     cts = Counter()
     dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=dict(accu=cts))
     return dict(cts)
-
-def shuffle_inner(ary, block_size, rng):
-    """
-    Shuffle each contiguous subrange of size block_size, preserving order of the
-    blocks themselves.
-    Example: np.arange(10), block_size = 5 -> [4,1,3,2,0,9,6,5,7,8]
-    """
-    assert isinstance(ary, np.ndarray)
-    for beg in range(0, len(ary), block_size):
-        rng.shuffle(ary[beg:beg+block_size])
-    return ary
-
-def shuffle_outer(ary, block_size, rng):
-    """
-    Shuffle the order of blocks, preserving order of entries in each block.
-    ary.shape[0] must be divisible by block_size
-    Example: np.arange(12), block_size = 3 -> [3,4,5,0,1,2,9,10,11,6,7,8]
-    """
-    assert isinstance(ary, np.ndarray)
-    n = ary.shape[0]
-    if n % block_size != 0:
-        raise RuntimeError(
-            f'shuffle_outer: ary.shape[0] = {n} not divisible by '
-            f'block_size = {block_size}')
-    perm = np.arange(0, n, block_size)
-    rng.shuffle(perm)
-    inds = perm.repeat(block_size) + np.arange(n) % block_size
-    shuf = np.take(ary, inds)
-    return shuf
 
 BOS = '<|BOS|>'
 EOS = '<|EOS|>'
@@ -75,160 +105,9 @@ def get_tokenizer():
     tokenizer.eos_token = EOS
     return tokenizer
 
-def tokenize_data(dataset, num_proc):
-    ds = dataset.flatten().rename_columns(
-            { 'translation.de': 'de', 'translation.en': 'en'})
-    
-    def map_fn(examples, tokenizer):
-        ret = dict()
-        bos_ten = torch.tensor([tokenizer.vocab[BOS]])
-        eos_ten = torch.tensor([tokenizer.vocab[EOS]])
-        for col, text in examples.items():
-            toks = []
-            for s in text:
-                tok = tokenizer(s, return_tensors='pt')['input_ids']
-                # print(tok.shape)
-                tok = torch.cat((bos_ten, tok[0], eos_ten))
-                toks.append(tok)
-            ret[f'{col}_tok'] = toks
-            ret[f'{col}_length'] = [tok.shape[0] for tok in toks]
-        return ret
-    # ds = ds.shard(100, 1)
-    kwargs = dict(tokenizer=get_tokenizer())
-
-    ds = ds.map(map_fn, batched=True, load_from_cache_file=False, fn_kwargs=kwargs,
-            num_proc=num_proc)
-    ds = ds.remove_columns(('en', 'de'))
-    ds = ds.sort('en_length')
-    ds.set_format('torch')
-    return ds
-
-def preprocess(cache_dir, data_dir, num_proc=8, shard=None):
-    """
-    :param cache_dir:  Huggingface cache directory 
-    :param data_dir: final destination for dataset
-    :num_proc: number of processes for parallel data processing
-    :shard:  if present, format is (`total_shards`, `shard_number`)
-       For example '(100, 5)' means take the 5th shard out of 100
-    """
-    import os
-    if not os.path.exists(data_dir):
-        raise RuntimeError(f'Couldn\'t find data path \'{data_dir}\'')
-
-    print(f'Starting preprocess, {data_dir=}, {shard=}')
-
-    ds = datasets.load_dataset('wmt14', 'de-en', cache_dir=cache_dir, split='train')
-    if shard:
-        ds = ds.shard(*shard)
-    print(f'Tokenizing dataset')
-    ds = tokenize_data(ds, num_proc)
-
-    print(f'Computing token histo')
-    de_token_histo = token_histo(ds, 'de_tok')
-    torch.save(de_token_histo, f'{data_dir}/de_token_histo.pt')
-
-    print(f'Saving dataset to {data_dir}.  Columns: {ds.column_names}')
-    ds.save_to_disk(data_dir)
-
-def load_token_histo(data_path):
-    histo = torch.load(f'{data_path}/de_token_histo.pt')
-    return histo
-
-def get_dataset(data_path, max_sentence_length, num_proc):
-    ds = datasets.load_from_disk(data_path)
-    def filt(el):
-        return max(el['en_length'], el['de_length']) <= max_sentence_length
-    return ds.filter(filt, num_proc=num_proc)
-
-def inverse_mod(val, modulo):
-    # amount needed to round up to nearest modulo
-    return - (val % -modulo)
-
-class BatchedSampler(torch.utils.data.Sampler):
-    """
-    Infinitely generates batch_size batches of indices in range(dataset_size)
-    uniformly, even if dataset_size % batch_size != 0.
-    """
-    def __init__(self, batch_size, bin_size, rand_seed):
-        """
-        batch_size: total number of samples for one step
-        bin_size: number of dataset entries in each sentence-length bin
-        """
-        super().__init__(data_source=None)
-        self.batch_size = batch_size
-        self.bin_size = bin_size
-        self.rng = np.random.mtrand.RandomState(rand_seed)
-        self.offset = 0
-        self.step = 0
-        self.epoch = 0
-
-    def set_replica_info(self, dataset_size, num_shards, shard):
-        """
-        shard: number in [0, num_shards) to shard the batch_size elements
-        num_shards: total number of shards (must evenly divide batch_size)
-        """
-        if self.batch_size % num_shards != 0:
-            raise RuntimeError(f'{self.batch_size=} is not evenly divisible by {num_shards=}')
-        if shard not in range(num_shards):
-            raise RuntimeError(f'{shard=} not in range [0, {num_shards=})')
-        self.dataset_size = dataset_size
-        self.shard = shard
-        self.num_shards = num_shards
-        self.shard_size = self.batch_size // num_shards
-
-    def load(self, state):
-        self.rng.set_state(state['randstate'])
-        self.offset = state['offset']
-        self.step = state['step']
-        self.epoch = state['epoch']
-
-    def state(self):
-        return dict(offset=self.offset, step=self.step, epoch=self.epoch,
-                randstate=self.rng.get_state())
-
-    def __iter__(self):
-        shard_offset = self.shard * self.shard_size
-        while True:
-            main_inds = np.arange(self.offset, self.dataset_size)
-            extra = inverse_mod(main_inds.shape[0], self.batch_size) 
-            wrap_inds = np.arange(extra) # wrapping around to the next epoch
-            inds = np.concatenate((wrap_inds, main_inds))
-            assert inds.shape[0] % self.batch_size == 0
-            self.offset = extra
-            inds = shuffle_inner(inds, self.bin_size, self.rng)
-            inds = shuffle_outer(inds, self.batch_size, self.rng)
-            # inds contains a whole epoch plus possible wrap-over to complete any
-            # partial batch
-            for b in range(shard_offset, inds.shape[0], self.batch_size):
-                yield inds[b:b+self.shard_size]
-                self.step += 1
-            self.epoch += 1
-
-class PadLoader(torch.utils.data.DataLoader):
-    """
-    """
-    def __init__(self, max_length, pad_value, dataset, sampler):
-        super().__init__(dataset=dataset, batch_sampler=sampler, collate_fn=self.collate)
-        self.max_length = max_length
-        self.pad_value = pad_value
-
-    def collate(self, samples):
-        def _padded_stack(samples, column_name):
-            shape = self.batch_sampler.shard_size, self.max_length
-            st = torch.full(shape, self.pad_value, dtype=torch.int64)
-            for i, sample in enumerate(samples):
-                ten = sample[column_name]
-                st[i,:ten.shape[0]] = ten 
-            return st
-
-        en = _padded_stack(samples, 'en_tok')
-        de = _padded_stack(samples, 'de_tok')
-        step = self.batch_sampler.step
-        epoch = self.batch_sampler.epoch
-        return en, de, step, epoch
-
-
 if __name__ == '__main__':
-    fire.Fire(preprocess)
+    ds = fire.Fire(base_dataset)
+    it = iter(ds)
+    print(next(it))
 
 

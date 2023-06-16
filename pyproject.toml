@@ -8,9 +8,12 @@ version = "0.1.0"
 description = "Implementation of the Transformer from the paper 'Attention is All You Need'"
 authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
-  "torch>=2.0",
-  "datasets>=2.12.0",
   "transformers",
+  "flax",
+  "optax",
+  "tensorflow",
+  "tensorflow-datasets>=4.9.2",
+  "dm-haiku @ git+https://github.com/deepmind/dm-haiku",
   "fire",
   "numpy",
   "psutil",
