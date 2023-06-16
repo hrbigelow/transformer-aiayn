@@ -49,7 +49,7 @@ def make_learning_rate_fn(warmup_steps, M):
     def lr_fn(step):
         factor = jax.lax.min(step ** -0.5, step * warmup_steps ** -1.5)
         new_lr = M ** -0.5 * factor
-        jax.debug.print('learn_rate: {}', new_lr)
+        # jax.debug.print('learn_rate: {}', new_lr)
         return new_lr
     return lr_fn
 
@@ -121,7 +121,7 @@ def make_update_fn(model, objective, accum_steps, tx):
         print_range('gradients', g)
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
-        print_range('params after apply_updates', params)
+        # print_range('params after apply_updates', params)
         return params, opt_state, l, new_rng_key
     return update_fn
 
