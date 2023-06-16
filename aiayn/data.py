@@ -1,3 +1,4 @@
+import os
 import sys
 import fire
 import numpy as np
@@ -82,6 +83,12 @@ def save_token_info(dataset, data_dir):
             bos_token_id=tz.bos_token_id,
             eos_token_id=tz.eos_token_id)
 
+def prepare(data_dir, split):
+    if not os.access(data_dir, os.W_OK):
+        raise RuntimeError(f'Couldn\'t open {data_dir=} for writing')
+    ds, ds_info = base_dataset(data_dir, split, 2)
+    save_token_info(ds, data_dir)
+
 def load_token_info(data_dir):
     path = f'{data_dir}/token_info.npz'
     return np.load(path)
@@ -106,8 +113,7 @@ def get_tokenizer():
     return tokenizer
 
 if __name__ == '__main__':
-    ds = fire.Fire(base_dataset)
-    it = iter(ds)
-    print(next(it))
+    cmds = dict(prepare=prepare)
+    fire.Fire(cmds)
 
 
