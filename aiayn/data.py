@@ -22,8 +22,9 @@ def base_dataset(download_dir, split, nproc):
         return tf.py_function(_py_fn, inp=item.values(), Tout=[tf.int32, tf.int32])
 
     ds = ds.map(tokenize_fn, num_parallel_calls=nproc, deterministic=False)
-    ds.prefetch(ds_info.splits[split].num_examples)
+    # ds.prefetch(ds_info.splits[split].num_examples)
     ds = ds.cache(f'{download_dir}/wmt14_cache')
+    # iterate once to populate cache
     return ds, ds_info
 
 def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
@@ -71,8 +72,10 @@ def token_histo(dataset):
     return dataset.reduce((histo1, histo2), histo_fn)
 
 def save_token_info(dataset, data_dir):
-    tokenizer = get_tokenizer()
+    tz = get_tokenizer()
+    print('got tokenizer')
     cts1, cts2 = token_histo(dataset)
+    print('created token histos')
     cts1 = tf.cast(cts1, tf.float32)
     cts2 = tf.cast(cts2, tf.float32)
     h1 = cts1 / tf.reduce_sum(cts1)
@@ -87,7 +90,10 @@ def prepare(data_dir, split):
     if not os.access(data_dir, os.W_OK):
         raise RuntimeError(f'Couldn\'t open {data_dir=} for writing')
     ds, ds_info = base_dataset(data_dir, split, 2)
-    save_token_info(ds, data_dir)
+    for i, _ in enumerate(iter(ds)):
+        if i % 10000 == 0:
+            print(f'Sample {i} iterated')
+    print(f'Finished')
 
 def load_token_info(data_dir):
     path = f'{data_dir}/token_info.npz'
@@ -113,7 +119,7 @@ def get_tokenizer():
     return tokenizer
 
 if __name__ == '__main__':
-    cmds = dict(prepare=prepare)
+    cmds = dict(prepare=prepare, save_token_info=save_token_info)
     fire.Fire(cmds)
 
 
