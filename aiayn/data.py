@@ -9,7 +9,7 @@ import tensorflow_datasets as tfds
 
 def base_dataset(download_dir, split, nproc):
     tokenizer = get_tokenizer()
-    builder = tfds.builder('wmt14_translate/de-en')
+    builder = tfds.builder('wmt14_translate/de-en', data_dir=download_dir)
     builder.download_and_prepare(download_dir=download_dir)
     ds = builder.as_dataset(split=split, shuffle_files=True)
     ds_info = builder.info
