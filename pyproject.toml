@@ -10,6 +10,7 @@ authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
   "transformers",
   "flax",
+  "jax",
   "optax",
   "tensorflow",
   "tensorflow-datasets>=4.9.2",

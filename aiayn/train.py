@@ -118,7 +118,7 @@ def make_update_fn(model, objective, accum_steps, tx):
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
         # print_tree_summary(g, lambda v: v.mean())
-        print_range('gradients', g)
+        # print_range('gradients', g)
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
         # print_range('params after apply_updates', params)
