@@ -2,7 +2,7 @@ import psutil
 import jax
 import jax.numpy as jnp
 import flax
-from flax.training import checkpoints
+# from flax.training import checkpoints
 import optax
 import haiku as hk
 import os

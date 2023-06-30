@@ -232,9 +232,9 @@ class Model(hk.Module):
         self.pad_token_id = pad_token_id 
         self.T = token_histo.shape[0]
 
-        self.embed_layer = InputEmbedding(T, hps) 
+        self.embed_layer = InputEmbedding(self.T, hps) 
         self.encoder = Encoder(hps, is_train, self.embed_layer)
-        self.decoder = Decoder(hps, is_train, T, self.embed_layer)
+        self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
 
     def __call__(self, enc_input, dec_input):
         """
