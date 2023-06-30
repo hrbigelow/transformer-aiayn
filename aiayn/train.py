@@ -2,6 +2,7 @@ import psutil
 import jax
 import jax.numpy as jnp
 import flax
+from flax.training import checkpoints
 import optax
 import haiku as hk
 import os
@@ -159,6 +160,9 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
     rng_key_repl = flax.jax_utils.replicate(rng_key)
     print('Replicated params across devices')
 
+    # unfortunately, orbax requires jax>= 0.4.9 which is incompatible with Colab TPU
+    # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+
     step = initial_step 
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
@@ -166,14 +170,15 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
         params_repl, opt_state_repl, loss, rng_key_repl = (
                 update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
                     rng_key_repl))
+        print(f'shape of loss: {loss.shape}')
         print(f'step {step}, loss={loss.item():3.2f}')
 
         if step > 0 and report ==  hps.report_every - 1:
             report(logger, epoch, steps, losses) 
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
-            path = hps.ckpt_templ.format(step)
             params = flax.jax_utils.unreplicate(params_repl) 
+            checkpoints.save_checkpoint(hps.ckpt_dir, target=params, step)
             # save(path)
         step += 1
 
@@ -194,8 +199,7 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
     :param batch_size: SGD batch size
     :param update_every: number of loader steps to accumulate gradients for before
                          taking an optimizer step
-    :param ckpt_templ: checkpoint file path containing literal {} to be substituted with 
-                       step value
+    :param ckpt_dir: directory to save checkpoints
     :param max_sentence_length: skip data batches containing token sequences longer
                                 than this, to avoid OOM errors
     :param report_every:

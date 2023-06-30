@@ -82,8 +82,8 @@ train = Hyperparams(
     warmup_steps = 4000,
     random_seed = 982349820,
     ckpt_every = 5000,
+    ckpt_dir = None,
     resume_ckpt = None,
-    ckpt_templ = None,
     infra_mode = None,
     compile_backend = None
     )

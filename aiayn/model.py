@@ -230,7 +230,7 @@ class Model(hk.Module):
         super().__init__()
         self.hps = hps
         self.pad_token_id = pad_token_id 
-        T = token_histo.shape[0]
+        self.T = token_histo.shape[0]
 
         self.embed_layer = InputEmbedding(T, hps) 
         self.encoder = Encoder(hps, is_train, self.embed_layer)
@@ -342,6 +342,22 @@ class Model(hk.Module):
             dims = [d for d in range(par.grad.ndim) if d not in index_dims]
             norms.append(vector_norm(par.grad, dim=dims).item())
         return norms
+
+    def sample(self, enc_input):
+        """
+        Produce a random sample from the model, conditioned on input
+        """
+        B = self.hps.batch_size
+        C = self.hps.max_sentence_length
+
+        dec_input = jnp.empty((B, C), dtype=np.int32)
+        dec_input[:,0] = self.beg_token_id
+        enc_output = self.encoder(enc_input)
+        for p in range(C):
+            dec_output = self.decoder(enc_output, dec_input)
+            sample = jax.random.categorical(hk.next_rng_key(), dec_output[:, p],
+                    axis=1)
+            dec_input[:,p] = sample
 
     def predict(self, enc_input):
         alpha = self.hps.beam_search_alpha
