@@ -143,8 +143,15 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     enc_input = enc_input.reshape(shape)
     dec_input = dec_input.reshape(shape)
     
+    options = orbax.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, 
+            max_to_keep=10)
+    mngr = orbax.CheckpointManager(
+        hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()), options)
+
     if hps.resume_ckpt:
-        pass
+        params = mngr.restore(hps.resume_ckpt)
+        opt_state = tx.init(params)
+        initial_step = hps.resume_ckpt
     else:
         params = model.init(rng_key, enc_input[0], dec_input[0])
         opt_state = tx.init(params)
@@ -159,11 +166,6 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     opt_state_repl = flax.jax_utils.replicate(opt_state)
     rng_key_repl = flax.jax_utils.replicate(rng_key)
     print('Replicated params across devices')
-
-    options = orbax.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, 
-            max_to_keep=10)
-    mngr = orbax.CheckpointManager(
-        hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()), options)
 
     step = initial_step 
     steps = np.empty(hps.report_every)
