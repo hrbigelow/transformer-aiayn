@@ -126,8 +126,8 @@ def make_update_fn(model, objective, accum_steps, tx):
         return params, opt_state, l, new_rng_key
     return update_fn
 
-def report(logger, steps, losses):
-    loss_plot = jnp.stack((steps, loss), dim=1).unsqueeze(0)
+def report(logger, steps, losses, learn_rates):
+    loss_plot = jnp.stack((steps, losses), dim=1).unsqueeze(0)
     logger.tandem_lines('loss', loss_plot)
     lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
     logger.tandem_lines('lr', lr_plot)

@@ -414,8 +414,8 @@ class Objective(hk.Module):
         # bc
         labels = dec_input[:,1:]
         smoothed_labels = self.label_smooth(labels)
-        dec_mask = jnp.not_equal(labels, self.pad_value).astype(jnp.float64)
-        # dec_mask = t.ne(labels, self.pad_value).to(t.float64)
+        dec_mask = jnp.not_equal(labels, self.pad_value).astype(jnp.float32)
+        # dec_mask = t.ne(labels, self.pad_value).to(t.float32)
 
         # bct
         dec_pred_logits = dec_output_logits[:,:-1,:]
