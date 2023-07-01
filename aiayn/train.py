@@ -127,7 +127,7 @@ def make_update_fn(model, objective, accum_steps, tx):
     return update_fn
 
 def report(logger, steps, losses, learn_rates):
-    loss_plot = jnp.stack((steps, losses), dim=1).unsqueeze(0)
+    loss_plot = jnp.expand_dims(jnp.stack((steps, losses), axis=1), axis=0)
     logger.tandem_lines('loss', loss_plot)
     # lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
     # logger.tandem_lines('lr', lr_plot)
@@ -166,8 +166,8 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()), options)
 
     step = initial_step 
-    steps = [None] * hps.report_every
-    losses = [None] * hps.report_every
+    steps = np.empty(hps.report_every)
+    losses = np.empty(hps.report_every)
 
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
