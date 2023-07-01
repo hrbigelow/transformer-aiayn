@@ -166,6 +166,9 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()), options)
 
     step = initial_step 
+    steps = [None] * hps.report_every
+    losses = [None] * hps.report_every
+
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
@@ -173,8 +176,11 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
                 update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
                     rng_key_repl))
         print(f'step {step}, loss={loss_repl[0]:3.2f}')
+        report_idx = step % hps.report_every
+        steps[report_idx] = step
+        losses[report_idx] = loss_repl[0]
 
-        if logger and step > 0 and step == hps.report_every - 1:
+        if logger and step > 0 and report_idx == hps.report_every - 1:
             report(logger, epoch, steps, losses) 
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
