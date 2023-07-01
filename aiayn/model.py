@@ -385,12 +385,14 @@ class Objective(hk.Module):
     @staticmethod
     def fused_kldiv_softmax(q, p_logits, axis):
         # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
+        # returns value in bits
+        log2e = jnp.log2(jnp.exp(1.0))
         z = jnp.max(p_logits, axis)
         scaled_p_logits = p_logits - jnp.expand_dims(z, axis)
         log_normalizer = z + jnp.log(jnp.sum(jnp.exp(scaled_p_logits), axis))
         q_entropy = - jnp.sum(jax.scipy.special.xlogy(q, q), axis)
         cross_entropy = - (jnp.sum(q * p_logits, axis) - log_normalizer)
-        return cross_entropy - q_entropy
+        return (cross_entropy - q_entropy) * log2e
 
     @staticmethod
     def kldiv(q, p, axis):

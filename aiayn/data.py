@@ -44,11 +44,12 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
         pad2 = tf.fill((l2,), pad_id)
         tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
         tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
-        return tok1, tok2 
+        return tf.cast(tok1, dtype=tf.uint16), tf.cast(tok2, dtype=tf.uint16)
 
     ds = dataset.filter(maxlen_fn)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
-    ds = ds.shuffle(ds_info.splits['train'].num_examples, reshuffle_each_iteration=True)
+    total_samples = ds_info.splits['train'].num_examples
+    ds = ds.shuffle(total_samples // 10, reshuffle_each_iteration=True)
     ds = ds.repeat()
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
