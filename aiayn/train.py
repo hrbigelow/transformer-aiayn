@@ -3,7 +3,6 @@ import jax
 import jax.numpy as jnp
 import flax
 import orbax.checkpoint as orbax
-# from flax.training import checkpoints
 import optax
 import haiku as hk
 import os
@@ -136,7 +135,7 @@ def report(logger, epoch, steps, losses):
 def restore_params(ckpt_path):
     zfile = np.load(ckpt_path)
 
-def train_loop(hps, model, objective, tx, dataset, rng_key):
+def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_size // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
@@ -175,7 +174,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
                     rng_key_repl))
         print(f'step {step}, loss={loss_repl[0]:3.2f}')
 
-        if step > 0 and report ==  hps.report_every - 1:
+        if logger and step > 0 and step == hps.report_every - 1:
             report(logger, epoch, steps, losses) 
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
@@ -227,9 +226,16 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
 
     rng_key = jax.random.PRNGKey(42)
 
-    # if hps.pubsub_project is None and hps.streamvis_log_file is None:
-        # raise RuntimeError(
-            # f'At least one of `pubsub_project` or `streamvis_log_file` must be provided')
+    if hps.streamvis_run_name is not None:
+        import streamvis
+        logger = streamvis.logger.DataLogger(hps.streamvis_run_name)
+        if hps.pubsub_project is not None:
+            logger.init_pubsub(hps.pubsub_project, hps.pubsub_topic)
+        if hps.streamvis_log_file is not None:
+            logger.init_write_log(hps.streamvis_log_file)
+    else:
+        logger = None
+
     dataset, ds_info = data.base_dataset(hps.data_path, 'train', 2)
     dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_size)
 
@@ -243,7 +249,7 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
     mod = model.make_model(hps, True, token_info)
     objective = model.make_objective(token_info)
 
-    train_loop(hps, mod, objective, tx, dataset, rng_key)
+    train_loop(hps, mod, objective, tx, dataset, rng_key, logger)
 
 if __name__ == '__main__':
     fire.Fire(main)
