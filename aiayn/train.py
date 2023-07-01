@@ -231,8 +231,10 @@ def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overr
         logger = streamvis.logger.DataLogger(hps.streamvis_run_name)
         if hps.pubsub_project is not None:
             logger.init_pubsub(hps.pubsub_project, hps.pubsub_topic)
+            print(f'Init logger with {hps.pubsub_project} and {hps.pubsub_topic}')
         if hps.streamvis_log_file is not None:
             logger.init_write_log(hps.streamvis_log_file)
+            print(f'Init logger write log {hps.streamvis_log_file}')
     else:
         logger = None
 
