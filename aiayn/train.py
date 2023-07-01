@@ -170,11 +170,10 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
-        params_repl, opt_state_repl, loss, rng_key_repl = (
+        params_repl, opt_state_repl, loss_repl, rng_key_repl = (
                 update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
                     rng_key_repl))
-        print(f'shape of loss: {loss.shape}')
-        print(f'step {step}, loss={loss.item():3.2f}')
+        print(f'step {step}, loss={loss_repl[0]:3.2f}')
 
         if step > 0 and report ==  hps.report_every - 1:
             report(logger, epoch, steps, losses) 
