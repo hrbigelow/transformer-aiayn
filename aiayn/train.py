@@ -126,7 +126,7 @@ def make_update_fn(model, objective, accum_steps, tx):
         return params, opt_state, l, new_rng_key
     return update_fn
 
-def report(logger, epoch, steps, losses):
+def report(logger, steps, losses):
     loss_plot = jnp.stack((steps, loss), dim=1).unsqueeze(0)
     logger.tandem_lines('loss', loss_plot)
     lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
@@ -181,7 +181,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         losses[report_idx] = loss_repl[0]
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            report(logger, epoch, steps, losses) 
+            report(logger, steps, losses) 
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
             params = flax.jax_utils.unreplicate(params_repl) 
