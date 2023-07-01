@@ -49,8 +49,9 @@ class MultiHeadAttention(hk.Module):
         alogit = jnp.einsum('bhck,bhdk->bhcd', kval, qval)
         if self.masked:
             # query (d) can only attend to keys (c) at or before it 
-            upper_tri = (jnp.tri(alogit.shape[2], k=-1) - 1.0) * 100.0
-            alogit += upper_tri 
+            # mask[i,j] = -100 if i > j else 0
+            mask = jnp.tri(alogit.shape[2], k=-1) * -100.0
+            alogit += mask 
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
         pre = jnp.einsum('bhcd,bhcv->bhdv', att, vval)
         out = jnp.einsum('bhcv,hvm->bcm', pre, wo)
