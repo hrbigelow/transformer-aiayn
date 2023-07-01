@@ -2,6 +2,7 @@ import psutil
 import jax
 import jax.numpy as jnp
 import flax
+import orbax.checkpoint as orbax
 # from flax.training import checkpoints
 import optax
 import haiku as hk
@@ -160,8 +161,10 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
     rng_key_repl = flax.jax_utils.replicate(rng_key)
     print('Replicated params across devices')
 
-    # unfortunately, orbax requires jax>= 0.4.9 which is incompatible with Colab TPU
-    # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    options = orbax.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, 
+            max_to_keep=10)
+    mngr = orbax.CheckpointManager(
+        hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()), options)
 
     step = initial_step 
     for enc_input, dec_input in iter(dataset):
@@ -178,8 +181,8 @@ def train_loop(hps, model, objective, tx, dataset, rng_key):
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
             params = flax.jax_utils.unreplicate(params_repl) 
-            checkpoints.save_checkpoint(hps.ckpt_dir, target=params, step)
-            # save(path)
+            state_save_args = jax.tree_map(lambda _: orbax.SaveArgs(aggregate=True), params)
+            mngr.save(step, params, save_kwargs={'save_args': state_save_args})
         step += 1
 
 def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
