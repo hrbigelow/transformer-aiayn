@@ -191,7 +191,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
             mngr.save(step, params, save_kwargs={'save_args': state_save_args})
         step += 1
 
-def main(resume_ckpt, hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
+def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     """
     :param resume_ckpt:
         Full path to a checkpoint file.  Use `None` (without quotes) for absent.
