@@ -12,22 +12,7 @@ import time
 import sys
 import fire
 import numpy as np
-from aiayn import model, data, hparams
-
-def report_fn(logger, epoch, steps, loss, learn_rates):
-    if logger is None:
-        return
-    if xm.is_master_ordinal():
-        # 1, R, 2
-        steps = steps.cpu()
-        loss = loss.cpu()
-        learn_rates = learn_rates.cpu()
-        loss_plot = t.stack((steps, loss), dim=1).unsqueeze(0)
-        logger.tandem_lines('loss', loss_plot)
-
-        lr_plot = t.stack((steps, learn_rates), dim=1).unsqueeze(0)
-        logger.tandem_lines('lr', lr_plot)
-        print(f'{time.time():.0f}: {epoch=}, {steps=}, {loss=}')
+from aiayn import model, data, hparams, report
 
 def print_tree_summary(tree, summary_fn):
     def join_path(path):
@@ -118,17 +103,27 @@ def make_update_fn(model, objective, accum_steps, tx):
         # averages l and g across replicas, then broadcasts the average
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
+        gnorm = jax.tree_map(lambda x: jnp.sum(jax.lax.pow(x, 2.0)), g)
         # print_tree_summary(g, lambda v: v.mean())
         # print_range('gradients', g)
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
         # print_range('params after apply_updates', params)
-        return params, opt_state, l, new_rng_key
+        return params, opt_state, l, gnorm, new_rng_key
     return update_fn
 
-def report(logger, steps, losses, learn_rates):
+def log_steps(logger, steps, losses, gnorms, learn_rates):
     loss_plot = jnp.expand_dims(jnp.stack((steps, losses), axis=1), axis=0)
     logger.tandem_lines('loss', loss_plot)
+
+    pfx = 'tx/~/enc/~/(layer\d+)/~/att'
+    for key in ('wq', 'wo'):
+        # vals: param, num_points
+        vals = report.get_layer_values(pfx, gnorms, key)
+        val_steps = jnp.repeat(jnp.expand_dims(s, axis=0), P, axis=0)
+        plot = jnp.stack((val_steps, vals), axis=2)
+        logger.tandem_lines(f'encoder_{key}', plot)
+
     # lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
     # logger.tandem_lines('lr', lr_plot)
 
@@ -158,6 +153,10 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         initial_step = 0
     print('Initialized model')
 
+    gnorms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+    steps = np.empty(hps.report_every)
+    losses = np.empty(hps.report_every)
+
     update_fn = make_update_fn(model, objective, hps.accum_steps, tx)
     # TODO: how to use donate_argnums? 
     update_fn_repl = jax.pmap(update_fn, axis_name='batch')
@@ -168,22 +167,26 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     print('Replicated params across devices')
 
     step = initial_step 
-    steps = np.empty(hps.report_every)
-    losses = np.empty(hps.report_every)
 
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
-        params_repl, opt_state_repl, loss_repl, rng_key_repl = (
+        params_repl, opt_state_repl, loss_repl, gnorm_repl, rng_key_repl = (
                 update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
                     rng_key_repl))
-        print(f'step {step}, loss={loss_repl[0]:3.2f}')
+
+        gnorm = flax.jax_utils.unreplicate(gnorm_repl)
+        loss = flax.jax_utils.unreplicate(loss_repl)
+        print(f'step {step}, loss={loss:3.2f}')
         report_idx = step % hps.report_every
+
         steps[report_idx] = step
-        losses[report_idx] = loss_repl[0]
+        losses[report_idx] = loss
+        gnorms = jax.tree_map(lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y,
+            report_idx, 0), gnorms, gnorm)
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            report(logger, steps, losses, None) 
+            log_steps(logger, steps, losses, gnorms, None) 
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
             params = flax.jax_utils.unreplicate(params_repl) 

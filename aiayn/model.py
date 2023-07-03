@@ -18,7 +18,7 @@ class MultiHeadAttention(hk.Module):
     Implements Multi-head attention from section 3.2.2
     """
     def __init__(self, hps, masked=True):
-        super().__init__(name=None)
+        super().__init__(name='att')
         self.H = hps.H
         self.M = hps.M
         self.K = hps.K
@@ -62,7 +62,7 @@ class PositionwiseFF(hk.Module):
     Implements equation 2 (section 3.3)
     """
     def __init__(self, hps):
-        super().__init__()
+        super().__init__(name='ff')
         self.mscale = np.sqrt(hps.M) ** -1
         self.fscale = np.sqrt(hps.F) ** -1
         self.M = hps.M
@@ -85,10 +85,11 @@ class PositionwiseFF(hk.Module):
 
 class DropoutAddAndNorm(hk.Module):
     def __init__(self, hps, is_train):
-        super().__init__()
+        super().__init__(name='res')
         self.is_train = is_train
         self.rate = hps.dropout_rate
-        self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True)
+        self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True,
+                name='lnorm')
 
     def __call__(self, residual, proximal):
         """
@@ -102,7 +103,7 @@ class DropoutAddAndNorm(hk.Module):
 
 class InputEmbedding(hk.Module):
     def __init__(self, T, hps):
-        super().__init__()
+        super().__init__(name='emb')
         self.T = T
         self.M = hps.M
         self.scale_factor = np.sqrt(self.T) ** -1 # my experiment
@@ -134,8 +135,8 @@ class InputEmbedding(hk.Module):
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
-    def __init__(self, hps, is_train):
-        super().__init__()
+    def __init__(self, hps, is_train, layer_num):
+        super().__init__(name=f'layer{layer_num:02d}')
         self.att = MultiHeadAttention(hps)
         self.norm1 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
@@ -154,9 +155,9 @@ class EncoderLayer(hk.Module):
 
 class Encoder(hk.Module):
     def __init__(self, hps, is_train, embed_layer):
-        super().__init__()
+        super().__init__(name='enc')
         self.embed_layer = embed_layer 
-        self.layers = [EncoderLayer(hps, is_train) for _ in range(hps.num_layers)]
+        self.layers = [EncoderLayer(hps, is_train, i) for i in range(hps.num_layers)]
 
     def __call__(self, input):
         """
@@ -169,8 +170,8 @@ class Encoder(hk.Module):
         return out
 
 class DecoderLayer(hk.Module):
-    def __init__(self, hps, is_train):
-        super().__init__()
+    def __init__(self, hps, is_train, layer_num):
+        super().__init__(name=f'layer{layer_num:02d}')
         self.mask_att = MultiHeadAttention(hps, masked=True)
         self.norm1 = DropoutAddAndNorm(hps, is_train)
         self.att2 = MultiHeadAttention(hps)
@@ -209,9 +210,9 @@ class TeeSequential(hk.Module):
 
 class Decoder(hk.Module):
     def __init__(self, hps, is_train, T, embed_layer):
-        super().__init__()
+        super().__init__(name='dec')
         self.embed_layer = embed_layer 
-        self.body = TeeSequential(*(DecoderLayer(hps, is_train) for _ in range(hps.num_layers)))
+        self.body = TeeSequential(*(DecoderLayer(hps, is_train, i) for i in range(hps.num_layers)))
         self.linear_final = hk.Linear(T)
 
     def __call__(self, enc_out, dec_in):
@@ -228,7 +229,7 @@ class Decoder(hk.Module):
 
 class Model(hk.Module):
     def __init__(self, hps, is_train, token_histo, pad_token_id):
-        super().__init__()
+        super().__init__(name='tx')
         self.hps = hps
         self.pad_token_id = pad_token_id 
         self.T = token_histo.shape[0]
