@@ -118,11 +118,12 @@ def log_steps(logger, steps, losses, gnorms, learn_rates):
 
     pfx = 'tx/~/enc/~/(layer\d+)/~/att'
     for key in ('wq', 'wo'):
-        # vals: param, num_points
+        # vals: num_values, num_points
         vals = report.get_layer_values(pfx, gnorms, key)
-        val_steps = jnp.repeat(jnp.expand_dims(s, axis=0), P, axis=0)
+        num_values = vals.shape[0]
+        val_steps = jnp.repeat(jnp.expand_dims(steps, axis=0), num_values, axis=0)
         plot = jnp.stack((val_steps, vals), axis=2)
-        logger.tandem_lines(f'encoder_{key}', plot)
+        logger.tandem_lines(f'encoder_{key}', plot, palette='Viridis256')
 
     # lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
     # logger.tandem_lines('lr', lr_plot)
