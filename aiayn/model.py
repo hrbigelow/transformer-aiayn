@@ -101,21 +101,30 @@ class DropoutAddAndNorm(hk.Module):
             proximal = hk.dropout(hk.next_rng_key(), self.rate, proximal)
         return self.layer_norm(residual + proximal)
 
-class InputEmbedding(hk.Module):
-    def __init__(self, T, hps):
-        super().__init__(name='emb')
+class EmbedMatrix(hk.Module):
+    def __init__(self, T, M):
+        super().__init__(name='embed_matrix')
         self.T = T
-        self.M = hps.M
-        self.scale_factor = np.sqrt(self.T) ** -1 # my experiment
+        self.M = M
+
+    def __call__(self):
+        init = hk.initializers.RandomNormal(1.0, 0.0)
+        return hk.get_parameter('emb', [self.T, self.M], np.float32, init) 
+
+class InputEmbedding(hk.Module):
+    def __init__(self, embed_mat, hps):
+        super().__init__(name='emb')
+        self.embed_mat = embed_mat
+        self.scale_factor = np.sqrt(self.embed_mat.T) ** -1 # my experiment
         self.pos_factor = hps.pos_encoding_factor
 
     def positional_embedding(self, num_positions):
         pos = jnp.arange(num_positions)
-        denom = 10000 ** jnp.linspace(0, 1, self.M)
+        denom = 10000 ** jnp.linspace(0, 1, self.embed_mat.M)
         arg = jnp.expand_dims(pos, 1) / jnp.expand_dims(denom, 0)
         # it shouldn't matter what order embeddings are placed but here I follow
         # the paper, and alternate sin with cos
-        pos_emb = jnp.empty((num_positions,self.M), np.float32)
+        pos_emb = jnp.empty((num_positions,self.embed_mat.M), np.float32)
         pos_emb = pos_emb.at[:,::2].set(jnp.sin(arg[:,::2]))
         pos_emb = pos_emb.at[:,1::2].set(jnp.cos(arg[:,1::2]))
         # C, M
@@ -128,10 +137,9 @@ class InputEmbedding(hk.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
-        init = hk.initializers.RandomNormal(1.0, 0.0)
-        embed_matrix = hk.get_parameter('emb', [self.T, self.M], pos_embed.dtype, init)
+        scaled_emb_mat = self.embed_mat() * jnp.sqrt(self.embed_mat.M)
         # embed = self.embedding(input) * self.scale_factor
-        embed = jnp.take(embed_matrix, input, axis=0)
+        embed = jnp.take(scaled_emb_mat, input, axis=0)
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
@@ -223,7 +231,9 @@ class Decoder(hk.Module):
         """
         out = self.embed_layer(dec_in)
         out = self.body(enc_out, out)
-        out = self.linear_final(out)
+        emb_mat = self.embed_layer.embed_mat()
+        # out = self.linear_final(out)
+        out = jnp.einsum('bcm,tm -> bct', out, emb_mat)
         # out = jax.nn.softmax(out, axis=2)
         return out
 
@@ -233,8 +243,8 @@ class Model(hk.Module):
         self.hps = hps
         self.pad_token_id = pad_token_id 
         self.T = token_histo.shape[0]
-
-        self.embed_layer = InputEmbedding(self.T, hps) 
+        self.embed_matrix = EmbedMatrix(self.T, hps.M) 
+        self.embed_layer = InputEmbedding(self.embed_matrix, hps) 
         self.encoder = Encoder(hps, is_train, self.embed_layer)
         self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
 
