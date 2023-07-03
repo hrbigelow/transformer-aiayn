@@ -49,7 +49,7 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
     ds = dataset.filter(maxlen_fn)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
     total_samples = ds_info.splits['train'].num_examples
-    ds = ds.shuffle(total_samples // 10, reshuffle_each_iteration=True)
+    ds = ds.shuffle(total_samples // 100, reshuffle_each_iteration=True)
     ds = ds.repeat()
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)

@@ -5,7 +5,7 @@ import jax.numpy as jnp
 Functions for reporting
 """
 
-def get_layer_values(values, path_pattern, key_name):
+def get_layer_values(path_pattern, values, key_name):
     """
     values:  pytree of values returned by model init function
     prefix_pattern:  complete regex to match Haiku prefix.  For example:
