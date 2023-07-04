@@ -115,6 +115,8 @@ class InputEmbedding(hk.Module):
     def __init__(self, embed_mat, hps):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
+        # They say they *multiply* by sqrt(d_model), seems more sensible to divide!
+        # See Section 3.4
         self.scale_factor = np.sqrt(self.embed_mat.T) ** -1 # my experiment
         self.pos_factor = hps.pos_encoding_factor
 
@@ -137,8 +139,7 @@ class InputEmbedding(hk.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
-        scaled_emb_mat = self.embed_mat() * jnp.sqrt(self.embed_mat.M)
-        # embed = self.embedding(input) * self.scale_factor
+        scaled_emb_mat = self.embed_mat() * self.scale_factor 
         embed = jnp.take(scaled_emb_mat, input, axis=0)
         return embed + pos_embed * self.pos_factor
 
