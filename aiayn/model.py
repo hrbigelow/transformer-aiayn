@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import re
 import numpy as np
 from . import hparams
+from . import funcs
 import pdb
 import jax
 import jax.numpy as jnp
@@ -395,18 +396,6 @@ class Objective(hk.Module):
         self.T = token_histo.shape[0] 
 
     @staticmethod
-    def fused_kldiv_softmax(q, p_logits, axis):
-        # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
-        # returns value in bits
-        log2e = jnp.log2(jnp.exp(1.0))
-        z = jnp.max(p_logits, axis)
-        scaled_p_logits = p_logits - jnp.expand_dims(z, axis)
-        log_normalizer = z + jnp.log(jnp.sum(jnp.exp(scaled_p_logits), axis))
-        q_entropy = - jnp.sum(jax.scipy.special.xlogy(q, q), axis)
-        cross_entropy = - (jnp.sum(q * p_logits, axis) - log_normalizer)
-        return (cross_entropy - q_entropy) * log2e
-
-    @staticmethod
     def kldiv(q, p, axis):
         # compute D[q(x) || p(x)] over the axis dimension
         terms = jax.scipy.special.xlogy(q, q) - (q * jnp.log(p))
@@ -434,7 +423,9 @@ class Objective(hk.Module):
 
         # bct
         dec_pred_logits = dec_output_logits[:,:-1,:]
-        kldiv = self.fused_kldiv_softmax(smoothed_labels, dec_pred_logits, 2)
+        # print('foo: ', smoothed_labels.shape)
+        # print('bar: ', dec_pred_logits.shape)
+        kldiv = funcs.fused_kldiv_softmax(smoothed_labels, dec_pred_logits, 2)
         # kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
         masked = kldiv * dec_mask
         total_targets = dec_mask.sum()

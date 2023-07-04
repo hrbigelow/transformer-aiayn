@@ -103,7 +103,7 @@ def make_update_fn(model, objective, accum_steps, tx):
         # averages l and g across replicas, then broadcasts the average
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
-        gnorm = jax.tree_map(lambda x: jnp.sum(jax.lax.pow(x, 2.0)), g)
+        gnorm = jax.tree_map(lambda x: jnp.mean(jax.lax.pow(x, 2.0)), g)
         # print_tree_summary(g, lambda v: v.mean())
         # print_range('gradients', g)
         updates, opt_state = tx.update(g, opt_state)

@@ -1,7 +1,35 @@
 import tensorflow as tf
+import jax.numpy as jnp
+import jax
+from jax import lax
 import numpy as np
 
 import pdb
+
+def safe_xy(x, y):
+    """
+    Return 0 if x == 0, else x * y
+    """
+    x_ok = x != 0.
+    safe_x = jnp.where(x_ok, x, 1.)
+    safe_y = jnp.where(x_ok, y, 1.)
+    return jnp.where(x_ok, lax.mul(safe_x, safe_y), jnp.zeros_like(x))
+
+def fused_kldiv_softmax(q, p_logits, axis):
+    # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
+    # returns value in bits
+    log2e = jnp.log2(jnp.exp(1.0))
+    z = jnp.max(p_logits, axis)
+    scaled_p_logits = p_logits - jnp.expand_dims(z, axis)
+    log_normalizer = z + jnp.log(jnp.sum(jnp.exp(scaled_p_logits), axis))
+    log_normalizer = jnp.expand_dims(log_normalizer, axis)
+    log_q = jnp.log(q)
+    # q_entropy = - jnp.sum(jax.scipy.special.xlogy(q, q), axis)
+    # cross_entropy = - (jnp.sum(q * p_logits, axis) - log_normalizer)
+    kl_nats = jnp.sum(safe_xy(q, log_q - p_logits + log_normalizer), axis)
+    kl = kl_nats * log2e
+    # jax.debug.print("{}", kl) 
+    return kl
 
 def gather_nd(value, index, axes):
     """
@@ -153,7 +181,7 @@ def beam_search(model, alpha, beta, beam_size, max_length, enc_input):
     """
     # initialize
     batch_size = enc_input.shape[0]
-    live_seq = t.full((batch_size, 2*beam_size, max_length, pad_token_id)
+    live_seq = t.full(batch_size, 2*beam_size, max_length, pad_token_id)
     live_logprob = t.full(live_seq.shape[:2], 0.0)
 
     complete_seq = t.full((batch_size, beam_size, max_length), pad_token_id)
