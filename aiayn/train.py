@@ -76,7 +76,7 @@ def accumulate_gradient(loss_and_grad_fn, params, enc_input, dec_input, accum_st
         return loss_and_grad_fn(params, enc_input, dec_input)
 
 
-def make_update_fn(model, objective, accum_steps, tx):
+def make_update_fn(model, objective, accum_steps, with_metrics, tx):
     def update_fn(params, opt_state, enc_input, dec_input, rng_key):
         """
         The function to pass into jax.pmap
@@ -104,20 +104,26 @@ def make_update_fn(model, objective, accum_steps, tx):
         # averages l and g across replicas, then broadcasts the average
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
-        gnorm = jax.tree_map(tensor_norm, g)
-        pnorm = jax.tree_map(tensor_norm, params)
-        # print_tree_summary(g, lambda v: v.mean())
-        # print_range('gradients', g)
+
+
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
-        unorm = jax.tree_map(tensor_norm, updates)
-        # print_range('params after apply_updates', params)
-        return params, opt_state, l, gnorm, pnorm, unorm, new_rng_key
+
+        if with_metrics:
+            gnorm = jax.tree_map(tensor_norm, g)
+            pnorm = jax.tree_map(tensor_norm, params)
+            unorm = jax.tree_map(tensor_norm, updates)
+            return params, opt_state, l, new_rng_key, (gnorm, pnorm, unorm)
+        else:
+            return params, opt_state, l, new_rng_key, None
+            
     return update_fn
 
-def log_steps(logger, steps, losses, grad_norms, param_norms, update_norms, learn_rates):
+def log_steps(logger, steps, losses, learn_rates):
     loss_plot = jnp.expand_dims(jnp.stack((steps, losses), axis=1), axis=0)
     logger.tandem_lines('loss', loss_plot)
+
+def log_metrics(logger, steps, grad_norms, param_norms, update_norms): 
 
     def make_plot_data(step_data, steps):
         num_values = step_data.shape[0]
@@ -182,14 +188,15 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         initial_step = 0
     print('Initialized model')
 
-    grad_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
-    param_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
-    update_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+    if hps.with_metrics: 
+        grad_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+        param_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+        update_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
 
     steps = np.empty(hps.report_every)
     losses = np.empty(hps.report_every)
 
-    update_fn = make_update_fn(model, objective, hps.accum_steps, tx)
+    update_fn = make_update_fn(model, objective, hps.accum_steps, hps.with_metrics, tx)
     # TODO: how to use donate_argnums? 
     update_fn_repl = jax.pmap(update_fn, axis_name='batch')
     print('Compiled model')
@@ -208,26 +215,26 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
-        params_repl, opt_state_repl, loss_repl, gnorm_repl, pnorm_repl, unorm_repl, rng_key_repl = (
-                update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
-                    rng_key_repl))
-
-        gnorm = flax.jax_utils.unreplicate(gnorm_repl)
-        pnorm = flax.jax_utils.unreplicate(pnorm_repl)
-        unorm = flax.jax_utils.unreplicate(unorm_repl)
+        params_repl, opt_state_repl, loss_repl, rng_key_repl, metrics = (
+            update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input, rng_key_repl))
 
         loss = flax.jax_utils.unreplicate(loss_repl)
-        print(f'step {step}, loss={loss:3.2f}')
-        report_idx = step % hps.report_every
 
+        report_idx = step % hps.report_every
         steps[report_idx] = step
         losses[report_idx] = loss
-        grad_norms = update_elem(grad_norms, report_idx, gnorm)
-        param_norms = update_elem(param_norms, report_idx, pnorm)
-        update_norms = update_elem(update_norms, report_idx, unorm)
+
+        if metrics:
+            gnorm, pnorm, unorm = tuple(flax.jax_utils.unreplicate(m) for m in metrics)
+            grad_norms = update_elem(grad_norms, report_idx, gnorm)
+            param_norms = update_elem(param_norms, report_idx, pnorm)
+            update_norms = update_elem(update_norms, report_idx, unorm)
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            log_steps(logger, steps, losses, grad_norms, param_norms, update_norms, None) 
+            print(f'step {step}, loss={loss:3.2f}')
+            log_steps(logger, steps, losses, None) 
+            if hps.with_metrics:
+                log_metrics(logger, steps, grad_norms, param_norms, update_norms)
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
             params = flax.jax_utils.unreplicate(params_repl) 
@@ -259,6 +266,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
            every number of steps to issue progress message to stdout
     :param ckpt_every:
            create a checkpoint every `ckpt_every` steps
+    :param with_metrics:
+           if True, compute and log additional metrics besides loss
     """
 
     """

@@ -90,6 +90,7 @@ train = Hyperparams(
 
 logging = Hyperparams(
     report_every = 100,
+    with_metrics = False,
     pubsub_project = None,
     pubsub_topic = None,
     streamvis_log_file = None,
