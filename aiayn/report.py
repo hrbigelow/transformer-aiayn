@@ -21,6 +21,7 @@ def get_layer_values(path_pattern, values, key_name):
             continue
         value = value_group[key_name]
         plist.append((mat.groups(), value))
+    # print(path_pattern, key_name)
     sorted_values = [par for (_, par) in sorted(plist)]
     return jnp.stack(sorted_values, axis=0)
 

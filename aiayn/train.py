@@ -96,37 +96,65 @@ def make_update_fn(model, objective, accum_steps, tx):
             loss = objective.apply(None, None, dec_input, dec_output)
             return loss
 
+        def tensor_norm(x):
+            return jnp.mean(jax.lax.pow(x, 2.0))
+
         lg_fn = jax.value_and_grad(loss_fn)
-        # print_range('enc_input', enc_input)
-        # print_range('dec_input', dec_input)
         l, g = accumulate_gradient(lg_fn, params, enc_input, dec_input, accum_steps)
         # averages l and g across replicas, then broadcasts the average
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
-        gnorm = jax.tree_map(lambda x: jnp.mean(jax.lax.pow(x, 2.0)), g)
+        gnorm = jax.tree_map(tensor_norm, g)
+        pnorm = jax.tree_map(tensor_norm, params)
         # print_tree_summary(g, lambda v: v.mean())
         # print_range('gradients', g)
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
+        unorm = jax.tree_map(tensor_norm, updates)
         # print_range('params after apply_updates', params)
-        return params, opt_state, l, gnorm, new_rng_key
+        return params, opt_state, l, gnorm, pnorm, unorm, new_rng_key
     return update_fn
 
-def log_steps(logger, steps, losses, gnorms, learn_rates):
+def log_steps(logger, steps, losses, grad_norms, param_norms, update_norms, learn_rates):
     loss_plot = jnp.expand_dims(jnp.stack((steps, losses), axis=1), axis=0)
     logger.tandem_lines('loss', loss_plot)
 
-    pfx = 'tx/~/enc/~/(layer\d+)/~/att'
-    for key in ('wq', 'wo'):
-        # vals: num_values, num_points
-        vals = report.get_layer_values(pfx, gnorms, key)
-        num_values = vals.shape[0]
+    def make_plot_data(step_data, steps):
+        num_values = step_data.shape[0]
         val_steps = jnp.repeat(jnp.expand_dims(steps, axis=0), num_values, axis=0)
-        plot = jnp.stack((val_steps, vals), axis=2)
-        logger.tandem_lines(f'encoder_{key}', plot, palette='Viridis256')
+        plot = jnp.stack((val_steps, step_data), axis=2)
+        return plot
 
-    # lr_plot = jnp.stack((steps, learn_rates), dim=1).unsqueeze(0)
-    # logger.tandem_lines('lr', lr_plot)
+    def svlog(prefix, label, key, values):
+        vals = report.get_layer_values(pfx, values, key)
+        plot = make_plot_data(vals, steps)
+        logger.tandem_lines(label, plot, palette='Viridis256')
+   
+    cats = {
+            'enc_att': 'tx/~/enc/~/(layer\d+)/~/att',
+            'dec_att': 'tx/~/dec/~/(layer\d+)/~/att',
+            'enc_lnorm': 'tx/~/enc/~/(layer\d+)/~/(res.+)/~/lnorm',
+            'dec_lnorm': 'tx/~/dec/~/(layer\d+)/~/(res.+)/~/lnorm',
+            }
+
+    param_map = {
+            'enc_att': ('wq', 'wo', 'wk', 'wv'),
+            'dec_att': ('wq', 'wo', 'wk', 'wv'),
+            'enc_lnorm': ('scale', 'offset'),
+            'dec_lnorm': ('scale', 'offset'),
+            }
+
+    vals_map = {
+            'grad_norm': grad_norms,
+            'param_norm': param_norms,
+            'update_norm': update_norms
+            }
+
+    for cat, pfx in cats.items():
+        for label, val in vals_map.items():
+            for key in param_map[cat]:
+                plot_name = f'{cat}_{label}_{key}'
+                svlog(pfx, plot_name, key, val)
 
 def restore_params(ckpt_path):
     zfile = np.load(ckpt_path)
@@ -154,7 +182,10 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         initial_step = 0
     print('Initialized model')
 
-    gnorms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+    grad_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+    param_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+    update_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+
     steps = np.empty(hps.report_every)
     losses = np.empty(hps.report_every)
 
@@ -167,27 +198,36 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     rng_key_repl = flax.jax_utils.replicate(rng_key)
     print('Replicated params across devices')
 
+    def update_elem(tensor, idx, elem_value):
+        # performs tensor[idx] = elem_value but on immutable tensor
+        fun = lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, idx, 0)
+        return jax.tree_map(fun, tensor, elem_value)
+
     step = initial_step 
 
     for enc_input, dec_input in iter(dataset):
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
-        params_repl, opt_state_repl, loss_repl, gnorm_repl, rng_key_repl = (
+        params_repl, opt_state_repl, loss_repl, gnorm_repl, pnorm_repl, unorm_repl, rng_key_repl = (
                 update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input,
                     rng_key_repl))
 
         gnorm = flax.jax_utils.unreplicate(gnorm_repl)
+        pnorm = flax.jax_utils.unreplicate(pnorm_repl)
+        unorm = flax.jax_utils.unreplicate(unorm_repl)
+
         loss = flax.jax_utils.unreplicate(loss_repl)
         print(f'step {step}, loss={loss:3.2f}')
         report_idx = step % hps.report_every
 
         steps[report_idx] = step
         losses[report_idx] = loss
-        gnorms = jax.tree_map(lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y,
-            report_idx, 0), gnorms, gnorm)
+        grad_norms = update_elem(grad_norms, report_idx, gnorm)
+        param_norms = update_elem(param_norms, report_idx, pnorm)
+        update_norms = update_elem(update_norms, report_idx, unorm)
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            log_steps(logger, steps, losses, gnorms, None) 
+            log_steps(logger, steps, losses, grad_norms, param_norms, update_norms, None) 
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
             params = flax.jax_utils.unreplicate(params_repl) 
