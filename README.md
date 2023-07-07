@@ -5,8 +5,9 @@ Need](https://arxiv.org/pdf/1706.03762.pdf) by Vaswani et al.
 
 ![Preliminary Loss](assets/jun7-loss-6k.png)
 
-Shown above is loss using batch size 2048 on the whole (4.5M samples) WMT-14 dataset.
-It represents about a half an epoch.  Training is on TPU.
+Shown above is loss using batch size 50,000 (number of input plus output tokens) on
+the whole (4.5M samples) WMT-14 database.  720 sentence-pairs in each batch.
+Training is on TPU.
 
 ## Getting Started
 
@@ -27,7 +28,6 @@ It represents about a half an epoch.  Training is on TPU.
 
     # train the model
     python -m aiayn.train \
-      tpu_vm \
       None \
       --data_path ~/ai/data/wmt14 \
       --batch_size 64 \
