@@ -116,7 +116,6 @@ class InputEmbedding(hk.Module):
     def __init__(self, embed_mat, hps):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
-        # self.scale_factor = np.sqrt(self.embed_mat.T) 
         self.pos_factor = hps.pos_encoding_factor
 
     def positional_embedding(self, num_positions):

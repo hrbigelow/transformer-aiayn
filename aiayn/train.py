@@ -169,7 +169,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_size // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
-    enc_input, dec_input = next(iter(dataset))
+    enc_input, dec_input, _, _ = next(iter(dataset))
     enc_input = enc_input.reshape(shape)
     dec_input = dec_input.reshape(shape)
     
@@ -212,7 +212,8 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
 
     step = initial_step 
 
-    for enc_input, dec_input in iter(dataset):
+    for enc_input, dec_input, enc_lengths, dec_lengths in iter(dataset):
+        num_toks = enc_lengths.sum() + dec_lengths.sum()
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
         params_repl, opt_state_repl, loss_repl, rng_key_repl, metrics = (
@@ -231,7 +232,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
             update_norms = update_elem(update_norms, report_idx, unorm)
 
         if step > 0 and report_idx % hps.report_every == 0:
-            print(f'step {step}, loss={loss:3.2f}')
+            print(f'step {step}, {num_toks=}, loss={loss:3.2f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, losses, None) 
@@ -285,7 +286,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         )
     """
     hps = hparams.setup_hparams(hps_keys, hps_overrides)
-    print('Running with parameters:')
+    print('Now running with parameters:')
     print(hps)
 
     rng_key = jax.random.PRNGKey(42)

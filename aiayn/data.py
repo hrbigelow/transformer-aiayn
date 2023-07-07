@@ -38,13 +38,17 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
     pad_id = tokenizer.pad_token_id
 
     def pad_tokens_fn(tok1, tok2):
-        l1 = max_sentence_length - tf.shape(tok1)[0] - 2
-        l2 = max_sentence_length - tf.shape(tok2)[0] - 2
+        sen_len1 = tf.shape(tok1)[0]
+        sen_len2 = tf.shape(tok2)[0]
+        l1 = max_sentence_length - sen_len1 - 2
+        l2 = max_sentence_length - sen_len2 - 2
         pad1 = tf.fill((l1,), pad_id)
         pad2 = tf.fill((l2,), pad_id)
         tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
         tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
-        return tf.cast(tok1, dtype=tf.uint16), tf.cast(tok2, dtype=tf.uint16)
+        tok1 = tf.cast(tok1, dtype=tf.uint16)
+        tok2 = tf.cast(tok2, dtype=tf.uint16)
+        return tok1, tok2, sen_len1, sen_len2 
 
     ds = dataset.filter(maxlen_fn)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
