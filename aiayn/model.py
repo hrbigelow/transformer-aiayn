@@ -116,9 +116,7 @@ class InputEmbedding(hk.Module):
     def __init__(self, embed_mat, hps):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
-        # They say they *multiply* by sqrt(d_model), seems more sensible to divide!
-        # See Section 3.4
-        self.scale_factor = np.sqrt(self.embed_mat.T) ** -1 # my experiment
+        # self.scale_factor = np.sqrt(self.embed_mat.T) 
         self.pos_factor = hps.pos_encoding_factor
 
     def positional_embedding(self, num_positions):
@@ -140,8 +138,8 @@ class InputEmbedding(hk.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
-        scaled_emb_mat = self.embed_mat() * self.scale_factor 
-        embed = jnp.take(scaled_emb_mat, input, axis=0)
+        # scaled_emb_mat = self.embed_mat() * self.scale_factor 
+        embed = jnp.take(self.embed_mat(), input, axis=0)
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
@@ -223,7 +221,8 @@ class Decoder(hk.Module):
         super().__init__(name='dec')
         self.embed_layer = embed_layer 
         self.body = TeeSequential(*(DecoderLayer(hps, is_train, i) for i in range(hps.num_layers)))
-        self.linear_final = hk.Linear(T)
+        # self.linear_final = hk.Linear(T)
+        self.scale_factor = np.sqrt(hps.M) ** -1
 
     def __call__(self, enc_out, dec_in):
         """
@@ -233,9 +232,9 @@ class Decoder(hk.Module):
         """
         out = self.embed_layer(dec_in)
         out = self.body(enc_out, out)
-        emb_mat = self.embed_layer.embed_mat()
+        scaled_emb_mat = self.embed_layer.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
-        out = jnp.einsum('bcm,tm -> bct', out, emb_mat)
+        out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
         # out = jax.nn.softmax(out, axis=2)
         return out
 

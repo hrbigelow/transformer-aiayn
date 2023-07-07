@@ -230,8 +230,10 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
             param_norms = update_elem(param_norms, report_idx, pnorm)
             update_norms = update_elem(update_norms, report_idx, unorm)
 
-        if logger and step > 0 and report_idx == hps.report_every - 1:
+        if step > 0 and report_idx % hps.report_every == 0:
             print(f'step {step}, loss={loss:3.2f}')
+
+        if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, losses, None) 
             if hps.with_metrics:
                 log_metrics(logger, steps, grad_norms, param_norms, update_norms)
@@ -240,6 +242,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
             params = flax.jax_utils.unreplicate(params_repl) 
             state_save_args = jax.tree_map(lambda _: orbax.SaveArgs(aggregate=True), params)
             mngr.save(step, params, save_kwargs={'save_args': state_save_args})
+            print(f'Saved checkpoint {step=}')
         step += 1
 
 def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
