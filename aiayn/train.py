@@ -118,9 +118,11 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
             
     return update_fn
 
-def log_steps(logger, steps, losses, learn_rates):
+def log_steps(logger, steps, learn_rate, losses, learn_rates):
     loss_plot = jnp.expand_dims(jnp.stack((steps, losses), axis=1), axis=0)
     logger.tandem_lines('loss', loss_plot)
+    lr_plot = jnp.expand_dims(jnp.stack((steps, learn_rate), axis=1), axis=0)
+    logger.tandem_lines('learn_rate', lr_plot)
 
 def log_metrics(logger, steps, grad_norms, param_norms, update_norms): 
 
@@ -164,7 +166,7 @@ def log_metrics(logger, steps, grad_norms, param_norms, update_norms):
 def restore_params(ckpt_path):
     zfile = np.load(ckpt_path)
 
-def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
+def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
@@ -194,6 +196,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
 
     steps = np.empty(hps.report_every)
     losses = np.empty(hps.report_every)
+    learn_rate = np.empty(hps.report_every)
 
     update_fn = make_update_fn(model, objective, hps.accum_steps, hps.with_metrics, tx)
     # donate_argnums doesn't seem to make any difference in speed
@@ -224,6 +227,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
         report_idx = step % hps.report_every
         steps[report_idx] = step
         losses[report_idx] = loss
+        learn_rate[report_idx] = learn_rate_fn(step)
 
         if metrics:
             gnorm, pnorm, unorm = tuple(flax.jax_utils.unreplicate(m) for m in metrics)
@@ -235,7 +239,7 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
             print(f'step {step}, {num_toks=}, loss={loss:3.2f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            log_steps(logger, steps, losses, None) 
+            log_steps(logger, steps, learn_rate, losses, None) 
             if hps.with_metrics:
                 log_metrics(logger, steps, grad_norms, param_norms, update_norms)
 
@@ -317,7 +321,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     mod = model.make_model(hps, True, token_info)
     objective = model.make_objective(token_info)
 
-    train_loop(hps, mod, objective, tx, dataset, rng_key, logger)
+    train_loop(hps, mod, lr_fn, objective, tx, dataset, rng_key, logger)
 
 if __name__ == '__main__':
     fire.Fire(main)
