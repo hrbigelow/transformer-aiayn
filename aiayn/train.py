@@ -105,7 +105,6 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
         l = jax.lax.pmean(l, axis_name='batch')
         g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
 
-
         updates, opt_state = tx.update(g, opt_state)
         params = optax.apply_updates(params, updates)
 
@@ -167,7 +166,7 @@ def restore_params(ckpt_path):
 
 def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     num_replicas = jax.local_device_count()
-    batch_repl_size = hps.batch_size // num_replicas
+    batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
     enc_input, dec_input, _, _ = next(iter(dataset))
     enc_input = enc_input.reshape(shape)
@@ -197,7 +196,8 @@ def train_loop(hps, model, objective, tx, dataset, rng_key, logger):
     losses = np.empty(hps.report_every)
 
     update_fn = make_update_fn(model, objective, hps.accum_steps, hps.with_metrics, tx)
-    # TODO: how to use donate_argnums? 
+    # donate_argnums doesn't seem to make any difference in speed
+    # nor memory usage. 
     update_fn_repl = jax.pmap(update_fn, axis_name='batch')
     print('Compiled model')
     params_repl = flax.jax_utils.replicate(params)
@@ -260,9 +260,10 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     :param pubsub_topic: the GCP topic associated with pubsub_project
     :param streamvis_log_file: path to streamvis log file (optional) 
 
-    :param batch_size: SGD batch size
-    :param update_every: number of loader steps to accumulate gradients for before
-                         taking an optimizer step
+    :param batch_dim0 : SGD batch size dimension 0, the number of sentences in batch
+    :param accum_steps: accumulate the gradient over accum_steps steps.
+           saves memory for large batch_dim0
+           batch_dim0 % accum_steps must be 0
     :param ckpt_dir: directory to save checkpoints
     :param max_sentence_length: skip data batches containing token sequences longer
                                 than this, to avoid OOM errors
@@ -304,7 +305,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         logger = None
 
     dataset, ds_info = data.base_dataset(hps.data_path, 'train', 2)
-    dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_size)
+    dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_dim0)
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
     tx = optax.chain(
