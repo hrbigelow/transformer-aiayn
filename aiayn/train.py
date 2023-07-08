@@ -244,7 +244,7 @@ def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logge
             update_norms = update_elem(update_norms, report_idx, unorm)
 
         if step > 0 and report_idx % hps.report_every == 0:
-            print(f'step {step}, {num_toks=}, model_entropy={entropy[1]} loss={loss:3.2f}')
+            print(f'step {step}, {num_toks=}, model_entropy={entropy[1]:3.2f} loss={loss:3.2f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, losses, entropies) 
