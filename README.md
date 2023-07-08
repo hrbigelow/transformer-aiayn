@@ -3,11 +3,37 @@
 An original implementation of the paper [Attention is All You
 Need](https://arxiv.org/pdf/1706.03762.pdf) by Vaswani et al.
 
-![Preliminary Loss](assets/jul7-loss-6k.png)
+![Loss (Conditional KL-Divergence in bits](assets/jul8-loss-35k.png)
 
-Shown above is loss using batch size 50,000 (number of input plus output tokens) on
-the whole (4.5M samples) WMT-14 database.  720 sentence-pairs in each batch.
-Training is on TPU.
+Shown above is a training run for about half of an epoch.  batch size 50,000 (number
+of input plus output tokens) on the whole (4.5M samples) WMT-14 database.  720
+sentence-pairs in each batch, 62500 steps per epoch. Training is on TPU.
+
+![Entropy in bits](assets/jul8-cond-entropy-bits-35k.png)
+
+Conditional entropy H(token_t | context) is given for both model (red) and dataset
+(green)
+
+![Perplexity](assets/jul8-cond-perplexity-35k.png)
+
+Perplexity here is computed as 2 ^ entropy, given for both model (red) and dataset
+(green).
+
+![Learning rate](assets/jul8-learn-rate-35k.png)
+
+The learning rate schedule is as given in the paper, section 5.3, page 7, equation 3.
+
+```python
+def make_learning_rate_fn(warmup_steps, M):
+    # from section 5.3, page 7, equation 3
+    def lr_fn(step):
+        factor = jax.lax.min(step ** -0.5, step * warmup_steps ** -1.5)
+        new_lr = M ** -0.5 * factor
+        # jax.debug.print('learn_rate: {}', new_lr)
+        return new_lr
+```
+
+
 
 ## Getting Started
 
