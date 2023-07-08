@@ -279,82 +279,6 @@ class Model(hk.Module):
         # I will assume the attention used should be over the last layer
         pass
 
-    def regex_params(self, pat):
-        """
-        For each parameter name matching pat, return:
-        name => (*captures)
-        """
-        ret = {}
-        for name, par in self.params_dict():
-            m = re.match(pat, name)
-            if m:
-                ret[name] = m.groups()
-        return ret
-
-    def get_ordered_params(self, pat):
-        """
-        Return an ordered list of parameters matching pat.
-        Ordered according to any capture groups in pat.
-        """
-        params = []
-        for name, par in self.named_parameters():
-            m = re.match(pat, name)
-            if m:
-                params.append((m.groups(), name, par))
-        return [ (name, par) for _, name, par in sorted(params) ]
-
-    def zero_gradients(self, pat):
-        """
-        Zero gradients matching parameter name `pat`.
-        Return a map of the recorded gradients to restore later
-
-        Usage:
-
-        current_grads = zero_gradients(pat)
-
-        # compute gradients for given samples
-        loss.backward()
-
-        # add in gradients
-        self.add_gradients(current_grads)
-    
-        """
-        grads = {} 
-        params = self.get_ordered_params(pat)
-        for name, par in params:
-            if par.grad is None:
-                continue
-            grads[name] = par.grad.clone()
-            par.grad.zero_()
-        return grads
-
-    def add_gradients(self, grads):
-        """
-        Add previously saved gradients back.
-        Call this function if you are inspecting some gradients within an
-        accumulation loop
-        """
-        for name, grad in grads.items():
-            par = self.get_parameter(name)
-            with t.no_grad():
-                par.grad += grad
-
-    def grad_norms(self, pat, index_dims=None):
-        """
-        Return a vector of gradient norms for all parameters matching pat.
-        Entries in the vector will be ordered by any tuple of match patterns
-        """
-        if index_dims is None:
-            index_dims = tuple()
-
-        params = self.get_ordered_params(pat)
-        norms = []
-
-        for name, par in params:
-            dims = [d for d in range(par.grad.ndim) if d not in index_dims]
-            norms.append(vector_norm(par.grad, dim=dims).item())
-        return norms
-
     def sample(self, enc_input):
         """
         Produce a random sample from the model, conditioned on input
@@ -393,12 +317,6 @@ class Objective(hk.Module):
         # self.register_buffer('u', token_histo, persistent=False)
         self.T = token_histo.shape[0] 
 
-    @staticmethod
-    def kldiv(q, p, axis):
-        # compute D[q(x) || p(x)] over the axis dimension
-        terms = jax.scipy.special.xlogy(q, q) - (q * jnp.log(p))
-        return terms.sum(axis=axis)
-
     def label_smooth(self, labels):
         """
         labels: bc
@@ -407,6 +325,12 @@ class Objective(hk.Module):
         one_hot = jax.nn.one_hot(labels, self.T, axis=-1)
         smoothed = (1.0 - self.eps) * one_hot + self.eps * self.u
         return smoothed
+
+    @staticmethod
+    def masked_mean(values, mask):
+        # compute the mean of values at mask
+        masked_values = values * mask
+        return masked_values.sum() / mask.sum()
 
     def __call__(self, dec_input, dec_output_logits):
         """
@@ -418,24 +342,18 @@ class Objective(hk.Module):
         smoothed_labels = self.label_smooth(labels)
         dec_mask = jnp.not_equal(labels, self.pad_value).astype(jnp.float32)
         # dec_mask = t.ne(labels, self.pad_value).to(t.float32)
-
         # bct
         dec_pred_logits = dec_output_logits[:,:-1,:]
+        dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
         # print('foo: ', smoothed_labels.shape)
         # print('bar: ', dec_pred_logits.shape)
         kldiv = funcs.fused_kldiv_softmax(smoothed_labels, dec_pred_logits, 2)
         # kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
-        masked = kldiv * dec_mask
-        total_targets = dec_mask.sum()
-        # jax.debug.print("masked: {}", masked[0,:])
-        # jax.debug.print("dec_pred: {}", dec_pred[0,:])
-        # jax.debug.print("smoothed_labels: {}", smoothed_labels[0,:])
-    
-        # target_fraction = total_targets / dec_mask.numel()
-        # print(f'{total_targets=}, {target_fraction=}')
-        loss = masked.sum() / total_targets
+        mean_kldiv = self.masked_mean(kldiv, dec_mask)
+        label_entropy = self.masked_mean(funcs.entropy(smoothed_labels, axis=2), dec_mask)
+        model_entropy = self.masked_mean(funcs.entropy(dec_pred, axis=2), dec_mask)
         # print(f'{loss=}')
-        return loss
+        return mean_kldiv, label_entropy, model_entropy
 
 def _wrap_haiku(mod_cls, *args):
     def wrapped_fn(*call_args):

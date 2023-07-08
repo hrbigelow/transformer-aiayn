@@ -12,15 +12,7 @@ import time
 import sys
 import fire
 import numpy as np
-from aiayn import model, data, hparams, report
-
-def print_tree_summary(tree, summary_fn):
-    def join_path(path):
-        return '->'.join([el.key for el in path])
-    flat, _ = jax.tree_util.tree_flatten_with_path(tree)
-    summary = [(join_path(path), summary_fn(leaf)) for path, leaf in flat]
-    for name, val in summary:
-        jax.debug.print(name + ': {}', val)
+from aiayn import model, data, hparams, report, funcs
 
 def print_range(pfx, tree):
     def fn(acc, x):
@@ -58,22 +50,25 @@ def accumulate_gradient(loss_and_grad_fn, params, enc_input, dec_input, accum_st
                f'batch size {enc_input.shape[0]} not a multiple of {accum_steps=}')
 
         step_size = enc_input.shape[0] // accum_steps
-        l, g = loss_and_grad_fn(params, enc_input[:step_size], dec_input[:step_size])
+        (l, e), g = loss_and_grad_fn(params, enc_input[:step_size], dec_input[:step_size])
+        def map_add(a, b):
+            return jax.tree_map(lambda x, y: x + y, a, b)
 
-        def acc_grad_and_loss(i, l_and_g):
+        def acc_loss_and_grad(i, tup):
             encs = jax.lax.dynamic_slice(enc_input, (i * step_size, 0),
                     (step_size,) + enc_input.shape[1:])
             decs = jax.lax.dynamic_slice(dec_input, (i * step_size, 0),
                     (step_size,) + dec_input.shape[1:])
-            li, gi = loss_and_grad_fn(params, encs, decs)
-            l, g = l_and_g
-            return (l + li, jax.tree_map(lambda x, y: x + y, g, gi))
+            (li, ei), gi = loss_and_grad_fn(params, encs, decs)
+            l, e, g = tup
+            return (l + li, map_add(e, ei), map_add(g, gi))
 
-        l, g = jax.lax.fori_loop(1, accum_steps, acc_grad_and_loss, (l, g))
-        return jax.tree_map(lambda x: x / accum_steps, (l, g))
+        l, e, g = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g))
+        return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
 
     else:
-        return loss_and_grad_fn(params, enc_input, dec_input)
+        (l, e), g = loss_and_grad_fn(params, enc_input, dec_input)
+        return l, e, g
 
 
 def make_update_fn(model, objective, accum_steps, with_metrics, tx):
@@ -93,49 +88,58 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
         def loss_fn(params, enc_input, dec_input):
             dec_output = model.apply(params, dropout_rng, enc_input, dec_input)
             # print_range('dec_output', dec_output)
-            loss = objective.apply(None, None, dec_input, dec_output)
-            return loss
+            loss, label_ent, model_ent = objective.apply(None, None, dec_input, dec_output)
+            return loss, (label_ent, model_ent)
 
         def tensor_norm(x):
             return jnp.mean(jax.lax.pow(x, 2.0))
 
-        lg_fn = jax.value_and_grad(loss_fn)
-        l, g = accumulate_gradient(lg_fn, params, enc_input, dec_input, accum_steps)
+        lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        l, e, g = accumulate_gradient(lg_fn, params, enc_input, dec_input, accum_steps)
         # averages l and g across replicas, then broadcasts the average
-        l = jax.lax.pmean(l, axis_name='batch')
-        g = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
+        loss = jax.lax.pmean(l, axis_name='batch')
+        entropy = jax.lax.pmean(e, axis_name='batch')
+        grad = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
 
-        updates, opt_state = tx.update(g, opt_state)
+        updates, opt_state = tx.update(grad, opt_state)
         params = optax.apply_updates(params, updates)
 
         if with_metrics:
-            gnorm = jax.tree_map(tensor_norm, g)
+            gnorm = jax.tree_map(tensor_norm, grad)
             pnorm = jax.tree_map(tensor_norm, params)
             unorm = jax.tree_map(tensor_norm, updates)
-            return params, opt_state, l, new_rng_key, (gnorm, pnorm, unorm)
+            return params, opt_state, loss, entropy, new_rng_key, (gnorm, pnorm, unorm)
         else:
-            return params, opt_state, l, new_rng_key, None
+            return params, opt_state, loss, entropy, new_rng_key, None
             
     return update_fn
 
-def log_steps(logger, steps, learn_rate, losses, learn_rates):
-    loss_plot = jnp.expand_dims(jnp.stack((steps, losses), axis=1), axis=0)
-    logger.tandem_lines('loss', loss_plot)
-    lr_plot = jnp.expand_dims(jnp.stack((steps, learn_rate), axis=1), axis=0)
-    logger.tandem_lines('learn_rate', lr_plot)
+def make_line_plot(logger, label, steps, vals):
+    """
+    steps: [num_steps]
+    vals: [num_steps] or [num_steps, num_lines] 
+    Create a tandem_lines plot
+    """
+    if len(vals.shape) == 1:
+        vals = jnp.expand_dims(vals, axis=1)
+
+    vals = jnp.transpose(vals, (1, 0))
+    num_lines = vals.shape[0]
+    val_steps = jnp.repeat(jnp.expand_dims(steps, axis=0), num_lines, axis=0)
+    plot = jnp.stack((val_steps, vals), axis=2)
+    logger.tandem_lines(label, plot, palette='Viridis256')
+
+def log_steps(logger, steps, learn_rate, losses, entropies):
+    make_line_plot(logger, 'loss', steps, losses)
+    make_line_plot(logger, 'learn_rate', steps, learn_rate)
+    make_line_plot(logger, 'cond_entropy_bits', steps, entropies)
+    make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies))
 
 def log_metrics(logger, steps, grad_norms, param_norms, update_norms): 
 
-    def make_plot_data(step_data, steps):
-        num_values = step_data.shape[0]
-        val_steps = jnp.repeat(jnp.expand_dims(steps, axis=0), num_values, axis=0)
-        plot = jnp.stack((val_steps, step_data), axis=2)
-        return plot
-
     def svlog(prefix, label, key, values):
         vals = report.get_layer_values(pfx, values, key)
-        plot = make_plot_data(vals, steps)
-        logger.tandem_lines(label, plot, palette='Viridis256')
+        make_plot_data(logger, label, steps, vals)
    
     cats = {
             'enc_att': 'tx/~/enc/~/(layer\d+)/~/att',
@@ -196,6 +200,7 @@ def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logge
 
     steps = np.empty(hps.report_every)
     losses = np.empty(hps.report_every)
+    entropies = np.empty((hps.report_every, 2)) # data, model
     learn_rate = np.empty(hps.report_every)
 
     update_fn = make_update_fn(model, objective, hps.accum_steps, hps.with_metrics, tx)
@@ -219,15 +224,18 @@ def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logge
         num_toks = enc_lengths.sum() + dec_lengths.sum()
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
-        params_repl, opt_state_repl, loss_repl, rng_key_repl, metrics = (
+        params_repl, opt_state_repl, loss_repl, entropy_repl, rng_key_repl, metrics = (
             update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input, rng_key_repl))
 
         loss = flax.jax_utils.unreplicate(loss_repl)
+        entropy = flax.jax_utils.unreplicate(entropy_repl)
+        opt_state = flax.jax_utils.unreplicate(opt_state_repl)
 
         report_idx = step % hps.report_every
         steps[report_idx] = step
         losses[report_idx] = loss
-        learn_rate[report_idx] = learn_rate_fn(step)
+        entropies[report_idx] = entropy
+        learn_rate[report_idx] = learn_rate_fn(step + 1)
 
         if metrics:
             gnorm, pnorm, unorm = tuple(flax.jax_utils.unreplicate(m) for m in metrics)
@@ -236,10 +244,10 @@ def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logge
             update_norms = update_elem(update_norms, report_idx, unorm)
 
         if step > 0 and report_idx % hps.report_every == 0:
-            print(f'step {step}, {num_toks=}, loss={loss:3.2f}')
+            print(f'step {step}, {num_toks=}, model_entropy={entropy[1]} loss={loss:3.2f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            log_steps(logger, steps, learn_rate, losses, None) 
+            log_steps(logger, steps, learn_rate, losses, entropies) 
             if hps.with_metrics:
                 log_metrics(logger, steps, grad_norms, param_norms, update_norms)
 

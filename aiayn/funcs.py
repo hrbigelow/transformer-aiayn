@@ -15,6 +15,14 @@ def safe_xy(x, y):
     safe_y = jnp.where(x_ok, y, 1.)
     return jnp.where(x_ok, lax.mul(safe_x, safe_y), jnp.zeros_like(x))
 
+def entropy(p, axis):
+    """
+    Compute entropy in bits along axis
+    """
+    log2e = jnp.log2(jnp.exp(1.0))
+    h_nat = jnp.sum(safe_xy(p, - jnp.log(p)), axis)
+    return h_nat * log2e
+
 def fused_kldiv_softmax(q, p_logits, axis):
     # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
     # returns value in bits
