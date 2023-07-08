@@ -114,7 +114,7 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
             
     return update_fn
 
-def make_line_plot(logger, label, steps, vals):
+def make_line_plot(logger, label, steps, vals, palette='Viridis256'):
     """
     steps: [num_steps]
     vals: [num_steps] or [num_steps, num_lines] 
@@ -127,13 +127,13 @@ def make_line_plot(logger, label, steps, vals):
     num_lines = vals.shape[0]
     val_steps = jnp.repeat(jnp.expand_dims(steps, axis=0), num_lines, axis=0)
     plot = jnp.stack((val_steps, vals), axis=2)
-    logger.tandem_lines(label, plot, palette='Viridis256')
+    logger.tandem_lines(label, plot, palette)
 
 def log_steps(logger, steps, learn_rate, losses, entropies):
     make_line_plot(logger, 'loss', steps, losses)
     make_line_plot(logger, 'learn_rate', steps, learn_rate)
-    make_line_plot(logger, 'cond_entropy_bits', steps, entropies)
-    make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies))
+    make_line_plot(logger, 'cond_entropy_bits', steps, entropies, 'RdYlGn8')
+    make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies), 'RdYlGn8')
 
 def log_metrics(logger, steps, grad_norms, param_norms, update_norms): 
 
