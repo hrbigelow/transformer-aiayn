@@ -39,7 +39,7 @@ def base_dataset(download_dir, split, dataset_name, nproc):
 
     ds = ds.map(tokenize_fn, num_parallel_calls=nproc, deterministic=False)
     # ds.prefetch(ds_info.splits[split].num_examples)
-    ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
+    # ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
     # iterate once to populate cache
     return ds, ds_info
 
@@ -54,6 +54,8 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size, swap_source_
     pad_id = tokenizer.pad_token_id
 
     def pad_tokens_fn(tok1, tok2):
+        tok1 = tf.cast(tok1, tf.uint16)
+        tok2 = tf.cast(tok2, tf.uint16)
         sen_len1 = tf.shape(tok1)[0]
         sen_len2 = tf.shape(tok2)[0]
         l1 = max_sentence_length - sen_len1 - 2
