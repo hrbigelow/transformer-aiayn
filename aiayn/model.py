@@ -255,7 +255,7 @@ class Model(hk.Module):
         self.encoder = Encoder(hps, is_train, self.embed_layer)
         self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
 
-    def __call__(self, enc_input, dec_input, temperature):
+    def __call__(self, enc_input, dec_input, temperature=1.0):
         """
         enc_input: bc
         dec_input: bc
