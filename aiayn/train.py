@@ -175,6 +175,7 @@ def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logge
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
     enc_input, dec_input, _, _ = next(iter(dataset))
+    print('Received first dataset element for model initialization')
     enc_input = enc_input.reshape(shape)
     dec_input = dec_input.reshape(shape)
     
@@ -302,6 +303,11 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print('Now running with parameters:')
     print(hps)
 
+    try:
+        token_info = np.load(hps.token_info_file)
+    except:
+        raise RuntimeError(f'Could not load token info file {hps.token_info_file}')
+
     rng_key = jax.random.PRNGKey(42)
 
     if hps.streamvis_run_name is not None:
@@ -316,9 +322,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     else:
         logger = None
 
-    dataset, ds_info = data.base_dataset(hps.data_path, 'train', hps.dataset_name, 2)
-    dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length,
+    dataset = data.main_dataset(hps.data_path, hps.max_sentence_length,
             hps.batch_dim0, hps.swap_source_target)
+    print(f'Prepared dataset {hps.data_path}')
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
     tx = optax.chain(
@@ -326,7 +332,6 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
                 eps=hps.adam_eps)
             )
 
-    token_info = data.load_token_info(hps.data_path) 
     mod = model.make_model(hps, True, token_info)
     objective = model.make_objective(token_info)
 

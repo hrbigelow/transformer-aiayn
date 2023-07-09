@@ -96,8 +96,8 @@ logging = Hyperparams(
     )
 
 data = Hyperparams(
-    dataset_name = 'de-en',
     data_path = None,
+    token_info_file = None,
     swap_source_target = True,
     bin_size = 1000,
     dataset_size = None,
@@ -106,6 +106,7 @@ data = Hyperparams(
     )
 
 sample = Hyperparams(
+    temperature = 1.0,
     random_seed = 42,
     ckpt_dir = None,
     resume_ckpt = None,

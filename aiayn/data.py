@@ -23,7 +23,7 @@ def de_tokenize(tokens):
         ans.append(text)
     return ans
 
-def base_dataset(download_dir, split, dataset_name, nproc):
+def token_dataset(download_dir, split, dataset_name, nproc):
     tokenizer = get_tokenizer()
     builder = tfds.builder(f'wmt14_translate/{dataset_name}', data_dir=download_dir)
     builder.download_and_prepare(download_dir=download_dir)
@@ -38,17 +38,15 @@ def base_dataset(download_dir, split, dataset_name, nproc):
         return tf.py_function(_py_fn, inp=item.values(), Tout=[tf.uint16, tf.uint16])
 
     ds = ds.map(tokenize_fn, num_parallel_calls=nproc, deterministic=False)
-    # ds.prefetch(ds_info.splits[split].num_examples)
-    # ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
+    print('prefetching...')
+    ds.prefetch(ds_info.splits[split].num_examples)
+
+    ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
     # iterate once to populate cache
     return ds, ds_info
 
-def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size, swap_source_target):
+def pad_dataset(token_ds, shuffle_size, max_sentence_length):
     tokenizer = get_tokenizer()
-
-    def maxlen_fn(tok1, tok2):
-        return tf.maximum(tf.shape(tok1)[0], tf.shape(tok2)[0]) <= max_sentence_length - 2
-
     bos = tf.constant([tokenizer.bos_token_id], tf.uint16)
     eos = tf.constant([tokenizer.eos_token_id], tf.uint16)
     pad_id = tokenizer.pad_token_id
@@ -64,20 +62,34 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size, swap_source_
         pad2 = tf.cast(tf.fill((l2,), pad_id), dtype=tf.uint16)
         tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
         tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
-        if swap_source_target:
-            tok2, tok1 = tok1, tok2
-            sen_len2, sen_len1 = sen_len1, sen_len2
         return tok1, tok2, sen_len1, sen_len2 
 
-    ds = dataset.filter(maxlen_fn)
+    def maxlen_fn(tok1, tok2):
+        return tf.maximum(tf.shape(tok1)[0], tf.shape(tok2)[0]) <= max_sentence_length - 2
+
+    ds = token_ds.filter(maxlen_fn)
+    ds = ds.shuffle(shuffle_size, reshuffle_each_iteration=True)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
-    total_samples = ds_info.splits['train'].num_examples
-    ds = ds.shuffle(total_samples // 100, reshuffle_each_iteration=True)
-    ds = ds.repeat()
+    return ds
+
+def pipe_dataset(pad_ds, batch_size, swap_source_target):
+    ds = pad_ds.repeat()
+    def swap_fn(t1, t2, s1, s2):
+        return t2, t1, s2, s1
+
+    if swap_source_target:
+        ds = ds.map(swap_fn)
+
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = tfds.as_numpy(ds)
     return ds
+
+def main_dataset(data_path, max_sentence_length, batch_size, swap_source_target):
+    token_ds = tf.data.Dataset.load(data_path)
+    shuffle_size = len(token_ds)
+    pad_ds = pad_dataset(token_ds, shuffle_size, max_sentence_length)
+    return pipe_dataset(pad_ds, batch_size, swap_source_target)
 
 def token_histo(dataset):
     """
@@ -110,19 +122,6 @@ def save_token_info(dataset, data_dir):
             pad_token_id=tz.pad_token_id,
             bos_token_id=tz.bos_token_id,
             eos_token_id=tz.eos_token_id)
-
-def prepare(data_dir, split):
-    if not os.access(data_dir, os.W_OK):
-        raise RuntimeError(f'Couldn\'t open {data_dir=} for writing')
-    ds, ds_info = base_dataset(data_dir, split, 2)
-    for i, _ in enumerate(iter(ds)):
-        if i % 10000 == 0:
-            print(f'Sample {i} iterated')
-    print(f'Finished')
-
-def load_token_info(data_dir):
-    path = f'{data_dir}/token_info.npz'
-    return np.load(path)
 
 def column_counts(dataset, column):
     def map_fn(examples, accu):

@@ -293,18 +293,6 @@ class Model(hk.Module):
         pass
 
 
-class InferenceModel(hk.Module):
-    def __init__(self, hps, token_histo, pad_token_id):
-        super().__init__(name='inference')
-        self.hps = hps
-        self.model = Model(hps, False, token_histo, pad_token_id)
-
-    def __call__(self, enc_input):
-        """
-        Produce a random sample from the model, conditioned on input
-        enc_input: bc.  the tokenized query sentences.
-        """
-
 def predict(self, enc_input):
     alpha = self.hps.beam_search_alpha
     beta = self.hps.beam_search_beta
