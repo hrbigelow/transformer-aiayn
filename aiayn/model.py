@@ -240,11 +240,12 @@ class Decoder(hk.Module):
 class Model(hk.Module):
     def __init__(self, hps, is_train, token_histo, pad_token_id):
         super().__init__(name='tx')
+        self.is_train = is_train
         self.hps = hps
         self.pad_token_id = pad_token_id 
         self.T = token_histo.shape[0]
-        self.embed_matrix = EmbedMatrix(self.T, hps.M) 
-        self.embed_layer = InputEmbedding(self.embed_matrix, hps) 
+        emb_mat = EmbedMatrix(self.T, hps.M) 
+        self.embed_layer = InputEmbedding(emb_mat, hps) 
         self.encoder = Encoder(hps, is_train, self.embed_layer)
         self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
 
@@ -254,9 +255,21 @@ class Model(hk.Module):
         dec_input: bc
         returns: bct
         """
+        if self.is_train:
+            enc_output = self.encoder(enc_input)
+            dec_output = self.decoder(enc_output, dec_input)
+            return dec_output
+
+        C = self.hps.max_sentence_length
+
         enc_output = self.encoder(enc_input)
-        dec_output = self.decoder(enc_output, dec_input)
-        return dec_output
+        for p in range(C):
+            rng_key = hk.next_rng_key()
+            _, rng_key = jax.random.split(rng_key)
+            dec_output = self.decoder(enc_output, dec_input)
+            sample = jax.random.categorical(rng_key, dec_output[:, p], axis=1)
+            dec_input = dec_input.at[:,p].set(sample)
+        return dec_input
 
     def total_params(self):
         # get total number of parameters
@@ -279,29 +292,26 @@ class Model(hk.Module):
         # I will assume the attention used should be over the last layer
         pass
 
-    def sample(self, enc_input):
+
+class InferenceModel(hk.Module):
+    def __init__(self, hps, token_histo, pad_token_id):
+        super().__init__(name='inference')
+        self.hps = hps
+        self.model = Model(hps, False, token_histo, pad_token_id)
+
+    def __call__(self, enc_input):
         """
         Produce a random sample from the model, conditioned on input
+        enc_input: bc.  the tokenized query sentences.
         """
-        B = self.hps.batch_size
-        C = self.hps.max_sentence_length
 
-        dec_input = jnp.empty((B, C), dtype=np.int32)
-        dec_input[:,0] = self.beg_token_id
-        enc_output = self.encoder(enc_input)
-        for p in range(C):
-            dec_output = self.decoder(enc_output, dec_input)
-            sample = jax.random.categorical(hk.next_rng_key(), dec_output[:, p],
-                    axis=1)
-            dec_input[:,p] = sample
-
-    def predict(self, enc_input):
-        alpha = self.hps.beam_search_alpha
-        beta = self.hps.beam_search_beta
-        beam_size = self.hps.beam_size
-        max_length = self.hps.beam_search_maxlen 
-        seq, score = funcs.beam_search(self, alpha, beta, beam_size, max_length, enc_input)
-        return seq
+def predict(self, enc_input):
+    alpha = self.hps.beam_search_alpha
+    beta = self.hps.beam_search_beta
+    beam_size = self.hps.beam_size
+    max_length = self.hps.beam_search_maxlen 
+    seq, score = funcs.beam_search(self, alpha, beta, beam_size, max_length, enc_input)
+    return seq
 
 class Objective(hk.Module):
     def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
@@ -367,5 +377,9 @@ def make_model(hps, is_train, token_info):
 
 def make_objective(token_info):
     return hk.transform(_wrap_haiku(Objective, token_info['de'],
+        token_info['pad_token_id']))
+
+def make_inference_model(hps, token_info):
+    return hk.transform(_wrap_haiku(InferenceModel, hps, token_info ['de'],
         token_info['pad_token_id']))
 

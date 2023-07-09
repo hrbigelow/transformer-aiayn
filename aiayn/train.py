@@ -316,8 +316,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     else:
         logger = None
 
-    dataset, ds_info = data.base_dataset(hps.data_path, 'train', 2)
-    dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length, hps.batch_dim0)
+    dataset, ds_info = data.base_dataset(hps.data_path, 'train', hps.dataset_name, 2)
+    dataset = data.pipe_dataset(dataset, ds_info, hps.max_sentence_length,
+            hps.batch_dim0, hps.swap_source_target)
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
     tx = optax.chain(

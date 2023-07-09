@@ -7,27 +7,43 @@ from transformers import GPT2TokenizerFast
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-def base_dataset(download_dir, split, nproc):
+def de_tokenize(tokens):
+    """
+    tokens: np array of shape batch, length
+    returns: python list of strings
+    """
+    tok = get_tokenizer()
+    ans = []
+    special_toks = (tok.bos_token_id, tok.eos_token_id, tok.pad_token_id)
+    for i in range(tokens.shape[0]):
+        toks = tokens[i]
+        toks = np.extract(~np.isin(toks, special_toks), toks) 
+        toks = tok.convert_ids_to_tokens(toks)
+        text = tok.convert_tokens_to_string(toks)
+        ans.append(text)
+    return ans
+
+def base_dataset(download_dir, split, dataset_name, nproc):
     tokenizer = get_tokenizer()
-    builder = tfds.builder('wmt14_translate/de-en', data_dir=download_dir)
+    builder = tfds.builder(f'wmt14_translate/{dataset_name}', data_dir=download_dir)
     builder.download_and_prepare(download_dir=download_dir)
     ds = builder.as_dataset(split=split, shuffle_files=True)
     ds_info = builder.info
 
     def tokenize_fn(item):
-        def _py_fn(en, de):
-            en = tokenizer(en.numpy().decode())['input_ids']
-            de = tokenizer(de.numpy().decode())['input_ids']
-            return tf.constant(en), tf.constant(de)
-        return tf.py_function(_py_fn, inp=item.values(), Tout=[tf.int32, tf.int32])
+        def _py_fn(one, two):
+            one = tokenizer(one.numpy().decode())['input_ids']
+            two = tokenizer(two.numpy().decode())['input_ids']
+            return tf.constant(one, dtype=tf.uint16), tf.constant(two, dtype=tf.uint16)
+        return tf.py_function(_py_fn, inp=item.values(), Tout=[tf.uint16, tf.uint16])
 
     ds = ds.map(tokenize_fn, num_parallel_calls=nproc, deterministic=False)
     # ds.prefetch(ds_info.splits[split].num_examples)
-    ds = ds.cache(f'{download_dir}/wmt14_cache')
+    ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
     # iterate once to populate cache
     return ds, ds_info
 
-def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
+def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size, swap_source_target):
     tokenizer = get_tokenizer()
 
     def maxlen_fn(tok1, tok2):
@@ -48,6 +64,9 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size):
         tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
         tok1 = tf.cast(tok1, dtype=tf.uint16)
         tok2 = tf.cast(tok2, dtype=tf.uint16)
+        if swap_source_target:
+            tok2, tok1 = tok1, tok2
+            sen_len2, sen_len1 = sen_len1, sen_len2
         return tok1, tok2, sen_len1, sen_len2 
 
     ds = dataset.filter(maxlen_fn)

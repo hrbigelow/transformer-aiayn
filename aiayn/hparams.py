@@ -96,11 +96,20 @@ logging = Hyperparams(
     )
 
 data = Hyperparams(
+    dataset_name = 'de-en',
     data_path = None,
+    swap_source_target = True,
     bin_size = 1000,
     dataset_size = None,
     pad_token_id = None,
     max_sentence_length = 200,
+    )
+
+sample = Hyperparams(
+    random_seed = 42,
+    ckpt_dir = None,
+    resume_ckpt = None,
+    num_sample = 10
     )
 
 
@@ -110,10 +119,12 @@ HPARAMS_REGISTRY['reg'] = reg
 HPARAMS_REGISTRY['train'] = train
 HPARAMS_REGISTRY['data'] = data
 HPARAMS_REGISTRY['logging'] = logging 
+HPARAMS_REGISTRY['sample'] = sample
 
 DEFAULTS['arch'] = arch
 DEFAULTS['reg'] = reg
 DEFAULTS['train'] = train
 DEFAULTS['data'] = data
 DEFAULTS['logging'] = logging
+DEFAULTS['sample'] = sample
 
