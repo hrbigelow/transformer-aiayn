@@ -322,7 +322,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     else:
         logger = None
 
-    dataset = data.main_dataset(hps.data_path, hps.max_sentence_length,
+    dataset = data.main_dataset(hps.data_path, token_info, hps.max_sentence_length,
             hps.batch_dim0, hps.swap_source_target)
     print(f'Prepared dataset {hps.data_path}')
 

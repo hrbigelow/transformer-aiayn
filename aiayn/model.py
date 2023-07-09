@@ -51,7 +51,8 @@ class MultiHeadAttention(hk.Module):
         if self.masked:
             # query (d) can only attend to keys (c) at or before it 
             # mask[i,j] = -100 if i > j else 0
-            mask = jnp.tri(alogit.shape[2], k=-1) * -100.0
+            mask = jnp.tri(alogit.shape[3], k=-1) * -100.0
+            # print(f'MHA.__call__: {self.masked=}, {mask.shape=}, {alogit.shape=}')
             alogit += mask 
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
         pre = jnp.einsum('bhcd,bhcv->bhdv', att, vval)
@@ -144,7 +145,7 @@ class InputEmbedding(hk.Module):
 class EncoderLayer(hk.Module):
     def __init__(self, hps, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
-        self.att = MultiHeadAttention(hps)
+        self.att = MultiHeadAttention(hps, masked=False)
         self.norm1 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
         self.norm2 = DropoutAddAndNorm(hps, is_train)
@@ -181,7 +182,7 @@ class DecoderLayer(hk.Module):
         super().__init__(name=f'layer{layer_num:02d}')
         self.mask_att = MultiHeadAttention(hps, masked=True)
         self.norm1 = DropoutAddAndNorm(hps, is_train)
-        self.att2 = MultiHeadAttention(hps)
+        self.att2 = MultiHeadAttention(hps, masked=False)
         self.norm2 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
         self.norm3 = DropoutAddAndNorm(hps, is_train)
@@ -218,6 +219,7 @@ class TeeSequential(hk.Module):
 class Decoder(hk.Module):
     def __init__(self, hps, is_train, T, embed_layer):
         super().__init__(name='dec')
+        self.is_train = is_train
         self.embed_layer = embed_layer 
         self.body = TeeSequential(*(DecoderLayer(hps, is_train, i) for i in range(hps.num_layers)))
         # self.linear_final = hk.Linear(T)
@@ -230,10 +232,14 @@ class Decoder(hk.Module):
         returns: bct
         """
         out = self.embed_layer(dec_in)
+        # print(f'Decoder.__call__: {enc_out.shape=}, {out.shape=}')
         out = self.body(enc_out, out)
         scaled_emb_mat = self.embed_layer.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
-        out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
+        if self.is_train:
+            out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
+        else:
+            out = jnp.einsum('bm,tm -> bt', out[:,-1,:], scaled_emb_mat)
         # out = jax.nn.softmax(out, axis=2)
         return out
 
@@ -249,7 +255,7 @@ class Model(hk.Module):
         self.encoder = Encoder(hps, is_train, self.embed_layer)
         self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
 
-    def __call__(self, enc_input, dec_input):
+    def __call__(self, enc_input, dec_input, temperature):
         """
         enc_input: bc
         dec_input: bc
@@ -260,15 +266,19 @@ class Model(hk.Module):
             dec_output = self.decoder(enc_output, dec_input)
             return dec_output
 
+        B = enc_input.shape[0]
         C = self.hps.max_sentence_length
-
         enc_output = self.encoder(enc_input)
-        for p in range(C):
+        for p in range(1,C):
             rng_key = hk.next_rng_key()
             _, rng_key = jax.random.split(rng_key)
-            dec_output = self.decoder(enc_output, dec_input)
-            sample = jax.random.categorical(rng_key, dec_output[:, p], axis=1)
-            dec_input = dec_input.at[:,p].set(sample)
+            # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
+            dec_output = self.decoder(enc_output, dec_input) / temperature
+            sample = jax.random.categorical(rng_key, dec_output, axis=1)
+            sample = jnp.expand_dims(sample, axis=1) # shape = (B,1)
+            # print(f'{dec_input.shape=}, {dec_output.shape=}, {sample.shape=}')
+            dec_input = jnp.concatenate((dec_input, sample), axis=1)
+            # dec_input = dec_input.at[:,p].set(sample)
         return dec_input
 
     def total_params(self):

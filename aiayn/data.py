@@ -2,10 +2,17 @@ import os
 import sys
 import fire
 import numpy as np
+import jax.numpy as jnp
 from collections import Counter
 from transformers import GPT2TokenizerFast
 import tensorflow as tf
 import tensorflow_datasets as tfds
+
+def tokenize(query):
+    tokenizer = get_tokenizer()
+    bos_id = tokenizer.bos_token_id
+    eos_id = tokenizer.eos_token_id
+    return jnp.array([bos_id] + tokenizer(query)['input_ids'] + [eos_id])
 
 def de_tokenize(tokens):
     """
@@ -17,7 +24,7 @@ def de_tokenize(tokens):
     special_toks = (tok.bos_token_id, tok.eos_token_id, tok.pad_token_id)
     for i in range(tokens.shape[0]):
         toks = tokens[i]
-        toks = np.extract(~np.isin(toks, special_toks), toks) 
+        # toks = np.extract(~np.isin(toks, special_toks), toks) 
         toks = tok.convert_ids_to_tokens(toks)
         text = tok.convert_tokens_to_string(toks)
         ans.append(text)
@@ -45,11 +52,10 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     # iterate once to populate cache
     return ds, ds_info
 
-def pad_dataset(token_ds, shuffle_size, max_sentence_length):
-    tokenizer = get_tokenizer()
-    bos = tf.constant([tokenizer.bos_token_id], tf.uint16)
-    eos = tf.constant([tokenizer.eos_token_id], tf.uint16)
-    pad_id = tokenizer.pad_token_id
+def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
+    bos = tf.constant([token_info['bos_token_id']], tf.uint16)
+    eos = tf.constant([token_info['eos_token_id']], tf.uint16)
+    pad_token_id = token_info['pad_token_id']
 
     def pad_tokens_fn(tok1, tok2):
         tok1 = tf.cast(tok1, tf.uint16)
@@ -58,8 +64,8 @@ def pad_dataset(token_ds, shuffle_size, max_sentence_length):
         sen_len2 = tf.shape(tok2)[0]
         l1 = max_sentence_length - sen_len1 - 2
         l2 = max_sentence_length - sen_len2 - 2
-        pad1 = tf.cast(tf.fill((l1,), pad_id), dtype=tf.uint16)
-        pad2 = tf.cast(tf.fill((l2,), pad_id), dtype=tf.uint16)
+        pad1 = tf.cast(tf.fill((l1,), pad_token_id), dtype=tf.uint16)
+        pad2 = tf.cast(tf.fill((l2,), pad_token_id), dtype=tf.uint16)
         tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
         tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
         return tok1, tok2, sen_len1, sen_len2 
@@ -85,10 +91,10 @@ def pipe_dataset(pad_ds, batch_size, swap_source_target):
     ds = tfds.as_numpy(ds)
     return ds
 
-def main_dataset(data_path, max_sentence_length, batch_size, swap_source_target):
+def main_dataset(data_path, token_info, max_sentence_length, batch_size, swap_source_target):
     token_ds = tf.data.Dataset.load(data_path)
     shuffle_size = len(token_ds)
-    pad_ds = pad_dataset(token_ds, shuffle_size, max_sentence_length)
+    pad_ds = pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length)
     return pipe_dataset(pad_ds, batch_size, swap_source_target)
 
 def token_histo(dataset):

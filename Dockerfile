@@ -41,6 +41,7 @@ RUN yes | google-cloud-sdk/install.sh
 
 # This probably needs to be done interactively
 # gcloud auth application-default login
+# /root/google-cloud-sdk/bin/gcloud auth application-default set-quota-project $PROJECT_ID
 
 # mount the ml-checkpoints bucket 
 # gcsfuse ml-checkpoints /home/henry/ckpt
