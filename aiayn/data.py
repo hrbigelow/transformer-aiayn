@@ -49,8 +49,8 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size, swap_source_
     def maxlen_fn(tok1, tok2):
         return tf.maximum(tf.shape(tok1)[0], tf.shape(tok2)[0]) <= max_sentence_length - 2
 
-    bos = tf.constant([tokenizer.bos_token_id])
-    eos = tf.constant([tokenizer.eos_token_id])
+    bos = tf.constant([tokenizer.bos_token_id], tf.uint16)
+    eos = tf.constant([tokenizer.eos_token_id], tf.uint16)
     pad_id = tokenizer.pad_token_id
 
     def pad_tokens_fn(tok1, tok2):
@@ -58,12 +58,10 @@ def pipe_dataset(dataset, ds_info, max_sentence_length, batch_size, swap_source_
         sen_len2 = tf.shape(tok2)[0]
         l1 = max_sentence_length - sen_len1 - 2
         l2 = max_sentence_length - sen_len2 - 2
-        pad1 = tf.fill((l1,), pad_id)
-        pad2 = tf.fill((l2,), pad_id)
+        pad1 = tf.cast(tf.fill((l1,), pad_id), dtype=tf.uint16)
+        pad2 = tf.cast(tf.fill((l2,), pad_id), dtype=tf.uint16)
         tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
         tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
-        tok1 = tf.cast(tok1, dtype=tf.uint16)
-        tok2 = tf.cast(tok2, dtype=tf.uint16)
         if swap_source_target:
             tok2, tok1 = tok1, tok2
             sen_len2, sen_len1 = sen_len1, sen_len2
