@@ -45,11 +45,7 @@ arch = Hyperparams(
     V = 64, # value (d_v in paper)
     M = 512, # model (d_model in paper)
     F = 2048, # feed-forward dimension (d_ff in paper)
-    num_layers = 6,
-    beam_size = 4, # From section 6.1
-    beam_search_alpha = 0.6, # From section 6.1 
-    beam_search_beta = 0.0, # Not mentioned in paper (FIXME)
-    beam_search_maxlen = 100 
+    num_layers = 6
 )
 
 tiny = Hyperparams(
@@ -58,11 +54,7 @@ tiny = Hyperparams(
     V = 8, # value (d_v in paper)
     M = 32, # model (d_model in paper)
     F = 128, # feed-forward dimension (d_ff in paper)
-    num_layers = 2,
-    beam_size = 4, # From section 6.1
-    beam_search_alpha = 0.6, # From section 6.1 
-    beam_search_beta = 0.0, # Not mentioned in paper
-    beam_search_maxlen = 100
+    num_layers = 2
 )
 
 reg = Hyperparams(
@@ -79,6 +71,7 @@ train = Hyperparams(
     adam_beta1 = 0.9,
     adam_beta2 = 0.98,
     adam_eps = 1e-9,
+    label_smooth_eps = 0.1,
     warmup_steps = 4000,
     random_seed = 982349820,
     ckpt_every = 5000,
@@ -98,6 +91,7 @@ logging = Hyperparams(
 data = Hyperparams(
     data_path = None,
     token_info_file = None,
+    shuffle_size = None, # if None, use length of dataset
     swap_source_target = True,
     bin_size = 1000,
     dataset_size = None,
@@ -110,7 +104,11 @@ sample = Hyperparams(
     random_seed = 42,
     ckpt_dir = None,
     resume_ckpt = None,
-    num_sample = 10
+    num_sample = 10,
+    beam_size = 4, # From section 6.1
+    beam_search_alpha = 0.6, # From section 6.1 
+    beam_search_beta = 0.0, # Not mentioned in paper (FIXME)
+    beam_search_maxlen = 100 
     )
 
 

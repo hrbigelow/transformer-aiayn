@@ -51,7 +51,7 @@ class MultiHeadAttention(hk.Module):
         if self.masked:
             # query (d) can only attend to keys (c) at or before it 
             # mask[i,j] = -100 if i > j else 0
-            mask = jnp.tri(alogit.shape[3], k=-1) * -100.0
+            mask = jnp.tri(alogit.shape[3], k=-1) * -10000.0
             # print(f'MHA.__call__: {self.masked=}, {mask.shape=}, {alogit.shape=}')
             alogit += mask 
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
@@ -236,10 +236,7 @@ class Decoder(hk.Module):
         out = self.body(enc_out, out)
         scaled_emb_mat = self.embed_layer.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
-        if self.is_train:
-            out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
-        else:
-            out = jnp.einsum('bm,tm -> bt', out[:,-1,:], scaled_emb_mat)
+        out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
         # out = jax.nn.softmax(out, axis=2)
         return out
 
@@ -268,17 +265,18 @@ class Model(hk.Module):
 
         B = enc_input.shape[0]
         C = self.hps.max_sentence_length
+
         enc_output = self.encoder(enc_input)
-        for p in range(1,C):
+        def sample_fn(i, dec_input): 
             rng_key = hk.next_rng_key()
-            _, rng_key = jax.random.split(rng_key)
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
             dec_output = self.decoder(enc_output, dec_input) / temperature
-            sample = jax.random.categorical(rng_key, dec_output, axis=1)
-            sample = jnp.expand_dims(sample, axis=1) # shape = (B,1)
-            # print(f'{dec_input.shape=}, {dec_output.shape=}, {sample.shape=}')
-            dec_input = jnp.concatenate((dec_input, sample), axis=1)
-            # dec_input = dec_input.at[:,p].set(sample)
+            dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
+            sample = jax.random.categorical(rng_key, dec_step, axis=2)
+            # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')
+            dec_input = dec_input.at[:,i+1].set(sample[:,0])
+            return dec_input
+        dec_input = jax.lax.fori_loop(0, C-1, sample_fn, dec_input)
         return dec_input
 
     def total_params(self):
@@ -349,18 +347,15 @@ class Objective(hk.Module):
         labels = dec_input[:,1:]
         smoothed_labels = self.label_smooth(labels)
         dec_mask = jnp.not_equal(labels, self.pad_value).astype(jnp.float32)
-        # dec_mask = t.ne(labels, self.pad_value).to(t.float32)
-        # bct
+        # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
         dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
-        # print('foo: ', smoothed_labels.shape)
-        # print('bar: ', dec_pred_logits.shape)
         kldiv = funcs.fused_kldiv_softmax(smoothed_labels, dec_pred_logits, 2)
-        # kldiv = self.kldiv(smoothed_labels, dec_pred, 2)
+        # print(f'{smoothed_labels.shape=}, {dec_pred_logits.shape=}, {kldiv.shape=}, {dec_mask.shape=}')
         mean_kldiv = self.masked_mean(kldiv, dec_mask)
         label_entropy = self.masked_mean(funcs.entropy(smoothed_labels, axis=2), dec_mask)
         model_entropy = self.masked_mean(funcs.entropy(dec_pred, axis=2), dec_mask)
-        # print(f'{loss=}')
+        # TODO: don't return model_entropy, it is wrong
         return mean_kldiv, label_entropy, model_entropy
 
 def _wrap_haiku(mod_cls, *args):
@@ -370,14 +365,10 @@ def _wrap_haiku(mod_cls, *args):
     return wrapped_fn
 
 def make_model(hps, is_train, token_info):
-    return hk.transform(_wrap_haiku(Model, hps, is_train, token_info['de'],
+    return hk.transform(_wrap_haiku(Model, hps, is_train, token_info['histo'],
         token_info['pad_token_id']))
 
-def make_objective(token_info):
-    return hk.transform(_wrap_haiku(Objective, token_info['de'],
-        token_info['pad_token_id']))
-
-def make_inference_model(hps, token_info):
-    return hk.transform(_wrap_haiku(InferenceModel, hps, token_info ['de'],
-        token_info['pad_token_id']))
+def make_objective(hps, token_info):
+    return hk.transform(_wrap_haiku(Objective, token_info['histo'],
+        token_info['pad_token_id'], hps.label_smooth_eps))
 

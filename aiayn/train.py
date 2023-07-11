@@ -323,7 +323,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         logger = None
 
     dataset = data.main_dataset(hps.data_path, token_info, hps.max_sentence_length,
-            hps.batch_dim0, hps.swap_source_target)
+            hps.batch_dim0, hps.swap_source_target, hps.shuffle_size)
     print(f'Prepared dataset {hps.data_path}')
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
@@ -333,7 +333,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
             )
 
     mod = model.make_model(hps, True, token_info)
-    objective = model.make_objective(token_info)
+    objective = model.make_objective(hps, token_info)
 
     train_loop(hps, mod, lr_fn, objective, tx, dataset, rng_key, logger)
 

@@ -14,7 +14,7 @@ def tokenize(query):
     eos_id = tokenizer.eos_token_id
     return jnp.array([bos_id] + tokenizer(query)['input_ids'] + [eos_id])
 
-def de_tokenize(tokens):
+def de_tokenize(tokens, filter_special=False):
     """
     tokens: np array of shape batch, length
     returns: python list of strings
@@ -24,7 +24,8 @@ def de_tokenize(tokens):
     special_toks = (tok.bos_token_id, tok.eos_token_id, tok.pad_token_id)
     for i in range(tokens.shape[0]):
         toks = tokens[i]
-        # toks = np.extract(~np.isin(toks, special_toks), toks) 
+        if filter_special:
+            toks = np.extract(~np.isin(toks, special_toks), toks) 
         toks = tok.convert_ids_to_tokens(toks)
         text = tok.convert_tokens_to_string(toks)
         ans.append(text)
@@ -48,7 +49,7 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     print('prefetching...')
     ds.prefetch(ds_info.splits[split].num_examples)
 
-    ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
+    # ds = ds.cache(f'{download_dir}/{dataset_name}-cache')
     # iterate once to populate cache
     return ds, ds_info
 
@@ -91,40 +92,43 @@ def pipe_dataset(pad_ds, batch_size, swap_source_target):
     ds = tfds.as_numpy(ds)
     return ds
 
-def main_dataset(data_path, token_info, max_sentence_length, batch_size, swap_source_target):
+def main_dataset(data_path, token_info, max_sentence_length, batch_size, 
+        swap_source_target, shuffle_size=None):
     token_ds = tf.data.Dataset.load(data_path)
-    shuffle_size = len(token_ds)
+    if shuffle_size is None:
+        shuffle_size = len(token_ds)
     pad_ds = pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length)
     return pipe_dataset(pad_ds, batch_size, swap_source_target)
 
-def token_histo(dataset):
+def token_histo(token_ds, column_num):
     """
-    Compute the token histograms for each column
+    Compute the token histograms for each co
+    token_ds:  the token dataset from data.token_dataset 
+    column_num: 0 or 1 to designate which of the pair of sentences desired
     """
     tokenizer = get_tokenizer()
     vocab_size = len(tokenizer)
-    histo1 = tf.zeros((vocab_size,), dtype=tf.int32)
-    histo2 = tf.zeros((vocab_size,), dtype=tf.int32)
+    histo = tf.zeros((vocab_size,), dtype=tf.int32)
+    def histo_fn(h, toks):
+        tok = tf.cast(toks[column_num], tf.int32)
+        h = tf.tensor_scatter_nd_add(h, tf.expand_dims(tok, -1), tf.ones_like(tok))
+        return h 
+    return token_ds.reduce(histo, histo_fn)
 
-    def histo_fn(histos, toks):
-        h1, h2 = histos
-        t1, t2 = toks
-        h1 = tf.tensor_scatter_nd_add(h1, tf.expand_dims(t1, -1), tf.ones_like(t1))
-        h2 = tf.tensor_scatter_nd_add(h2, tf.expand_dims(t2, -1), tf.ones_like(t2))
-        return h1, h2
-    return dataset.reduce((histo1, histo2), histo_fn)
-
-def save_token_info(dataset, data_dir):
+def save_token_info(token_ds_path, column_num, histo_path):
+    """
+    token_ds_path: path to saved token dataset
+    column_num: 0 or 1 to designate which sentence
+    histo_path: path to output file 
+    """
+    token_ds = tf.data.Dataset.load(token_ds_path)
+    cts = token_histo(token_ds, column_num)
+    cts = tf.cast(cts, tf.float32)
+    h = cts / tf.reduce_sum(cts)
     tz = get_tokenizer()
-    print('got tokenizer')
-    cts1, cts2 = token_histo(dataset)
-    print('created token histos')
-    cts1 = tf.cast(cts1, tf.float32)
-    cts2 = tf.cast(cts2, tf.float32)
-    h1 = cts1 / tf.reduce_sum(cts1)
-    h2 = cts2 / tf.reduce_sum(cts2)
-    np.savez(f'{data_dir}/token_info.npz', 
-            en=h1.numpy(), de=h2.numpy(),
+    np.savez(
+            histo_path, 
+            histo=h.numpy(), 
             pad_token_id=tz.pad_token_id,
             bos_token_id=tz.bos_token_id,
             eos_token_id=tz.eos_token_id)
@@ -149,7 +153,7 @@ def get_tokenizer():
     return tokenizer
 
 if __name__ == '__main__':
-    cmds = dict(prepare=prepare, save_token_info=save_token_info)
+    cmds = dict(save_token_info=save_token_info)
     fire.Fire(cmds)
 
 
