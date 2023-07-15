@@ -366,13 +366,13 @@ def _wrap_haiku(mod_cls, *args):
         return mod(*call_args)
     return wrapped_fn
 
-def make_model(hps, is_train, token_histo):
-    n_vocab = token_histo['histo'].shape[0]
-    mask_id = token_histo['mask']
+def make_model(hps, is_train, token_info):
+    n_vocab = token_info['histo'].shape[0]
+    mask_id = token_info['mask']
     return hk.transform(_wrap_haiku(Model, hps, is_train, n_vocab, mask_id))
 
-def make_objective(hps, token_histo):
-    histo = token_histo['histo']
-    mask_id = token_histo['mask']
+def make_objective(hps, token_info):
+    histo = token_info['histo']
+    mask_id = token_info['mask']
     return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
 

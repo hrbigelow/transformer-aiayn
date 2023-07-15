@@ -58,8 +58,10 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
     """
 
     # this is done so that the model will learn that 'eos' only leads to 'eos'.
-    mask_id = token_info['mask'].item()
     eos_id = token_info['eos'].item()
+    bos_id = token_info['bos'].item()
+    mask_id = token_info['mask'].item()
+    bos = tf.constant([bos_id], tf.uint16)
     eos = tf.constant([eos_id, eos_id], tf.uint16)
 
     def pad_tokens_fn(tok1, tok2):
@@ -72,7 +74,7 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
         mask1 = tf.cast(tf.fill((l1,), mask_id), dtype=tf.uint16)
         mask2 = tf.cast(tf.fill((l2,), mask_id), dtype=tf.uint16)
         tok1 = tf.concat(values=(tok1, mask1), axis=0)
-        tok2 = tf.concat(values=(tok2, eos, mask2), axis=0)
+        tok2 = tf.concat(values=(bos, tok2, eos, mask2), axis=0)
         return tok1, tok2, sen_len1, sen_len2 
 
     def maxlen_fn(tok1, tok2):
@@ -129,10 +131,11 @@ def save_token_info(token_ds_path, column_num, histo_path):
     cts = token_histo(token_ds, column_num)
     cts = tf.cast(cts, tf.float32)
     h = cts / tf.reduce_sum(cts)
-    eos_id = h.shape[0]
-    mask_id = eos_id + 1
+    bos_id = h.shape[0]
+    eos_id = h.shape[0] + 1 
+    mask_id = h.shape[0] + 2  
     h = np.concatenate((h, np.zeros(2)))
-    np.savez(histo_path, histo=h.numpy(), eos=eos_id, mask=mask_id)
+    np.savez(histo_path, histo=h.numpy(), bos=bos_id, eos=eos_id, mask=mask_id)
 
 def column_counts(dataset, column):
     def map_fn(examples, accu):
