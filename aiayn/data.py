@@ -54,7 +54,11 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     return ds, ds_info
 
 def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
-    bos = tf.constant([token_info['bos_token_id']], tf.uint16)
+    """
+    Appends padding to first sentence
+    Appends eos + padding to second sentence
+    """
+    # bos = tf.constant([token_info['bos_token_id']], tf.uint16)
     eos = tf.constant([token_info['eos_token_id']], tf.uint16)
     pad_token_id = token_info['pad_token_id']
 
@@ -63,12 +67,12 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
         tok2 = tf.cast(tok2, tf.uint16)
         sen_len1 = tf.shape(tok1)[0]
         sen_len2 = tf.shape(tok2)[0]
-        l1 = max_sentence_length - sen_len1 - 2
+        l1 = max_sentence_length - sen_len1
         l2 = max_sentence_length - sen_len2 - 2
         pad1 = tf.cast(tf.fill((l1,), pad_token_id), dtype=tf.uint16)
         pad2 = tf.cast(tf.fill((l2,), pad_token_id), dtype=tf.uint16)
-        tok1 = tf.concat(values=(bos, tok1, eos, pad1), axis=0)
-        tok2 = tf.concat(values=(bos, tok2, eos, pad2), axis=0)
+        tok1 = tf.concat(values=(tok1, pad1), axis=0)
+        tok2 = tf.concat(values=(tok2, eos, pad2), axis=0)
         return tok1, tok2, sen_len1, sen_len2 
 
     def maxlen_fn(tok1, tok2):

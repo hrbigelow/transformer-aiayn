@@ -18,22 +18,22 @@ class MultiHeadAttention(hk.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, hps, masked=True):
+    def __init__(self, hps):
         super().__init__(name='att')
         self.H = hps.H
         self.M = hps.M
         self.K = hps.K
         self.V = hps.V
-        self.masked = masked
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
         self.scale_factor = np.sqrt(self.K)
 
-    def __call__(self, kvinput, qinput):
+    def __call__(self, kvinput, qinput, mask):
         """
-        kvinput: bcm 
-        qinput: bcm 
-        output: bcm 
+        kvinput: btm 
+        qinput: bqm 
+        mask: btq  (1 means mask out, 0 means leave alone)
+        output: bqm 
         """
         kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
@@ -44,19 +44,14 @@ class MultiHeadAttention(hk.Module):
         wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
         wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
-        kval = jnp.einsum('bcm,hmk->bhck', kvinput, wk)
-        qval = jnp.einsum('bcm,hmk->bhck', qinput, wq)
-        vval = jnp.einsum('bcm,hmv->bhcv', kvinput, wv)
-        alogit = jnp.einsum('bhck,bhdk->bhcd', kval, qval)
-        if self.masked:
-            # query (d) can only attend to keys (c) at or before it 
-            # mask[i,j] = -100 if i > j else 0
-            mask = jnp.tri(alogit.shape[3], k=-1) * -10000.0
-            # print(f'MHA.__call__: {self.masked=}, {mask.shape=}, {alogit.shape=}')
-            alogit += mask 
+        lmask = jnp.expand_dims(mask, 1) * -1e20
+        query = jnp.einsum('bqm,hmd->bhqd', qinput, wq)
+        key = jnp.einsum('btm,hmd->bhtd', kvinput, wk)
+        val = jnp.einsum('btm,hmd->bhtd', kvinput, wv)
+        alogit = jnp.einsum('bhtd,bhqd->bhtq', key, query) - lmask 
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
-        pre = jnp.einsum('bhcd,bhcv->bhdv', att, vval)
-        out = jnp.einsum('bhcv,hvm->bcm', pre, wo)
+        pre = jnp.einsum('bhtq,bhtd->bhqd', att, val)
+        out = jnp.einsum('bhqd,hdm->bqm', pre, wo)
         return out
 
 class PositionwiseFF(hk.Module):
@@ -145,17 +140,21 @@ class InputEmbedding(hk.Module):
 class EncoderLayer(hk.Module):
     def __init__(self, hps, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
-        self.att = MultiHeadAttention(hps, masked=False)
+        self.att = MultiHeadAttention(hps)
         self.norm1 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
         self.norm2 = DropoutAddAndNorm(hps, is_train)
 
-    def __call__(self, input):
+    def __call__(self, input, pad_mask):
         """
-        input: bcm
-        returns: bcm
+        input: btm
+        pad_mask: bt
+        returns: bqm
         """
-        att = self.att(input, input)
+        # broadcast pad_mask
+        Q = input.shape[1]
+        pad_mask = jnp.broadcast_to(jnp.expand_dims(pad_mask, 2), (*pad_mask.shape, Q))
+        att = self.att(input, input, pad_mask)
         norm = self.norm1(input, att)
         ff = self.ff(norm)
         out = self.norm2(norm, ff)
@@ -167,53 +166,43 @@ class Encoder(hk.Module):
         self.embed_layer = embed_layer 
         self.layers = [EncoderLayer(hps, is_train, i) for i in range(hps.num_layers)]
 
-    def __call__(self, input):
+    def __call__(self, input, pad_mask):
         """
-        input: bc
-        returns: bcm
+        input: bt
+        pad_mask: bt
+        returns: bqm
         """
         out = self.embed_layer(input)
         for mod in self.layers:
-            out = mod(out)
+            out = mod(out, pad_mask)
         return out
 
 class DecoderLayer(hk.Module):
     def __init__(self, hps, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
-        self.mask_att = MultiHeadAttention(hps, masked=True)
+        self.self_att = MultiHeadAttention(hps)
         self.norm1 = DropoutAddAndNorm(hps, is_train)
-        self.att2 = MultiHeadAttention(hps, masked=False)
+        self.cross_att = MultiHeadAttention(hps)
         self.norm2 = DropoutAddAndNorm(hps, is_train)
         self.ff = PositionwiseFF(hps)
         self.norm3 = DropoutAddAndNorm(hps, is_train)
 
-    def __call__(self, enc_out, input):
+    def __call__(self, enc_out, input, cross_mask):
         """
-        enc_out: bcm
-        queries: bcm
+        enc_out: btm
+        input: btm
+        cross_mask: btq
+        out: bqm
         """
-        att1 = self.mask_att(input, input)
+        B, T, _ = input.shape
+        ar_mask = 1.0 - jnp.tri(T, k=-1)
+        ar_mask = jnp.broadcast_to(jnp.expand_dims(ar_mask, 0), (B, *ar_mask.shape))
+        att1 = self.self_att(input, input, ar_mask)
         norm1 = self.norm1(input, att1)
-        att2 = self.att2(enc_out, norm1)
+        att2 = self.cross_att(enc_out, norm1, cross_mask)
         norm2 = self.norm2(norm1, att2)
         ff = self.ff(norm2)
         out = self.norm3(norm2, ff)
-        return out
-
-class TeeSequential(hk.Module):
-    """
-    Like nn.Sequential, but accepts an additional global input in each
-    module.  This is used for the Decoder, with the side-input being the Encoder
-    output representation.
-    """
-    def __init__(self, *mods):
-        super().__init__()
-        self.layers = mods
-
-    def __call__(self, side_input, input):
-        out = input
-        for mod in self.layers:
-            out = mod(side_input, out)
         return out
 
 class Decoder(hk.Module):
@@ -221,19 +210,24 @@ class Decoder(hk.Module):
         super().__init__(name='dec')
         self.is_train = is_train
         self.embed_layer = embed_layer 
-        self.body = TeeSequential(*(DecoderLayer(hps, is_train, i) for i in range(hps.num_layers)))
+        self.layers = [DecoderLayer(hps, is_train, i) for i in range(hps.num_layers)]
         # self.linear_final = hk.Linear(T)
         self.scale_factor = np.sqrt(hps.M) ** -1
 
-    def __call__(self, enc_out, dec_in):
+    def __call__(self, enc_out, dec_in, enc_pad_mask):
         """
-        enc_out: bcm 
-        dec_in: bc
-        returns: bct
+        enc_out: btm 
+        dec_in: bq
+        enc_pad_mask: bt
+        returns: bce
         """
+        B, Q = dec_in.shape
+        T = enc_out.shape[1]
+        cross_mask = jnp.broadcast_to(jnp.expand_dims(enc_pad_mask, 2), (B,T,Q))
         out = self.embed_layer(dec_in)
+        for mod in self.layers:
+            out = mod(enc_out, out, cross_mask)
         # print(f'Decoder.__call__: {enc_out.shape=}, {out.shape=}')
-        out = self.body(enc_out, out)
         scaled_emb_mat = self.embed_layer.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
         out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
@@ -258,19 +252,20 @@ class Model(hk.Module):
         dec_input: bc
         returns: bct
         """
+        enc_pad_mask = jnp.not_equal(enc_input, self.pad_token_id).astype(jnp.float32)
         if self.is_train:
-            enc_output = self.encoder(enc_input)
-            dec_output = self.decoder(enc_output, dec_input)
+            enc_output = self.encoder(enc_input, enc_pad_mask)
+            dec_output = self.decoder(enc_output, dec_input, enc_pad_mask)
             return dec_output
 
         B = enc_input.shape[0]
         C = self.hps.max_sentence_length
 
-        enc_output = self.encoder(enc_input)
+        enc_output = self.encoder(enc_input, enc_pad_mask)
         def sample_fn(i, dec_input): 
             rng_key = hk.next_rng_key()
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
-            dec_output = self.decoder(enc_output, dec_input) / temperature
+            dec_output = self.decoder(enc_output, dec_input, enc_pad_mask) / temperature
             dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
             sample = jax.random.categorical(rng_key, dec_step, axis=2)
             # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')

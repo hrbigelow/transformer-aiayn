@@ -16,7 +16,6 @@ COPY requirements.txt .
 RUN python -m pip install -r requirements.txt
 
 # COPY ${HOME}/.bashrc . 
-CMD /bin/bash
 
 RUN GCSFUSE_REPO=gcsfuse-$(lsb_release -c -s) && \
       echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" \
@@ -37,6 +36,13 @@ ADD https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-
 
 RUN tar -xf google-cloud-cli.tar.gz
 RUN yes | google-cloud-sdk/install.sh
+
+# no idea why this works.  .rcfile is empty, yet including this instead of
+# CMD ["/bin/bash"] allows the running container access to environment variables
+# passed via 'docker run -e ENV'
+COPY .rcfile .
+CMD ["/bin/bash", "--rcfile", ".rcfile"]
+# CMD /bin/bash -c HISTSIZE=${HISTSIZE} 
 # RUN /root/google-cloud-sdk/bin/gcloud init
 
 # This probably needs to be done interactively
