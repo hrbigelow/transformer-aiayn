@@ -18,7 +18,6 @@ def main(query, ckpt_dir, resume_ckpt, token_info_file,
             'token_info_file': token_info_file, 
             **hps_overrides 
             }
-    print(opts)
     hps = hparams.setup_hparams(hps_keys, opts)
             
     print('Running with parameters:')
@@ -40,15 +39,20 @@ def main(query, ckpt_dir, resume_ckpt, token_info_file,
 
     print('Received query:')
     print(data.de_tokenize(np.expand_dims(query_toks, 0))[0])
-    bos_id = token_info['bos']
+    bos_id = token_info['bos'].item()
+    special_toks = { 
+            token_info['eos'].item(): '<EOS>',
+            token_info['bos'].item(): '<BOS>'
+            }
+
 
     query_toks = jnp.repeat(jnp.expand_dims(query_toks, axis=0), hps.num_sample, axis=0)
     dec_input = jnp.full((hps.num_sample, hps.max_sentence_length), bos_id, dtype=np.int32)
     # print(f'{query_toks.shape=}, {dec_input.shape=}')
     pred_toks = mod.apply(params, rng_key, query_toks, dec_input, hps.temperature) 
-    pred_sentences = data.de_tokenize(pred_toks)
+    print(pred_toks)
+    pred_sentences = data.de_tokenize(pred_toks, special_toks)
     print('\n'.join(pred_sentences))
-    # print(pred_toks)
 
 
 if __name__ == '__main__':

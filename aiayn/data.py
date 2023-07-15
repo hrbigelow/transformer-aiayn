@@ -12,19 +12,22 @@ def tokenize(query):
     tokenizer = get_tokenizer()
     return jnp.array(tokenizer(query)['input_ids'])
 
-def de_tokenize(tokens, special_toks=None):
+def de_tokenize(tokens, special_toks={}):
     """
     tokens: np array of shape batch, length
+    special_toks: map of id => token_string
     returns: python list of strings
     """
-    tok = get_tokenizer()
+    tz = get_tokenizer()
+    idmap = { v: k for k, v in tz.vocab.items() }
+    idmap.update(special_toks)
     ans = []
     for i in range(tokens.shape[0]):
-        toks = tokens[i]
-        if special_toks is not None:
-            toks = np.extract(~np.isin(toks, special_toks), toks) 
-        toks = tok.convert_ids_to_tokens(toks)
-        text = tok.convert_tokens_to_string(toks)
+        tokids = tokens[i]
+        toks = [idmap[el.item()] for el in tokids]
+        # text = ''.join(idmap[el] for el in toks)
+        # toks = tok.convert_ids_to_tokens(toks)
+        text = tz.convert_tokens_to_string(toks)
         ans.append(text)
     return ans
 

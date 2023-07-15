@@ -44,14 +44,14 @@ class MultiHeadAttention(hk.Module):
         wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
         wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
-        lmask = jnp.expand_dims(mask, 1) * -1e20
-        query = jnp.einsum('bqm,hmd->bhqd', qinput, wq)
-        key = jnp.einsum('btm,hmd->bhtd', kvinput, wk)
-        val = jnp.einsum('btm,hmd->bhtd', kvinput, wv)
-        alogit = jnp.einsum('bhtd,bhqd->bhtq', key, query) - lmask 
+        lmask = jnp.expand_dims(mask, 1) * -1e10
+        query = jnp.einsum('hmd,bqm->bhqd', wq, qinput)
+        key = jnp.einsum('hmd,btm->bhtd', wk, kvinput)
+        val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
+        alogit = jnp.einsum('bhqd,bhtd->bhtq', query, key) - lmask 
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
         pre = jnp.einsum('bhtq,bhtd->bhqd', att, val)
-        out = jnp.einsum('bhqd,hdm->bqm', pre, wo)
+        out = jnp.einsum('hdm,bhqd->bqm', wo, pre)
         # jax.debug.print('qinput: {}\nkvinput: {}\n', qinput, kvinput)
         return out
 
@@ -68,7 +68,7 @@ class PositionwiseFF(hk.Module):
 
     def __call__(self, input):
         """
-        input: bcm
+        input: bqm
         """
         dtype = input.dtype
         w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
@@ -77,8 +77,8 @@ class PositionwiseFF(hk.Module):
         b1 = hk.get_parameter('b1', [self.F], dtype, jnp.zeros)
         w2 = hk.get_parameter('w2', [self.F,self.M], dtype, w2_init)
         b2 = hk.get_parameter('b2', [self.M], dtype, jnp.zeros)
-        s = jax.nn.relu(jnp.einsum('bcm,mf->bcf', input, w1) + b1)
-        out = jnp.einsum('bcf,fm->bcm', s, w2) + b2
+        s = jax.nn.relu(jnp.einsum('mf, bqm -> bqf', w1, input) + b1)
+        out = jnp.einsum('fm, bqf -> bqm', w2, s) + b2
         return out
 
 class DropoutAddAndNorm(hk.Module):
