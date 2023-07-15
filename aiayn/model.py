@@ -52,6 +52,7 @@ class MultiHeadAttention(hk.Module):
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
         pre = jnp.einsum('bhtq,bhtd->bhqd', att, val)
         out = jnp.einsum('bhqd,hdm->bqm', pre, wo)
+        # jax.debug.print('qinput: {}\nkvinput: {}\n', qinput, kvinput)
         return out
 
 class PositionwiseFF(hk.Module):
@@ -135,6 +136,7 @@ class InputEmbedding(hk.Module):
         pos_embed = self.positional_embedding(C)
         # scaled_emb_mat = self.embed_mat() * self.scale_factor 
         embed = jnp.take(self.embed_mat(), input, axis=0)
+        # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
@@ -173,6 +175,7 @@ class Encoder(hk.Module):
         returns: bqm
         """
         out = self.embed_layer(input)
+        # jax.debug.print('out: {}', out)
         for mod in self.layers:
             out = mod(out, pad_mask)
         return out
@@ -214,16 +217,16 @@ class Decoder(hk.Module):
         # self.linear_final = hk.Linear(T)
         self.scale_factor = np.sqrt(hps.M) ** -1
 
-    def __call__(self, enc_out, dec_in, enc_pad_mask):
+    def __call__(self, enc_out, dec_in, enc_mask):
         """
         enc_out: btm 
         dec_in: bq
-        enc_pad_mask: bt
+        enc_mask: bt
         returns: bce
         """
         B, Q = dec_in.shape
         T = enc_out.shape[1]
-        cross_mask = jnp.broadcast_to(jnp.expand_dims(enc_pad_mask, 2), (B,T,Q))
+        cross_mask = jnp.broadcast_to(jnp.expand_dims(enc_mask, 2), (B,T,Q))
         out = self.embed_layer(dec_in)
         for mod in self.layers:
             out = mod(enc_out, out, cross_mask)
@@ -235,12 +238,12 @@ class Decoder(hk.Module):
         return out
 
 class Model(hk.Module):
-    def __init__(self, hps, is_train, token_histo, pad_token_id):
+    def __init__(self, hps, is_train, n_vocab, mask_id):
         super().__init__(name='tx')
         self.is_train = is_train
         self.hps = hps
-        self.pad_token_id = pad_token_id 
-        self.T = token_histo.shape[0]
+        self.mask_token_id = mask_id
+        self.T = n_vocab 
         emb_mat = EmbedMatrix(self.T, hps.M) 
         self.embed_layer = InputEmbedding(emb_mat, hps) 
         self.encoder = Encoder(hps, is_train, self.embed_layer)
@@ -252,20 +255,25 @@ class Model(hk.Module):
         dec_input: bc
         returns: bct
         """
-        enc_pad_mask = jnp.not_equal(enc_input, self.pad_token_id).astype(jnp.float32)
+        enc_mask = jnp.not_equal(enc_input, self.mask_token_id).astype(jnp.float32)
         if self.is_train:
-            enc_output = self.encoder(enc_input, enc_pad_mask)
-            dec_output = self.decoder(enc_output, dec_input, enc_pad_mask)
+            enc_output = self.encoder(enc_input, enc_mask)
+            dec_output = self.decoder(enc_output, dec_input, enc_mask)
+            # jax.debug.print('enc_input: {}\nenc_output: {}\nenc_mask: {}\n',
+                    # enc_input, enc_output, enc_mask)
+            # jax.debug.print('dec_input: {}\ndec_output: {}\n',
+                    # dec_input, dec_output)
+
             return dec_output
 
         B = enc_input.shape[0]
         C = self.hps.max_sentence_length
 
-        enc_output = self.encoder(enc_input, enc_pad_mask)
+        enc_output = self.encoder(enc_input, enc_mask)
         def sample_fn(i, dec_input): 
             rng_key = hk.next_rng_key()
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
-            dec_output = self.decoder(enc_output, dec_input, enc_pad_mask) / temperature
+            dec_output = self.decoder(enc_output, dec_input, enc_mask) / temperature
             dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
             sample = jax.random.categorical(rng_key, dec_step, axis=2)
             # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')
@@ -305,18 +313,17 @@ def predict(self, enc_input):
     return seq
 
 class Objective(hk.Module):
-    def __init__(self, token_histo, pad_value, smoothing_eps=0.1):
+    def __init__(self, token_histo, mask_id, smoothing_eps=0.1):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
         super().__init__()
         # self.eps = smoothing_eps
-        self.pad_value = pad_value
+        self.mask_id = mask_id
         token_histo = token_histo.astype(jnp.float32)
         self.u = token_histo / jnp.sum(token_histo)
+        self.T = self.u.shape[0]
         self.eps = smoothing_eps
-        # self.register_buffer('u', token_histo, persistent=False)
-        self.T = token_histo.shape[0] 
 
     def label_smooth(self, labels):
         """
@@ -341,7 +348,7 @@ class Objective(hk.Module):
         # bc
         labels = dec_input[:,1:]
         smoothed_labels = self.label_smooth(labels)
-        dec_mask = jnp.not_equal(labels, self.pad_value).astype(jnp.float32)
+        dec_mask = jnp.not_equal(labels, self.mask_id).astype(jnp.float32)
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
         dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
@@ -359,11 +366,13 @@ def _wrap_haiku(mod_cls, *args):
         return mod(*call_args)
     return wrapped_fn
 
-def make_model(hps, is_train, token_info):
-    return hk.transform(_wrap_haiku(Model, hps, is_train, token_info['histo'],
-        token_info['pad_token_id']))
+def make_model(hps, is_train, token_histo):
+    n_vocab = token_histo['histo'].shape[0]
+    mask_id = token_histo['mask']
+    return hk.transform(_wrap_haiku(Model, hps, is_train, n_vocab, mask_id))
 
-def make_objective(hps, token_info):
-    return hk.transform(_wrap_haiku(Objective, token_info['histo'],
-        token_info['pad_token_id'], hps.label_smooth_eps))
+def make_objective(hps, token_histo):
+    histo = token_histo['histo']
+    mask_id = token_histo['mask']
+    return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
 

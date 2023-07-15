@@ -10,21 +10,18 @@ import tensorflow_datasets as tfds
 
 def tokenize(query):
     tokenizer = get_tokenizer()
-    bos_id = tokenizer.bos_token_id
-    eos_id = tokenizer.eos_token_id
-    return jnp.array([bos_id] + tokenizer(query)['input_ids'] + [eos_id])
+    return jnp.array(tokenizer(query)['input_ids'])
 
-def de_tokenize(tokens, filter_special=False):
+def de_tokenize(tokens, special_toks=None):
     """
     tokens: np array of shape batch, length
     returns: python list of strings
     """
     tok = get_tokenizer()
     ans = []
-    special_toks = (tok.bos_token_id, tok.eos_token_id, tok.pad_token_id)
     for i in range(tokens.shape[0]):
         toks = tokens[i]
-        if filter_special:
+        if special_toks is not None:
             toks = np.extract(~np.isin(toks, special_toks), toks) 
         toks = tok.convert_ids_to_tokens(toks)
         text = tok.convert_tokens_to_string(toks)
@@ -57,10 +54,13 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
     """
     Appends padding to first sentence
     Appends eos + padding to second sentence
+    token_info: loaded from save_token_info output 
     """
-    # bos = tf.constant([token_info['bos_token_id']], tf.uint16)
-    eos = tf.constant([token_info['eos_token_id']], tf.uint16)
-    pad_token_id = token_info['pad_token_id']
+
+    # this is done so that the model will learn that 'eos' only leads to 'eos'.
+    mask_id = token_info['mask'].item()
+    eos_id = token_info['eos'].item()
+    eos = tf.constant([eos_id, eos_id], tf.uint16)
 
     def pad_tokens_fn(tok1, tok2):
         tok1 = tf.cast(tok1, tf.uint16)
@@ -69,10 +69,10 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
         sen_len2 = tf.shape(tok2)[0]
         l1 = max_sentence_length - sen_len1
         l2 = max_sentence_length - sen_len2 - 2
-        pad1 = tf.cast(tf.fill((l1,), pad_token_id), dtype=tf.uint16)
-        pad2 = tf.cast(tf.fill((l2,), pad_token_id), dtype=tf.uint16)
-        tok1 = tf.concat(values=(tok1, pad1), axis=0)
-        tok2 = tf.concat(values=(tok2, eos, pad2), axis=0)
+        mask1 = tf.cast(tf.fill((l1,), mask_id), dtype=tf.uint16)
+        mask2 = tf.cast(tf.fill((l2,), mask_id), dtype=tf.uint16)
+        tok1 = tf.concat(values=(tok1, mask1), axis=0)
+        tok2 = tf.concat(values=(tok2, eos, mask2), axis=0)
         return tok1, tok2, sen_len1, sen_len2 
 
     def maxlen_fn(tok1, tok2):
@@ -129,13 +129,10 @@ def save_token_info(token_ds_path, column_num, histo_path):
     cts = token_histo(token_ds, column_num)
     cts = tf.cast(cts, tf.float32)
     h = cts / tf.reduce_sum(cts)
-    tz = get_tokenizer()
-    np.savez(
-            histo_path, 
-            histo=h.numpy(), 
-            pad_token_id=tz.pad_token_id,
-            bos_token_id=tz.bos_token_id,
-            eos_token_id=tz.eos_token_id)
+    eos_id = h.shape[0]
+    mask_id = eos_id + 1
+    h = np.concatenate((h, np.zeros(2)))
+    np.savez(histo_path, histo=h.numpy(), eos=eos_id, mask=mask_id)
 
 def column_counts(dataset, column):
     def map_fn(examples, accu):
@@ -144,17 +141,8 @@ def column_counts(dataset, column):
     dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=dict(accu=cts))
     return dict(cts)
 
-BOS = '<|BOS|>'
-EOS = '<|EOS|>'
-PAD = '<|PAD|>'
-
 def get_tokenizer():
-    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-    tokenizer.add_tokens([BOS, EOS, PAD])
-    tokenizer.pad_token = PAD
-    tokenizer.bos_token = BOS
-    tokenizer.eos_token = EOS
-    return tokenizer
+    return GPT2TokenizerFast.from_pretrained('gpt2')
 
 if __name__ == '__main__':
     cmds = dict(save_token_info=save_token_info)
