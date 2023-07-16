@@ -190,7 +190,7 @@ class DecoderLayer(hk.Module):
         self.ff = PositionwiseFF(hps)
         self.norm3 = DropoutAddAndNorm(hps, is_train)
 
-    def __call__(self, enc_out, input, cross_mask):
+    def __call__(self, enc_out, input, self_mask, cross_mask):
         """
         enc_out: btm
         input: btm
@@ -200,7 +200,8 @@ class DecoderLayer(hk.Module):
         B, T, _ = input.shape
         ar_mask = 1.0 - jnp.tri(T, k=-1)
         ar_mask = jnp.broadcast_to(jnp.expand_dims(ar_mask, 0), (B, *ar_mask.shape))
-        att1 = self.self_att(input, input, ar_mask)
+        self_mask = jnp.maximum(ar_mask, jnp.expand_dims(self_mask, 1)) 
+        att1 = self.self_att(input, input, self_mask)
         norm1 = self.norm1(input, att1)
         att2 = self.cross_att(enc_out, norm1, cross_mask)
         norm2 = self.norm2(norm1, att2)
@@ -217,19 +218,21 @@ class Decoder(hk.Module):
         # self.linear_final = hk.Linear(T)
         self.scale_factor = np.sqrt(hps.M) ** -1
 
-    def __call__(self, enc_out, dec_in, enc_mask):
+    def __call__(self, enc_out, dec_in, enc_mask, dec_mask):
         """
         enc_out: btm 
         dec_in: bq
         enc_mask: bt
+        dec_mask: bt (t for decoder sequence position)
         returns: bce
         """
         B, Q = dec_in.shape
         T = enc_out.shape[1]
+        self_mask = dec_mask
         cross_mask = jnp.broadcast_to(jnp.expand_dims(enc_mask, 2), (B,T,Q))
         out = self.embed_layer(dec_in)
         for mod in self.layers:
-            out = mod(enc_out, out, cross_mask)
+            out = mod(enc_out, out, self_mask, cross_mask)
         # print(f'Decoder.__call__: {enc_out.shape=}, {out.shape=}')
         scaled_emb_mat = self.embed_layer.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
@@ -248,6 +251,7 @@ class Model(hk.Module):
         self.embed_layer = InputEmbedding(emb_mat, hps) 
         self.encoder = Encoder(hps, is_train, self.embed_layer)
         self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
+        print('mask_id: ', mask_id)
 
     def __call__(self, enc_input, dec_input, temperature=1.0):
         """
@@ -255,10 +259,12 @@ class Model(hk.Module):
         dec_input: bc
         returns: bct
         """
-        enc_mask = jnp.not_equal(enc_input, self.mask_token_id).astype(jnp.float32)
+        enc_mask = jnp.equal(enc_input, self.mask_token_id).astype(jnp.float32)
+        dec_mask = jnp.equal(dec_input, self.mask_token_id).astype(jnp.float32)
+
         if self.is_train:
             enc_output = self.encoder(enc_input, enc_mask)
-            dec_output = self.decoder(enc_output, dec_input, enc_mask)
+            dec_output = self.decoder(enc_output, dec_input, enc_mask, dec_mask)
             # jax.debug.print('enc_input: {}\nenc_output: {}\nenc_mask: {}\n',
                     # enc_input, enc_output, enc_mask)
             # jax.debug.print('dec_input: {}\ndec_output: {}\n',
