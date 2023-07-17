@@ -18,23 +18,40 @@ class MultiHeadAttention(hk.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, hps):
+    def __init__(self, H, M, K, V):
         super().__init__(name='att')
-        self.H = hps.H
-        self.M = hps.M
-        self.K = hps.K
-        self.V = hps.V
+        self.H = H
+        self.M = M
+        self.K = K
+        self.V = V
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
         self.scale_factor = np.sqrt(self.K)
 
-    def __call__(self, kvinput, qinput, mask):
+    def __call__(self, kvinput, qinput, qmask, tmask, qtmask):
         """
         kvinput: btm 
         qinput: bqm 
-        mask: btq  (1 means mask out, 0 means leave alone)
+        qmask: bq  (ignore these query positions)
+        tmask: bt  (ignore these target positions)
+        qtmask: qt  (ignore combinations of query, target positions)
         output: bqm 
         """
+        B,Q,_ = qinput.shape
+        _,T,_ = kvinput.shape
+
+        if qmask is None:
+            qmask = jnp.zeros((B,Q))
+        if tmask is None:
+            tmask = jnp.zeros((B,T))
+        if qtmask is None:
+            qtmask = jnp.zeros((Q,T))
+
+        qmask = jnp.expand_dims(qmask, 2)   # b,q,1
+        tmask = jnp.expand_dims(tmask, 1)   # b,1,t
+        qtmask = jnp.expand_dims(qtmask, 0) # 1,q,t
+        logits_mask = jnp.maximum(qtmask, tmask)
+
         kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
         dtype = kvinput.dtype
@@ -44,14 +61,18 @@ class MultiHeadAttention(hk.Module):
         wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
         wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
-        lmask = jnp.expand_dims(mask, 1) * -1e10
+        # print(wq.shape, qinput.shape)
         query = jnp.einsum('hmd,bqm->bhqd', wq, qinput)
         key = jnp.einsum('hmd,btm->bhtd', wk, kvinput)
         val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
-        alogit = jnp.einsum('bhqd,bhtd->bhtq', query, key) - lmask 
-        att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=2)
-        pre = jnp.einsum('bhtq,bhtd->bhqd', att, val)
+        
+        # add head dimension
+        logit_adj = jnp.expand_dims(logits_mask, 1) * -1e6
+        alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
+        att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3)
+        pre = jnp.einsum('bhqt,bhtd->bhqd', att, val)
         out = jnp.einsum('hdm,bhqd->bqm', wo, pre)
+        out = out * (1.0 - qmask) # to protect gradients of masked positions
         # jax.debug.print('qinput: {}\nkvinput: {}\n', qinput, kvinput)
         return out
 
@@ -59,16 +80,18 @@ class PositionwiseFF(hk.Module):
     """
     Implements equation 2 (section 3.3)
     """
-    def __init__(self, hps):
+    def __init__(self, M, F):
         super().__init__(name='ff')
-        self.mscale = np.sqrt(hps.M) ** -1
-        self.fscale = np.sqrt(hps.F) ** -1
-        self.M = hps.M
-        self.F = hps.F
+        self.mscale = np.sqrt(M) ** -1
+        self.fscale = np.sqrt(F) ** -1
+        self.M = M
+        self.F = F
 
-    def __call__(self, input):
+    def __call__(self, input, qmask):
         """
         input: bqm
+        qmask: bq
+        returns: bqm
         """
         dtype = input.dtype
         w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
@@ -79,25 +102,28 @@ class PositionwiseFF(hk.Module):
         b2 = hk.get_parameter('b2', [self.M], dtype, jnp.zeros)
         s = jax.nn.relu(jnp.einsum('mf, bqm -> bqf', w1, input) + b1)
         out = jnp.einsum('fm, bqf -> bqm', w2, s) + b2
+        out = out * (1.0 - jnp.expand_dims(qmask, 2))
+        # jax.debug.print('ff_out: {}', out)
         return out
 
 class DropoutAddAndNorm(hk.Module):
-    def __init__(self, hps, is_train):
+    def __init__(self, dropout_rate, is_train):
         super().__init__(name='res')
         self.is_train = is_train
-        self.rate = hps.dropout_rate
-        self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True,
-                name='lnorm')
+        self.rate = dropout_rate
+        self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True, name='lnorm')
 
-    def __call__(self, residual, proximal):
+    def __call__(self, residual, proximal, qmask):
         """
         residual: bdm
         proximal: bdm
+        qmask: bd
         output: bdm
         """
         if self.is_train:
             proximal = hk.dropout(hk.next_rng_key(), self.rate, proximal)
-        return self.layer_norm(residual + proximal)
+        add = (residual + proximal) * (1.0 - jnp.expand_dims(qmask, 2))
+        return self.layer_norm(add)
 
 class EmbedMatrix(hk.Module):
     def __init__(self, T, M):
@@ -110,10 +136,10 @@ class EmbedMatrix(hk.Module):
         return hk.get_parameter('emb', [self.T, self.M], np.float32, init) 
 
 class InputEmbedding(hk.Module):
-    def __init__(self, embed_mat, hps):
+    def __init__(self, embed_mat, pos_factor):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
-        self.pos_factor = hps.pos_encoding_factor
+        self.pos_factor = pos_factor 
 
     def positional_embedding(self, num_positions):
         pos = jnp.arange(num_positions)
@@ -134,18 +160,19 @@ class InputEmbedding(hk.Module):
         """
         C = input.shape[1]
         pos_embed = self.positional_embedding(C)
-        # scaled_emb_mat = self.embed_mat() * self.scale_factor 
         embed = jnp.take(self.embed_mat(), input, axis=0)
+        # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
         # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
         return embed + pos_embed * self.pos_factor
 
 class EncoderLayer(hk.Module):
-    def __init__(self, hps, is_train, layer_num):
+    def __init__(self, dropout_rate, arch, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
-        self.att = MultiHeadAttention(hps)
-        self.norm1 = DropoutAddAndNorm(hps, is_train)
-        self.ff = PositionwiseFF(hps)
-        self.norm2 = DropoutAddAndNorm(hps, is_train)
+        H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
+        self.att = MultiHeadAttention(H, M, K, V)
+        self.norm1 = DropoutAddAndNorm(dropout_rate, is_train)
+        self.ff = PositionwiseFF(M, F)
+        self.norm2 = DropoutAddAndNorm(dropout_rate, is_train)
 
     def __call__(self, input, pad_mask):
         """
@@ -153,114 +180,105 @@ class EncoderLayer(hk.Module):
         pad_mask: bt
         returns: bqm
         """
-        # broadcast pad_mask
-        Q = input.shape[1]
-        pad_mask = jnp.broadcast_to(jnp.expand_dims(pad_mask, 2), (*pad_mask.shape, Q))
-        att = self.att(input, input, pad_mask)
-        norm = self.norm1(input, att)
-        ff = self.ff(norm)
-        out = self.norm2(norm, ff)
+        att = self.att(input, input, pad_mask, pad_mask, None)
+        # return self.ff(att, pad_mask)
+        norm = self.norm1(input, att, pad_mask)
+        ff = self.ff(norm, pad_mask)
+        # jax.debug.print('encoder_layer ff: {}', ff)
+        out = self.norm2(norm, ff, pad_mask)
         return out
 
 class Encoder(hk.Module):
-    def __init__(self, hps, is_train, embed_layer):
+    def __init__(self, dropout_rate, arch, is_train):
         super().__init__(name='enc')
-        self.embed_layer = embed_layer 
-        self.layers = [EncoderLayer(hps, is_train, i) for i in range(hps.num_layers)]
+        self.layers = [EncoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
 
     def __call__(self, input, pad_mask):
         """
-        input: bt
+        input: btm
         pad_mask: bt
         returns: bqm
         """
-        out = self.embed_layer(input)
+        out = input
         # jax.debug.print('out: {}', out)
         for mod in self.layers:
             out = mod(out, pad_mask)
+        # jax.debug.print('encoder_out: {}', out)
         return out
 
 class DecoderLayer(hk.Module):
-    def __init__(self, hps, is_train, layer_num):
+    def __init__(self, dropout_rate, arch, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
-        self.self_att = MultiHeadAttention(hps)
-        self.norm1 = DropoutAddAndNorm(hps, is_train)
-        self.cross_att = MultiHeadAttention(hps)
-        self.norm2 = DropoutAddAndNorm(hps, is_train)
-        self.ff = PositionwiseFF(hps)
-        self.norm3 = DropoutAddAndNorm(hps, is_train)
+        H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
+        self.self_att = MultiHeadAttention(H, M, K, V)
+        self.norm1 = DropoutAddAndNorm(dropout_rate, is_train)
+        self.cross_att = MultiHeadAttention(H, M, K, V)
+        self.norm2 = DropoutAddAndNorm(dropout_rate, is_train)
+        self.ff = PositionwiseFF(M, F)
+        self.norm3 = DropoutAddAndNorm(dropout_rate, is_train)
 
-    def __call__(self, enc_out, input, self_mask, cross_mask):
+    def __call__(self, enc_out, input, enc_mask, dec_mask):
         """
-        enc_out: btm
+        enc_out: btm (t from encoder)
         input: btm
-        cross_mask: btq
+        enc_mask: bt (masked tokens from encoder)
+        dec_mask: bq (masked tokens from decoder)
         out: bqm
         """
         B, T, _ = input.shape
-        ar_mask = 1.0 - jnp.tri(T, k=-1)
-        ar_mask = jnp.broadcast_to(jnp.expand_dims(ar_mask, 0), (B, *ar_mask.shape))
-        self_mask = jnp.maximum(ar_mask, jnp.expand_dims(self_mask, 1)) 
-        att1 = self.self_att(input, input, self_mask)
-        norm1 = self.norm1(input, att1)
-        att2 = self.cross_att(enc_out, norm1, cross_mask)
-        norm2 = self.norm2(norm1, att2)
-        ff = self.ff(norm2)
-        out = self.norm3(norm2, ff)
+        qt_mask = 1.0 - jnp.tri(T, k=0)
+        att1 = self.self_att(input, input, dec_mask, dec_mask, qt_mask)
+        norm1 = self.norm1(input, att1, dec_mask)
+        att2 = self.cross_att(enc_out, norm1, dec_mask, enc_mask, None)
+        norm2 = self.norm2(norm1, att2, dec_mask)
+        ff = self.ff(norm2, dec_mask)
+        out = self.norm3(norm2, ff, dec_mask)
         return out
 
 class Decoder(hk.Module):
-    def __init__(self, hps, is_train, T, embed_layer):
+    def __init__(self, dropout_rate, arch, T, is_train, embed_mat):
         super().__init__(name='dec')
         self.is_train = is_train
-        self.embed_layer = embed_layer 
-        self.layers = [DecoderLayer(hps, is_train, i) for i in range(hps.num_layers)]
+        self.embed_mat = embed_mat
+        self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
         # self.linear_final = hk.Linear(T)
-        self.scale_factor = np.sqrt(hps.M) ** -1
+        self.scale_factor = np.sqrt(arch['M']) ** -1
 
     def __call__(self, enc_out, dec_in, enc_mask, dec_mask):
         """
         enc_out: btm 
-        dec_in: bq
+        dec_in: bqm
         enc_mask: bt
         dec_mask: bt (t for decoder sequence position)
         returns: bce
         """
-        B, Q = dec_in.shape
         T = enc_out.shape[1]
-        self_mask = dec_mask
-        cross_mask = jnp.broadcast_to(jnp.expand_dims(enc_mask, 2), (B,T,Q))
-        out = self.embed_layer(dec_in)
+        out = dec_in
         for mod in self.layers:
-            out = mod(enc_out, out, self_mask, cross_mask)
+            out = mod(enc_out, out, enc_mask, dec_mask)
         # print(f'Decoder.__call__: {enc_out.shape=}, {out.shape=}')
-        scaled_emb_mat = self.embed_layer.embed_mat() * self.scale_factor
+        scaled_emb_mat = self.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
         out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
+        # jax.debug.print('decoder_out: {}', out)
         # out = jax.nn.softmax(out, axis=2)
         return out
 
-class Model(hk.Module):
-    def __init__(self, hps, is_train, n_vocab, mask_id):
+class EncoderDecoder(hk.Module):
+    def __init__(self, dropout_rate, arch, is_train, n_vocab):
         super().__init__(name='tx')
         self.is_train = is_train
-        self.hps = hps
-        self.mask_token_id = mask_id
         self.T = n_vocab 
-        emb_mat = EmbedMatrix(self.T, hps.M) 
-        self.embed_layer = InputEmbedding(emb_mat, hps) 
-        self.encoder = Encoder(hps, is_train, self.embed_layer)
-        self.decoder = Decoder(hps, is_train, self.T, self.embed_layer)
-        print('mask_id: ', mask_id)
+        self.embed_mat = EmbedMatrix(self.T, arch['M']) 
+        self.encoder = Encoder(dropout_rate, arch, is_train)
+        self.decoder = Decoder(dropout_rate, arch, is_train, self.T, self.embed_mat)
 
-    def __call__(self, enc_input, dec_input, temperature=1.0):
+    def __call__(self, enc_input, dec_input, enc_mask, dec_mask, temperature=1.0):
         """
-        enc_input: bc
-        dec_input: bc
+        enc_input: bcm
+        dec_input: bcm
         returns: bct
         """
-        enc_mask = jnp.equal(enc_input, self.mask_token_id).astype(jnp.float32)
-        dec_mask = jnp.equal(dec_input, self.mask_token_id).astype(jnp.float32)
 
         if self.is_train:
             enc_output = self.encoder(enc_input, enc_mask)
@@ -272,8 +290,7 @@ class Model(hk.Module):
 
             return dec_output
 
-        B = enc_input.shape[0]
-        C = self.hps.max_sentence_length
+        B, C, _ = enc_input.shape
 
         enc_output = self.encoder(enc_input, enc_mask)
         def sample_fn(i, dec_input): 
@@ -309,6 +326,25 @@ class Model(hk.Module):
         # I will assume the attention used should be over the last layer
         pass
 
+class Model(hk.Module):
+    def __init__(self, dropout_rate, pos_encoding_factor, arch, is_train, n_vocab, mask_id):
+        super().__init__('model')
+        self.mod = EncoderDecoder(dropout_rate, arch, is_train, n_vocab) 
+        self.embed_layer = InputEmbedding(self.mod.embed_mat, pos_encoding_factor) 
+        self.mask_id = mask_id
+
+    def __call__(self, enc_input, dec_input, temperature=1.0):
+        """
+        enc_input: bc
+        dec_input: bc
+        returns: bct
+        """
+        enc_mask = jnp.equal(enc_input, self.mask_id).astype(jnp.float32)
+        dec_mask = jnp.equal(dec_input, self.mask_id).astype(jnp.float32)
+        # jax.debug.print('enc_mask: {}\ndec_mask: {}\n', enc_mask, dec_mask)
+        enc_input = self.embed_layer(enc_input)
+        dec_input = self.embed_layer(dec_input)
+        return self.mod(enc_input, dec_input, enc_mask, dec_mask, temperature)
 
 def predict(self, enc_input):
     alpha = self.hps.beam_search_alpha
@@ -327,18 +363,9 @@ class Objective(hk.Module):
         # self.eps = smoothing_eps
         self.mask_id = mask_id
         token_histo = token_histo.astype(jnp.float32)
-        self.u = token_histo / jnp.sum(token_histo)
-        self.T = self.u.shape[0]
+        self.token_dist = token_histo / jnp.sum(token_histo)
+        self.T = self.token_dist.shape[0]
         self.eps = smoothing_eps
-
-    def label_smooth(self, labels):
-        """
-        labels: bc
-        returns: bct
-        """
-        one_hot = jax.nn.one_hot(labels, self.T, axis=-1)
-        smoothed = (1.0 - self.eps) * one_hot + self.eps * self.u
-        return smoothed
 
     @staticmethod
     def masked_mean(values, mask):
@@ -348,23 +375,27 @@ class Objective(hk.Module):
 
     def __call__(self, dec_input, dec_output_logits):
         """
-        dec_input: bc
-        dec_output: bct
+        dec_input: bq
+        dec_output_logits: bqv
         """
         # bc
-        labels = dec_input[:,1:]
-        smoothed_labels = self.label_smooth(labels)
-        dec_mask = jnp.not_equal(labels, self.mask_id).astype(jnp.float32)
+        targets = dec_input[:,1:]
+        targets_mask = jnp.equal(targets, self.mask_id).astype(jnp.float32)
+        # smoothing
+        dist = jnp.expand_dims(self.token_dist, (0,1))
+        targets = jax.nn.one_hot(targets, self.T, axis=2)
+        targets = (1.0 - self.eps) * targets + self.eps * dist 
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
         dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
-        kldiv = funcs.fused_kldiv_softmax(smoothed_labels, dec_pred_logits, 2)
-        # print(f'{smoothed_labels.shape=}, {dec_pred_logits.shape=}, {kldiv.shape=}, {dec_mask.shape=}')
-        mean_kldiv = self.masked_mean(kldiv, dec_mask)
-        label_entropy = self.masked_mean(funcs.entropy(smoothed_labels, axis=2), dec_mask)
-        model_entropy = self.masked_mean(funcs.entropy(dec_pred, axis=2), dec_mask)
+        kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
+        # print(f'{targets.shape=}, {dec_pred_logits.shape=}, {kldiv.shape=}, {targets_mask.shape=}')
+        mean_kldiv = self.masked_mean(kldiv, targets_mask)
+        label_entropy = self.masked_mean(funcs.entropy(targets, axis=2), targets_mask)
+        model_entropy = self.masked_mean(funcs.entropy(dec_pred, axis=2), targets_mask)
         # TODO: don't return model_entropy, it is wrong
         return mean_kldiv, label_entropy, model_entropy
+
 
 def _wrap_haiku(mod_cls, *args):
     def wrapped_fn(*call_args):
@@ -375,10 +406,33 @@ def _wrap_haiku(mod_cls, *args):
 def make_model(hps, is_train, token_info):
     n_vocab = token_info['histo'].shape[0]
     mask_id = token_info['mask']
-    return hk.transform(_wrap_haiku(Model, hps, is_train, n_vocab, mask_id))
+    arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
+    return hk.transform(_wrap_haiku(Model, hps.dropout_rate, hps.pos_encoding_factor,
+        arch, is_train, n_vocab, mask_id))
+
+def make_test_model(hps, is_train, token_info):
+    n_vocab = token_info['histo'].shape[0]
+    return hk.transform(_wrap_haiku(EncoderDecoder, hps, is_train, n_vocab))
+
+def make_test_objective(hps, token_info):
+    histo = token_info['histo']
+    mask_id = token_info['mask']
+    return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
 
 def make_objective(hps, token_info):
     histo = token_info['histo']
     mask_id = token_info['mask']
     return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
+
+def make_grads(cls, inst_args, out_shape, call_args):
+    """
+    Show the gradients passed down by cls when called with call_args.
+    out_shape:  shape of this module's output when called with call_args
+    """
+    rng_key = jax.random.PRNGKey(42)
+    layer = hk.transform(_wrap_haiku(cls, *inst_args))
+    params = layer.init(rng_key, *call_args)
+    primal, vjp_fn = jax.vjp(layer.apply, params, rng_key, *call_args)
+    out_grad = jax.random.normal(rng_key, out_shape)
+    return vjp_fn(out_grad)
 

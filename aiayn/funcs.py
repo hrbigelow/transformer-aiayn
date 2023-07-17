@@ -1,7 +1,7 @@
 import tensorflow as tf
 import jax.numpy as jnp
 import jax
-from jax import lax
+from jax import lax, custom_vjp
 import numpy as np
 
 import pdb
@@ -79,6 +79,25 @@ def gather_nd(value, index, axes):
     flat_result = tf.index_select(flat_value, 0, flat_index.flatten())
     result = flat_result.reshape(*out_shape, *slice_shape)
     return result
+
+@custom_vjp
+def take(matrix, indices, axis):
+    return jnp.take(matrix, indices.astype(np.int32), axis=axis)
+
+def take_fwd(matrix, indices, axis):
+    return take(matrix, indices, axis), (matrix, indices, axis)
+
+def take_bwd(res, g):
+    matrix, indices, axis = res
+    primals, take_vjp = jax.vjp(jnp.take, matrix, indices.astype(np.int32), axis)
+    mat_vjp, _, axis_vjp = take_vjp(g)
+    print('g.shape: ', g.shape)
+    jax.debug.print('take_grad: {}', g)
+    inds_vjp = jnp.all(jnp.equal(g, 0), axis=1).astype(np.int32)
+    return mat_vjp, inds_vjp, axis_vjp
+
+take.defvjp(take_fwd, take_bwd)
+
 
 def beam_search_score(alpha, beta, out_len, log_prob, dec_enc_attn):
     """

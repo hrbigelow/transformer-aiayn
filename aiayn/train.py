@@ -308,6 +308,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     except:
         raise RuntimeError(f'Could not load token info file {hps.token_info_file}')
 
+    # This needs to be placed before 
     rng_key = jax.random.PRNGKey(42)
 
     if hps.streamvis_run_name is not None:

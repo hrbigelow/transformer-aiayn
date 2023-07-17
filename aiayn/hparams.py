@@ -52,8 +52,8 @@ tiny = Hyperparams(
     H = 2, # heads
     K = 8, # key (d_k in paper)
     V = 8, # value (d_v in paper)
-    M = 32, # model (d_model in paper)
-    F = 128, # feed-forward dimension (d_ff in paper)
+    M = 13, # model (d_model in paper)
+    F = 19, # feed-forward dimension (d_ff in paper)
     num_layers = 2
 )
 
