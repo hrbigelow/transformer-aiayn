@@ -7,7 +7,7 @@ from aiayn import model, data, hparams
 import pdb
 
 
-def main(query, ckpt_dir, resume_ckpt, token_info_file, 
+def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file, 
         hps_keys: str = 'arch,reg,data,sample', 
         **hps_overrides
         ):
@@ -19,14 +19,12 @@ def main(query, ckpt_dir, resume_ckpt, token_info_file,
             **hps_overrides 
             }
     hps = hparams.setup_hparams(hps_keys, opts)
+    data.set_config(data_dir=hps.data_dir, tokenizer=tokenizer_name)
             
     print('Running with parameters:')
     print(hps)
 
-    try:
-        token_info = np.load(hps.token_info_file)
-    except:
-        raise RuntimeError(f'Could not load token info file {hps.token_info_file}')
+    token_info = data.load_token_info(hps.token_info_file)
 
     mod = model.make_model(hps, False, token_info) 
     mngr = orbax.CheckpointManager(
@@ -35,17 +33,13 @@ def main(query, ckpt_dir, resume_ckpt, token_info_file,
     print('Restored model from checkpoint')
 
     rng_key = jax.random.PRNGKey(hps.random_seed)
+    print('Got random key')
     query_toks = data.tokenize(query)
 
     print('Received query:')
     print(data.de_tokenize(np.expand_dims(query_toks, 0))[0])
     bos_id = token_info['bos'].item()
-    special_toks = { 
-            token_info['eos'].item(): '<EOS>',
-            token_info['bos'].item(): '<BOS>',
-            token_info['mask'].item(): '<MASK>'
-            }
-
+    special_toks = data.get_special_tokens(token_info)
 
     query_toks = jnp.repeat(jnp.expand_dims(query_toks, axis=0), hps.num_sample, axis=0)
     dec_input = jnp.full((hps.num_sample, hps.max_sentence_length), bos_id, dtype=np.int32)

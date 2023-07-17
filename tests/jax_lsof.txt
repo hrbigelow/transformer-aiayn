@@ -1,0 +1,14 @@
+python  1745 root    9u     unix 0x0000000000000000       0t0   234929 @cuda-uvmfd-4026532756-1745@ type=SEQPACKET
+python  1745 root  mem       REG               0,48    150200  9018796 /usr/lib/x86_64-linux-gnu/libcudnn.so.8.6.0
+python  1745 root  mem       REG               0,48    679264  9013886 /usr/local/cuda-11.8/targets/x86_64-linux/lib/libcudart.so.11.8.89
+python  1745 root  mem       REG               0,48   4307744  9112349 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_prng.so
+python  1745 root  mem       REG               0,48   4320008  9112348 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_linalg.so
+python  1745 root  mem       REG               0,48   4323248  9112347 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_blas.so
+python  1745 root  mem       REG               0,48   4326520  9112350 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_rnn.so
+python  1745 root  mem       REG               0,48   4405784  9112352 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_sparse.so
+python  1745 root  mem       REG               0,48   4466360  9112351 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_solver.so
+python  1745 root  mem       REG               0,48   4678184  9112353 /usr/local/lib/python3.8/dist-packages/jaxlib/cuda/_triton.so
+python  1745 root  mem       REG               0,48  94729912  9022522 /usr/local/cuda-11.8/targets/x86_64-linux/lib/libcublas.so.11.11.3.6
+python  1745 root  mem       REG               0,48  98517432  9018806 /usr/lib/x86_64-linux-gnu/libcudnn_ops_infer.so.8.6.0
+python  1745 root  mem       REG               0,48 574565016  9022524 /usr/local/cuda-11.8/targets/x86_64-linux/lib/libcublasLt.so.11.11.3.6
+python  1745 root  mem       REG              253,0  29867944 27525727 /usr/lib/x86_64-linux-gnu/libcuda.so.525.105.17

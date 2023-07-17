@@ -170,7 +170,8 @@ def log_metrics(logger, steps, grad_norms, param_norms, update_norms):
 def restore_params(ckpt_path):
     zfile = np.load(ckpt_path)
 
-def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logger):
+def train_loop(hps, special_toks, model, learn_rate_fn, objective, tx, dataset,
+        rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
@@ -246,6 +247,8 @@ def train_loop(hps, model, learn_rate_fn, objective, tx, dataset, rng_key, logge
 
         if step > 0 and report_idx % hps.report_every == 0:
             print(f'step {step}, {num_toks=}, model_entropy={entropy[1]:3.2f} loss={loss:3.2f}')
+            # print('\n'.join(data.de_tokenize(enc_input[0], special_toks)))
+            # print('\n'.join(data.de_tokenize(dec_input[0], special_toks)))
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, losses, entropies) 
@@ -266,7 +269,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         A second line of documentation
         A third line
     :param hps_overrides: Can be any of the following:
-           data_path
+           data_dir
               path to dataset prepared using python -m aiayn.data script
     :param streamvis_run_name: name for scoping the run for visualization
     :param pubsub_project: the GCP project with Cloud Pub/Sub API enabled
@@ -303,10 +306,10 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print('Now running with parameters:')
     print(hps)
 
-    try:
-        token_info = np.load(hps.token_info_file)
-    except:
-        raise RuntimeError(f'Could not load token info file {hps.token_info_file}')
+    data.set_config(data_dir=hps.data_dir)
+    token_info = data.load_token_info(hps.token_info_file)
+
+    special_toks = data.get_special_tokens(token_info)
 
     # This needs to be placed before 
     rng_key = jax.random.PRNGKey(42)
@@ -323,9 +326,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     else:
         logger = None
 
-    dataset = data.main_dataset(hps.data_path, token_info, hps.max_sentence_length,
+    dataset = data.main_dataset(hps.data_name, token_info, hps.max_sentence_length,
             hps.batch_dim0, hps.swap_source_target, hps.shuffle_size)
-    print(f'Prepared dataset {hps.data_path}')
+    print(f'Prepared dataset {hps.data_name}')
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
     tx = optax.chain(
@@ -336,7 +339,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     mod = model.make_model(hps, True, token_info)
     objective = model.make_objective(hps, token_info)
 
-    train_loop(hps, mod, lr_fn, objective, tx, dataset, rng_key, logger)
+    train_loop(hps, special_toks, mod, lr_fn, objective, tx, dataset, rng_key, logger)
 
 if __name__ == '__main__':
     fire.Fire(main)

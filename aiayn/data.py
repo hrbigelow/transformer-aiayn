@@ -8,9 +8,23 @@ from transformers import GPT2TokenizerFast
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
+
+CONFIG = { }
+
+def set_config(**kwargs):
+    global CONFIG 
+    CONFIG.update(kwargs)
+
 def tokenize(query):
     tokenizer = get_tokenizer()
     return jnp.array(tokenizer(query)['input_ids'])
+
+def get_special_tokens(token_info):
+    return { 
+            token_info['eos'].item(): '<EOS>',
+            token_info['bos'].item(): '<BOS>',
+            token_info['mask'].item(): '<MASK>'
+            }
 
 def de_tokenize(tokens, special_toks={}):
     """
@@ -102,9 +116,13 @@ def pipe_dataset(pad_ds, batch_size):
     ds = tfds.as_numpy(ds)
     return ds
 
-def main_dataset(data_path, token_info, max_sentence_length, batch_size, 
+def main_dataset(data_name, token_info, max_sentence_length, batch_size, 
         swap_source_target, shuffle_size=None):
-    token_ds = tf.data.Dataset.load(data_path)
+    data_dir = CONFIG.get('data_dir', None)
+    if data_dir is None:
+        raise RuntimeError('Please call data.set_config first')
+    token_ds = tf.data.Dataset.load(os.path.join(data_dir, data_name))
+
     if shuffle_size is None:
         shuffle_size = len(token_ds)
     pad_ds = pad_dataset(token_ds, token_info, shuffle_size, swap_source_target, 
@@ -142,6 +160,16 @@ def save_token_info(token_ds_path, column_num, histo_path):
     h = np.concatenate((h, np.zeros(2)))
     np.savez(histo_path, histo=h.numpy(), bos=bos_id, eos=eos_id, mask=mask_id)
 
+def load_token_info(token_file_name):
+    data_dir = CONFIG.get('data_dir', None)
+    if data_dir is None: 
+        raise RuntimeError(f'Please call data.set_data_dir first')
+    path = os.path.join(data_dir, token_file_name)
+    try:
+        return np.load(path)
+    except:
+        raise RuntimeError(f'Could not load token info file {path}')
+
 def column_counts(dataset, column):
     def map_fn(examples, accu):
         accu += Counter(examples)
@@ -150,7 +178,9 @@ def column_counts(dataset, column):
     return dict(cts)
 
 def get_tokenizer():
-    return GPT2TokenizerFast.from_pretrained('gpt2')
+    path = os.path.join(CONFIG['data_dir'], CONFIG['tokenizer'], 'tokenizer.json')
+    from transformers import PreTrainedTokenizerFast as ptf
+    return ptf(tokenizer_file=path)
 
 if __name__ == '__main__':
     cmds = dict(save_token_info=save_token_info)

@@ -89,13 +89,12 @@ logging = Hyperparams(
     )
 
 data = Hyperparams(
-    data_path = None,
+    data_dir = None, # directory containing token_info_file, dataset, tokenizer
+    data_name = None,
     token_info_file = None,
+    tokenizer = None,
     shuffle_size = None, # if None, use length of dataset
     swap_source_target = True,
-    bin_size = 1000,
-    dataset_size = None,
-    pad_token_id = None,
     max_sentence_length = 200,
     )
 

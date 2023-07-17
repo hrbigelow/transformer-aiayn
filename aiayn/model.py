@@ -8,12 +8,6 @@ import jax
 import jax.numpy as jnp
 import haiku as hk
 
-def prepare(hkmod, instance_args, *call_args):
-    def _fn(*call_args):
-        mod = hkmod(*instance_args)
-        return mod(*call_args)
-    return hk.transform(_fn)
-
 class MultiHeadAttention(hk.Module):
     """
     Implements Multi-head attention from section 3.2.2
@@ -28,10 +22,10 @@ class MultiHeadAttention(hk.Module):
         self.vscale = np.sqrt(self.V) ** -1
         self.scale_factor = np.sqrt(self.K)
 
-    def __call__(self, kvinput, qinput, qmask, tmask, qtmask):
+    def __call__(self, qinput, kvinput, qmask, tmask, qtmask):
         """
-        kvinput: btm 
         qinput: bqm 
+        kvinput: btm 
         qmask: bq  (ignore these query positions)
         tmask: bt  (ignore these target positions)
         qtmask: qt  (ignore combinations of query, target positions)
@@ -50,7 +44,10 @@ class MultiHeadAttention(hk.Module):
         qmask = jnp.expand_dims(qmask, 2)   # b,q,1
         tmask = jnp.expand_dims(tmask, 1)   # b,1,t
         qtmask = jnp.expand_dims(qtmask, 0) # 1,q,t
-        logits_mask = jnp.maximum(qtmask, tmask)
+        logits_mask = jnp.maximum(tmask, qtmask)
+        # jax.debug.print('tmask[0]:\n{}', tmask[0])
+        # jax.debug.print('qtmask[0]:\n{}', qtmask[0])
+        # jax.debug.print('logits_mask[0]:\n{}', logits_mask[0])
 
         kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
@@ -115,7 +112,12 @@ class DropoutAddAndNorm(hk.Module):
         super().__init__(name='res')
         self.is_train = is_train
         self.rate = dropout_rate
-        self.layer_norm = hk.LayerNorm(1, create_scale=True, create_offset=True, name='lnorm')
+
+        # TODO: What is the meaning of the 'axis' argument here?
+        # If I choose 1, then the grad_tests for decoder_layer fails, causing
+        # leakage across autoregressive positions
+        self.layer_norm = hk.LayerNorm(axis=(0,2), create_scale=True, create_offset=True,
+                name='lnorm')
 
     def __call__(self, residual, proximal, qmask):
         """
@@ -131,6 +133,7 @@ class DropoutAddAndNorm(hk.Module):
         if self.is_train:
             proximal = hk.dropout(hk.next_rng_key(), self.rate, proximal)
         add = (residual + proximal) * (1.0 - jnp.expand_dims(qmask, 2))
+        # return add
         return self.layer_norm(add)
 
 class EmbedMatrix(hk.Module):
@@ -228,26 +231,34 @@ class DecoderLayer(hk.Module):
     def __call__(self, enc_out, input, enc_mask, dec_mask):
         """
         enc_out: btm (t from encoder)
-        input: btm
+        input: bqm
         enc_mask: bt (masked tokens from encoder)
         dec_mask: bq (masked tokens from decoder)
         out: bqm
         """
-        B, T, _ = input.shape
-        qt_mask = 1.0 - jnp.tri(T, k=0)
+        B, Cdec, _ = input.shape
+        if dec_mask is not None:
+            assert dec_mask.shape[1] == Cdec, f'{dec_mask.shape=} but {input.shape=}'
+
+        # here both q and t are indexing into the decoder only
+        # this is the auto-retressive mask
+        qt_mask = 1.0 - jnp.tri(Cdec, k=0)
         att1 = self.self_att(input, input, dec_mask, dec_mask, qt_mask)
         norm1 = self.norm1(input, att1, dec_mask)
-        att2 = self.cross_att(enc_out, norm1, dec_mask, enc_mask, None)
+        att2 = self.cross_att(norm1, enc_out, dec_mask, enc_mask, None)
         norm2 = self.norm2(norm1, att2, dec_mask)
         ff = self.ff(norm2, dec_mask)
         out = self.norm3(norm2, ff, dec_mask)
         return out
 
 class Decoder(hk.Module):
-    def __init__(self, dropout_rate, arch, T, is_train, embed_mat):
+    def __init__(self, dropout_rate, arch, T, is_train, embed_mat=None):
         super().__init__(name='dec')
         self.is_train = is_train
-        self.embed_mat = embed_mat
+        if embed_mat is None:
+            self.embed_mat = EmbedMatrix(T, arch['M']) 
+        else:
+            self.embed_mat = embed_mat
         self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
         # self.linear_final = hk.Linear(T)
         self.scale_factor = np.sqrt(arch['M']) ** -1
@@ -260,7 +271,13 @@ class Decoder(hk.Module):
         dec_mask: bt (t for decoder sequence position)
         returns: bce
         """
-        T = enc_out.shape[1]
+        if dec_mask is not None:
+            assert dec_in.shape[1] == dec_mask.shape[1], \
+                    f'Decoder shape error: {dec_in.shape=}, {dec_mask.shape=}'
+        if enc_mask is not None:
+            assert enc_out.shape[1] == enc_mask.shape[1], \
+                    f'Decoder shape error: {enc_out.shape=}, {enc_mask.shape=}'
+
         out = dec_in
         for mod in self.layers:
             out = mod(enc_out, out, enc_mask, dec_mask)
@@ -419,7 +436,7 @@ def make_objective(hps, token_info):
     mask_id = token_info['mask']
     return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
 
-def make_grads(cls, inst_args, out_shape, call_args):
+def make_grads(cls, inst_args, out_grad, call_args):
     """
     Show the gradients passed down by cls when called with call_args.
     out_shape:  shape of this module's output when called with call_args
@@ -428,6 +445,5 @@ def make_grads(cls, inst_args, out_shape, call_args):
     layer = hk.transform(_wrap_haiku(cls, *inst_args))
     params = layer.init(rng_key, *call_args)
     primal, vjp_fn = jax.vjp(layer.apply, params, rng_key, *call_args)
-    out_grad = jax.random.normal(rng_key, out_shape)
     return vjp_fn(out_grad)
 
