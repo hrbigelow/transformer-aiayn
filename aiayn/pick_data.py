@@ -10,8 +10,13 @@ def main(token_info_file, data_path, num_samples, swap_source_target):
     it = iter(dataset)
     encs, decs, _, _ = next(iter(dataset))
 
-    encs = data.de_tokenize(encs, True)
-    decs = data.de_tokenize(decs, True)
+    special_toks = { 
+            token_info['eos'].item(): '<EOS>',
+            token_info['bos'].item(): '<BOS>',
+            token_info['mask'].item(): '<MASK>'
+            }
+    encs = data.de_tokenize(encs, special_toks)
+    decs = data.de_tokenize(decs, special_toks)
     for enc, dec in zip(encs, decs):
         print(f'{enc}\n{dec}\n\n')
 

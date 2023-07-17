@@ -53,7 +53,7 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     # iterate once to populate cache
     return ds, ds_info
 
-def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
+def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length):
     """
     Appends padding to first sentence
     Appends eos + padding to second sentence
@@ -66,6 +66,9 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
     mask_id = token_info['mask'].item()
     bos = tf.constant([bos_id], tf.uint16)
     eos = tf.constant([eos_id, eos_id], tf.uint16)
+
+    def swap_fn(t1, t2):
+        return t2, t1
 
     def pad_tokens_fn(tok1, tok2):
         tok1 = tf.cast(tok1, tf.uint16)
@@ -83,19 +86,17 @@ def pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length):
     def maxlen_fn(tok1, tok2):
         return tf.maximum(tf.shape(tok1)[0], tf.shape(tok2)[0]) <= max_sentence_length - 2
 
-    ds = token_ds.filter(maxlen_fn)
+    ds = token_ds
+    if swap_pairs:
+        ds = ds.map(swap_fn)
+
+    ds = ds.filter(maxlen_fn)
     ds = ds.shuffle(shuffle_size, reshuffle_each_iteration=True)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
     return ds
 
-def pipe_dataset(pad_ds, batch_size, swap_source_target):
+def pipe_dataset(pad_ds, batch_size):
     ds = pad_ds.repeat()
-    def swap_fn(t1, t2, s1, s2):
-        return t2, t1, s2, s1
-
-    if swap_source_target:
-        ds = ds.map(swap_fn)
-
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = tfds.as_numpy(ds)
@@ -106,8 +107,9 @@ def main_dataset(data_path, token_info, max_sentence_length, batch_size,
     token_ds = tf.data.Dataset.load(data_path)
     if shuffle_size is None:
         shuffle_size = len(token_ds)
-    pad_ds = pad_dataset(token_ds, token_info, shuffle_size, max_sentence_length)
-    return pipe_dataset(pad_ds, batch_size, swap_source_target)
+    pad_ds = pad_dataset(token_ds, token_info, shuffle_size, swap_source_target, 
+            max_sentence_length)
+    return pipe_dataset(pad_ds, batch_size)
 
 def token_histo(token_ds, column_num):
     """
