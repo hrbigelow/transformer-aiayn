@@ -93,6 +93,10 @@ class PositionwiseFF(hk.Module):
         qmask: bq
         returns: bqm
         """
+        if qmask is None:
+            B,Q,_ = input.shape
+            qmask = jnp.zeros((B,Q))
+
         dtype = input.dtype
         w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         w2_init = hk.initializers.RandomNormal(self.fscale, 0.0)
@@ -120,6 +124,10 @@ class DropoutAddAndNorm(hk.Module):
         qmask: bd
         output: bdm
         """
+        if qmask is None:
+            B,D,_ = residual.shape
+            qmask = jnp.zeros((B,D))
+
         if self.is_train:
             proximal = hk.dropout(hk.next_rng_key(), self.rate, proximal)
         add = (residual + proximal) * (1.0 - jnp.expand_dims(qmask, 2))
@@ -264,25 +272,32 @@ class Decoder(hk.Module):
         # out = jax.nn.softmax(out, axis=2)
         return out
 
-class EncoderDecoder(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, n_vocab):
+class Model(hk.Module):
+    def __init__(self, dropout_rate, pos_enc_factor, arch, is_train, n_vocab, mask_id):
         super().__init__(name='tx')
         self.is_train = is_train
         self.T = n_vocab 
+        self.mask_id = mask_id
         self.embed_mat = EmbedMatrix(self.T, arch['M']) 
+        self.embed_layer = InputEmbedding(self.embed_mat, pos_enc_factor) 
         self.encoder = Encoder(dropout_rate, arch, is_train)
         self.decoder = Decoder(dropout_rate, arch, is_train, self.T, self.embed_mat)
 
-    def __call__(self, enc_input, dec_input, enc_mask, dec_mask, temperature=1.0):
+    def __call__(self, enc_input, dec_input, temperature=1.0):
         """
-        enc_input: bcm
-        dec_input: bcm
+        enc_input: bc
+        dec_input: bc
         returns: bct
         """
+        enc_mask = jnp.equal(enc_input, self.mask_id).astype(jnp.float32)
+        dec_mask = jnp.equal(dec_input, self.mask_id).astype(jnp.float32)
+
+        enc_embed = self.embed_layer(enc_input)
+        dec_embed = self.embed_layer(dec_input)
 
         if self.is_train:
-            enc_output = self.encoder(enc_input, enc_mask)
-            dec_output = self.decoder(enc_output, dec_input, enc_mask, dec_mask)
+            enc_output = self.encoder(enc_embed, enc_mask)
+            dec_output = self.decoder(enc_output, dec_embed, enc_mask, dec_mask)
             # jax.debug.print('enc_input: {}\nenc_output: {}\nenc_mask: {}\n',
                     # enc_input, enc_output, enc_mask)
             # jax.debug.print('dec_input: {}\ndec_output: {}\n',
@@ -290,13 +305,13 @@ class EncoderDecoder(hk.Module):
 
             return dec_output
 
-        B, C, _ = enc_input.shape
+        B, C = enc_input.shape
 
-        enc_output = self.encoder(enc_input, enc_mask)
+        enc_output = self.encoder(enc_embed, enc_mask)
         def sample_fn(i, dec_input): 
             rng_key = hk.next_rng_key()
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
-            dec_output = self.decoder(enc_output, dec_input, enc_mask) / temperature
+            dec_output = self.decoder(enc_output, dec_embed, enc_mask, None) / temperature
             dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
             sample = jax.random.categorical(rng_key, dec_step, axis=2)
             # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')
@@ -325,26 +340,6 @@ class EncoderDecoder(hk.Module):
         """
         # I will assume the attention used should be over the last layer
         pass
-
-class Model(hk.Module):
-    def __init__(self, dropout_rate, pos_encoding_factor, arch, is_train, n_vocab, mask_id):
-        super().__init__('model')
-        self.mod = EncoderDecoder(dropout_rate, arch, is_train, n_vocab) 
-        self.embed_layer = InputEmbedding(self.mod.embed_mat, pos_encoding_factor) 
-        self.mask_id = mask_id
-
-    def __call__(self, enc_input, dec_input, temperature=1.0):
-        """
-        enc_input: bc
-        dec_input: bc
-        returns: bct
-        """
-        enc_mask = jnp.equal(enc_input, self.mask_id).astype(jnp.float32)
-        dec_mask = jnp.equal(dec_input, self.mask_id).astype(jnp.float32)
-        # jax.debug.print('enc_mask: {}\ndec_mask: {}\n', enc_mask, dec_mask)
-        enc_input = self.embed_layer(enc_input)
-        dec_input = self.embed_layer(dec_input)
-        return self.mod(enc_input, dec_input, enc_mask, dec_mask, temperature)
 
 def predict(self, enc_input):
     alpha = self.hps.beam_search_alpha

@@ -42,7 +42,8 @@ def main(query, ckpt_dir, resume_ckpt, token_info_file,
     bos_id = token_info['bos'].item()
     special_toks = { 
             token_info['eos'].item(): '<EOS>',
-            token_info['bos'].item(): '<BOS>'
+            token_info['bos'].item(): '<BOS>',
+            token_info['mask'].item(): '<MASK>'
             }
 
 
