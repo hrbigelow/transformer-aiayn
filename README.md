@@ -3,23 +3,18 @@
 An original implementation of the paper [Attention is All You
 Need](https://arxiv.org/pdf/1706.03762.pdf) by Vaswani et al.
 
-![Loss (Conditional KL-Divergence in bits](assets/jul8-loss-35k.png)
+![Loss (Conditional KL-Divergence in bits](assets/jul18-loss-40k.png)
 
 Shown above is a training run for about half of an epoch.  batch size 50,000 (number
 of input plus output tokens) on the whole (4.5M samples) WMT-14 database.  720
 sentence-pairs in each batch, 62500 steps per epoch. Training is on TPU.
 
-![Entropy in bits](assets/jul8-cond-entropy-bits-35k.png)
-
-Conditional entropy H(token_t | context) is given for both model (red) and dataset
-(green)
-
-![Perplexity](assets/jul8-cond-perplexity-35k.png)
+![Perplexity](assets/jul18-ppl-40k.png)
 
 Perplexity here is computed as 2 ^ entropy, given for both model (red) and dataset
 (green).
 
-![Learning rate](assets/jul8-learn-rate-35k.png)
+![Learning rate](assets/jul18-lr-40k.png)
 
 The learning rate schedule is as given in the paper, section 5.3, page 7, equation 3.
 
