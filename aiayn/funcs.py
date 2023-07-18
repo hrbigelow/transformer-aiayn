@@ -23,18 +23,36 @@ def entropy(p, axis):
     h_nat = jnp.sum(safe_xy(p, - jnp.log(p)), axis)
     return h_nat * log2e
 
+"""
+  x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+  shifted = x - lax.stop_gradient(x_max)
+  shifted_logsumexp = jnp.log(
+      jnp.sum(jnp.exp(shifted), axis, where=where, keepdims=True))
+  result = shifted - shifted_logsumexp
+  if where is not None:
+    return jnp.where(where, result, -jnp.inf)
+  return result
+"""
+
+"""
+  z = jnp.max(p_logits, axis, where=where, initial=initial, keepdims=True)
+  scaled_p_logits = p_logits - lax.stop_gradient(z)
+  shifted_logsumexp = jnp.log(jnp.sum(jnp.exp(scaled_p_logits), axis))
+  log_normalizer = z + shifted_logsumexp
+  result = scaled_p_logits - shifted_logsumexp # original
+  result = p_logits - z - shifted_logsumexp    # rewrite
+  result = p_logits - log_normalizer           # rewrite
+  if where is not None:
+    return jnp.where(where, result, -jnp.inf)
+"""
+
 def fused_kldiv_softmax(q, p_logits, axis):
     # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
     # returns value in bits
+    p_logits = jax.nn.log_softmax(p_logits, axis)
     log2e = jnp.log2(jnp.exp(1.0))
-    z = jnp.max(p_logits, axis)
-    scaled_p_logits = p_logits - jnp.expand_dims(z, axis)
-    log_normalizer = z + jnp.log(jnp.sum(jnp.exp(scaled_p_logits), axis))
-    log_normalizer = jnp.expand_dims(log_normalizer, axis)
     log_q = jnp.log(q)
-    # q_entropy = - jnp.sum(jax.scipy.special.xlogy(q, q), axis)
-    # cross_entropy = - (jnp.sum(q * p_logits, axis) - log_normalizer)
-    kl_nats = jnp.sum(safe_xy(q, log_q - p_logits + log_normalizer), axis)
+    kl_nats = jnp.sum(safe_xy(q, log_q - p_logits), axis)
     kl = kl_nats * log2e
     # jax.debug.print("{}", kl) 
     return kl

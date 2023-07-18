@@ -13,6 +13,10 @@ def make_mask(B, C):
     # Create a generic mask with the last half masked
     return jnp.indices((B,C))[1] * 2 // C
 
+def make_tokens(B, C, T):
+    rng_key = jax.random.PRNGKey(42)
+    return jax.random.categorical(rng_key, jnp.zeros(T), shape=(B,C))
+
 def print_grad(grad):
     jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
     print(grad, '\n\n')
@@ -96,19 +100,22 @@ def decoder_layer():
     _, _, _, dec_in_grad, _, _ = grads
     print_grad(dec_in_grad)
 
-
 def model_grads():
     H, M, K, V, F, L = tuple(arch[l] for l in 'HMKVFL')
-    B, Q, T = 2, 13, 20
-    inst_args = dropout_rate, arch, True  
-    out_shape = (B, Q, T)
-    input = jax.random.normal(rng_key, (B,T,M))
-    mask = jnp.array([ [0] * 8 + [1] * 5, [0] * 6 + [1] * 7 ])
+    B, Ce, Cd, T = 2, 13, 20, 30
+    pos_enc_factor = 0.01
+    inst_args = dropout_rate, pos_enc_factor, arch, True, T, T-1
+    enc_input = make_tokens(B, Ce, T)
+    dec_input = make_tokens(B, Cd, T)
     call_args = enc_input, dec_input
-
-    # grads = model.make_grads(model.Model, inst_args, 
+    out_grad = jnp.zeros((B,Cd,T), dtype=jnp.float32)
+    out_grad = out_grad.at[:,5,:].set(1.0)
+    grads = model.make_grads(model.Model, inst_args, out_grad, call_args)
+    _, _, enc_grad, dec_grad = grads
+    print('enc_grad:\n', enc_grad)
+    print('dec_grad:\n', dec_grad)
 
 if __name__ == '__main__':
     fire.Fire(dict(ff=ff, attn=attn, encoder=encoder, decoder=decoder,
-        decoder_layer=decoder_layer))
+        decoder_layer=decoder_layer, model_grads=model_grads))
 

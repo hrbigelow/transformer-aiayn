@@ -322,19 +322,27 @@ class Model(hk.Module):
 
             return dec_output
 
-        B, C = enc_input.shape
+        B, Ce = enc_input.shape
+        _, Cd = dec_input.shape
+        jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
+        # jax.debug.print('enc_mask: {}\n', enc_mask)
 
         enc_output = self.encoder(enc_embed, enc_mask)
         def sample_fn(i, dec_input): 
+            dec_embed = self.embed_layer(dec_input)
             rng_key = hk.next_rng_key()
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
             dec_output = self.decoder(enc_output, dec_embed, enc_mask, None) / temperature
             dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
+            # print('foo: ', dec_step.shape)
+            # jax.debug.print('dec_step: {}', dec_step)
             sample = jax.random.categorical(rng_key, dec_step, axis=2)
+            # jax.debug.print('sample: {}', sample)
             # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')
             dec_input = dec_input.at[:,i+1].set(sample[:,0])
+            jax.debug.print('dec_input: {}', dec_input)
             return dec_input
-        dec_input = jax.lax.fori_loop(0, C-1, sample_fn, dec_input)
+        dec_input = jax.lax.fori_loop(0, Cd-1, sample_fn, dec_input)
         return dec_input
 
     def total_params(self):
@@ -379,12 +387,6 @@ class Objective(hk.Module):
         self.T = self.token_dist.shape[0]
         self.eps = smoothing_eps
 
-    @staticmethod
-    def masked_mean(values, mask):
-        # compute the mean of values at mask
-        masked_values = values * mask
-        return masked_values.sum() / mask.sum()
-
     def __call__(self, dec_input, dec_output_logits):
         """
         dec_input: bq
@@ -392,7 +394,7 @@ class Objective(hk.Module):
         """
         # bc
         targets = dec_input[:,1:]
-        targets_mask = jnp.equal(targets, self.mask_id).astype(jnp.float32)
+        targets_active = jnp.not_equal(targets, self.mask_id)
         # smoothing
         dist = jnp.expand_dims(self.token_dist, (0,1))
         targets = jax.nn.one_hot(targets, self.T, axis=2)
@@ -401,10 +403,9 @@ class Objective(hk.Module):
         dec_pred_logits = dec_output_logits[:,:-1,:]
         dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
         kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
-        # print(f'{targets.shape=}, {dec_pred_logits.shape=}, {kldiv.shape=}, {targets_mask.shape=}')
-        mean_kldiv = self.masked_mean(kldiv, targets_mask)
-        label_entropy = self.masked_mean(funcs.entropy(targets, axis=2), targets_mask)
-        model_entropy = self.masked_mean(funcs.entropy(dec_pred, axis=2), targets_mask)
+        mean_kldiv = kldiv.mean(where=targets_active)
+        label_entropy = funcs.entropy(targets, axis=2).mean(where=targets_active)
+        model_entropy = funcs.entropy(dec_pred, axis=2).mean(where=targets_active)
         # TODO: don't return model_entropy, it is wrong
         return mean_kldiv, label_entropy, model_entropy
 
