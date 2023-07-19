@@ -67,7 +67,8 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     # iterate once to populate cache
     return ds, ds_info
 
-def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length):
+def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length,
+        rng_key):
     """
     Appends padding to first sentence
     Appends eos + padding to second sentence
@@ -105,19 +106,20 @@ def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_len
         ds = ds.map(swap_fn)
 
     ds = ds.filter(maxlen_fn)
-    ds = ds.shuffle(shuffle_size, reshuffle_each_iteration=True)
+    ds = ds.shuffle(shuffle_size, rng_key, reshuffle_each_iteration=True)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
     return ds
 
-def pipe_dataset(pad_ds, batch_size):
+def pipe_dataset(pad_ds, batch_size, initial_step=0):
     ds = pad_ds.repeat()
     ds = ds.batch(batch_size)
+    ds = ds.skip(initial_step)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = tfds.as_numpy(ds)
     return ds
 
 def main_dataset(data_name, token_info, max_sentence_length, batch_size, 
-        swap_source_target, shuffle_size=None):
+        swap_source_target, rng_key, initial_step, shuffle_size=None):
     data_dir = CONFIG.get('data_dir', None)
     if data_dir is None:
         raise RuntimeError('Please call data.set_config first')
@@ -126,8 +128,8 @@ def main_dataset(data_name, token_info, max_sentence_length, batch_size,
     if shuffle_size is None:
         shuffle_size = len(token_ds)
     pad_ds = pad_dataset(token_ds, token_info, shuffle_size, swap_source_target, 
-            max_sentence_length)
-    return pipe_dataset(pad_ds, batch_size)
+            max_sentence_length, rng_key)
+    return pipe_dataset(pad_ds, batch_size, initial_step)
 
 def token_histo(token_ds, column_num):
     """

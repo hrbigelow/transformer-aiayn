@@ -64,6 +64,12 @@ class MultiHeadAttention(hk.Module):
         val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
         
         # add head dimension
+        # active = jnp.equal(logits_mask, 0.0)
+        # active = jnp.expand_dims(active, 1)
+        # alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key)
+        # att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3, 
+         #        where=active, initial=1.0)
+
         logit_adj = jnp.expand_dims(logits_mask, 1) * -1e6
         alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3)
@@ -340,7 +346,7 @@ class Model(hk.Module):
             # jax.debug.print('sample: {}', sample)
             # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')
             dec_input = dec_input.at[:,i+1].set(sample[:,0])
-            jax.debug.print('dec_input: {}', dec_input)
+            # jax.debug.print('dec_input: {}', dec_input)
             return dec_input
         dec_input = jax.lax.fori_loop(0, Cd-1, sample_fn, dec_input)
         return dec_input

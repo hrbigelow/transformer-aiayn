@@ -2,7 +2,9 @@ import psutil
 import jax
 import jax.numpy as jnp
 import flax
-import orbax.checkpoint as orbax
+import orbax.checkpoint
+from orbax.checkpoint import (CheckpointManager, CheckpointManagerOptions, 
+        PyTreeCheckpointer)
 import optax
 import haiku as hk
 import os
@@ -72,7 +74,8 @@ def accumulate_gradient(loss_and_grad_fn, params, enc_input, dec_input, accum_st
 
 
 def make_update_fn(model, objective, accum_steps, with_metrics, tx):
-    def update_fn(params, opt_state, enc_input, dec_input, rng_key):
+    # def update_fn(params, opt_state, enc_input, dec_input, rng_key):
+    def update_fn(state, enc_input, dec_input):
         """
         The function to pass into jax.pmap
         Returns updated state, rng
@@ -82,6 +85,7 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
         Note: This is only used for multi-host training (i.e. multiple computers
         each with multiple accelerators).
         """
+        params, opt_state, rng_key = state['params'], state['opt'], state['rng'] 
         _, new_rng_key = jax.random.split(rng_key)
         dropout_rng = jax.random.fold_in(rng_key, jax.lax.axis_index('batch'))
 
@@ -90,9 +94,6 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
             # print_range('dec_output', dec_output)
             loss, label_ent, model_ent = objective.apply(None, None, dec_input, dec_output)
             return loss, (label_ent, model_ent)
-
-        def tensor_norm(x):
-            return jnp.mean(jax.lax.pow(x, 2.0))
 
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
         l, e, g = accumulate_gradient(lg_fn, params, enc_input, dec_input, accum_steps)
@@ -104,13 +105,19 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
         updates, opt_state = tx.update(grad, opt_state)
         params = optax.apply_updates(params, updates)
 
+        def tensor_norm(*xs):
+            names = ('grad', 'param', 'update')
+            return {n:jnp.mean(jax.lax.pow(x, 2.0)) for n,x in zip(names, xs)}
+
         if with_metrics:
-            gnorm = jax.tree_map(tensor_norm, grad)
-            pnorm = jax.tree_map(tensor_norm, params)
-            unorm = jax.tree_map(tensor_norm, updates)
-            return params, opt_state, loss, entropy, new_rng_key, (gnorm, pnorm, unorm)
+            norms = jax.tree_map(tensor_norm, grad, params, updates)
+            state = dict(params=params, opt=opt_state, rng=new_rng_key)
+            metrics = dict(loss=loss, entropy=entropy, norms=norms)
+            return state, metrics
         else:
-            return params, opt_state, loss, entropy, new_rng_key, None
+            state = dict(params=params, opt=opt_state, rng=new_rng_key)
+            metrics = dict(loss=loss, entropy=entropy)
+            return state, metrics
             
     return update_fn
 
@@ -135,7 +142,7 @@ def log_steps(logger, steps, learn_rate, losses, entropies):
     make_line_plot(logger, 'cond_entropy_bits', steps, entropies, 'RdYlGn8')
     make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies), 'RdYlGn8')
 
-def log_metrics(logger, steps, grad_norms, param_norms, update_norms): 
+def log_metrics(logger, steps, norms): 
 
     def svlog(prefix, label, key, values):
         vals = report.get_layer_values(pfx, values, key)
@@ -155,70 +162,75 @@ def log_metrics(logger, steps, grad_norms, param_norms, update_norms):
             'dec_lnorm': ('scale', 'offset'),
             }
 
-    vals_map = {
-            'grad_norm': grad_norms,
-            'param_norm': param_norms,
-            'update_norm': update_norms
-            }
-
     for cat, pfx in cats.items():
-        for label, val in vals_map.items():
+        for label, val in norms.items():
             for key in param_map[cat]:
                 plot_name = f'{cat}_{label}_{key}'
                 svlog(pfx, plot_name, key, val)
 
-def restore_params(ckpt_path):
-    zfile = np.load(ckpt_path)
+def setup_train(hps, rng_key):
+    data.set_config(data_dir=hps.data_dir)
+    token_info = data.load_token_info(hps.token_info_file)
+    # special_toks = data.get_special_tokens(token_info)
 
-def train_loop(hps, special_toks, model, learn_rate_fn, objective, tx, dataset,
-        rng_key, logger):
-    num_replicas = jax.local_device_count()
-    batch_repl_size = hps.batch_dim0 // num_replicas
-    shape = [num_replicas, batch_repl_size, -1]
-    enc_input, dec_input, _, _ = next(iter(dataset))
-    print('Received first dataset element for model initialization')
-    enc_input = enc_input.reshape(shape)
-    dec_input = dec_input.reshape(shape)
-    
-    options = orbax.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, 
-            max_to_keep=10)
-    mngr = orbax.CheckpointManager(
-        hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()), options)
+    options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
+    checkpointer = PyTreeCheckpointer()
+    mngr = CheckpointManager(hps.ckpt_dir, checkpointer, options)
+
+    lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
+    tx = optax.chain(
+            optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
+                eps=hps.adam_eps)
+            )
+
+    mod = model.make_model(hps, True, token_info)
+    objective = model.make_objective(hps, token_info)
+    update_fn = make_update_fn(mod, objective, hps.accum_steps, hps.with_metrics, tx)
+
+    initial_step = int(hps.resume_ckpt or 0)
+
+    dataset = data.main_dataset(hps.data_name, token_info, hps.max_sentence_length,
+            hps.batch_dim0, hps.swap_source_target, rng_key[0], initial_step,
+            hps.shuffle_size)
 
     if hps.resume_ckpt:
         params = mngr.restore(hps.resume_ckpt)
         opt_state = tx.init(params)
         initial_step = hps.resume_ckpt
     else:
-        params = model.init(rng_key, enc_input[0], dec_input[0])
+        enc_input, dec_input, _, _ = next(iter(dataset))
+        # num_replicas = jax.local_device_count()
+        # batch_repl_size = hps.batch_dim0 // num_replicas
+
+        # do I need to adjust batch size here?  maybe not
+        params = mod.init(rng_key, enc_input, dec_input)
         opt_state = tx.init(params)
         initial_step = 0
-    print('Initialized model')
+
+    return update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn
+
+def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state,
+        initial_step, rng_key, logger):
+    num_replicas = jax.local_device_count()
+    batch_repl_size = hps.batch_dim0 // num_replicas
+    shape = [num_replicas, batch_repl_size, -1]
 
     if hps.with_metrics: 
-        grad_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
-        param_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
-        update_norms = jax.tree_map(lambda x: np.empty(hps.report_every), params)
+        names = ('grad', 'param', 'update')
+        fn = lambda x: { l: np.empty(hps.report_every) for l in names } 
+        norms = jax.tree_map(fn, params)
 
     steps = np.empty(hps.report_every)
     losses = np.empty(hps.report_every)
     entropies = np.empty((hps.report_every, 2)) # data, model
     learn_rate = np.empty(hps.report_every)
 
-    update_fn = make_update_fn(model, objective, hps.accum_steps, hps.with_metrics, tx)
-    # donate_argnums doesn't seem to make any difference in speed
-    # nor memory usage. 
-    update_fn_repl = jax.pmap(update_fn, axis_name='batch')
+    # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
+    update_fn_m = jax.pmap(update_fn, axis_name='batch')
     print('Compiled model')
-    params_repl = flax.jax_utils.replicate(params)
-    opt_state_repl = flax.jax_utils.replicate(opt_state)
-    rng_key_repl = flax.jax_utils.replicate(rng_key)
+    state = dict(params=params, opt=opt_state, rng=rng_key)
+    state_m = flax.jax_utils.replicate(state)
     print('Replicated params across devices')
-
-    def update_elem(tensor, idx, elem_value):
-        # performs tensor[idx] = elem_value but on immutable tensor
-        fun = lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, idx, 0)
-        return jax.tree_map(fun, tensor, elem_value)
 
     step = initial_step 
 
@@ -226,34 +238,28 @@ def train_loop(hps, special_toks, model, learn_rate_fn, objective, tx, dataset,
         num_toks = enc_lengths.sum() + dec_lengths.sum()
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
-        params_repl, opt_state_repl, loss_repl, entropy_repl, rng_key_repl, metrics = (
-            update_fn_repl(params_repl, opt_state_repl, enc_input, dec_input, rng_key_repl))
-
-        loss = flax.jax_utils.unreplicate(loss_repl)
-        entropy = flax.jax_utils.unreplicate(entropy_repl)
-        opt_state = flax.jax_utils.unreplicate(opt_state_repl)
+        state_m, metrics_m = update_fn_m(state_m, enc_input, dec_input) 
+        metrics = flax.jax_utils.unreplicate(metrics_m)
 
         report_idx = step % hps.report_every
         steps[report_idx] = step
-        losses[report_idx] = loss
-        entropies[report_idx] = entropy
+        losses[report_idx] = metrics['loss']
+        entropies[report_idx] = metrics['entropy']
         learn_rate[report_idx] = learn_rate_fn(step + 1)
 
-        if metrics:
-            gnorm, pnorm, unorm = tuple(flax.jax_utils.unreplicate(m) for m in metrics)
-            grad_norms = update_elem(grad_norms, report_idx, gnorm)
-            param_norms = update_elem(param_norms, report_idx, pnorm)
-            update_norms = update_elem(update_norms, report_idx, unorm)
+        if hps.with_metrics:
+            fn = lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, report_idx, 0)
+            norms = jax.tree_map(fn, norms, metrics['norms'])
 
         if step > 0 and report_idx % hps.report_every == 0:
+            loss = metrics['loss']
+            entropy = metrics['entropy']
             print(f'step {step}, {num_toks=}, model_entropy={entropy[1]:3.2f} loss={loss:3.2f}')
-            # print('\n'.join(data.de_tokenize(enc_input[0], special_toks)))
-            # print('\n'.join(data.de_tokenize(dec_input[0], special_toks)))
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, losses, entropies) 
             if hps.with_metrics:
-                log_metrics(logger, steps, grad_norms, param_norms, update_norms)
+                log_metrics(logger, steps, norms)
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
             params = flax.jax_utils.unreplicate(params_repl) 
@@ -306,11 +312,6 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print('Now running with parameters:')
     print(hps)
 
-    data.set_config(data_dir=hps.data_dir)
-    token_info = data.load_token_info(hps.token_info_file)
-
-    special_toks = data.get_special_tokens(token_info)
-
     # This needs to be placed before 
     rng_key = jax.random.PRNGKey(42)
 
@@ -326,20 +327,12 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     else:
         logger = None
 
-    dataset = data.main_dataset(hps.data_name, token_info, hps.max_sentence_length,
-            hps.batch_dim0, hps.swap_source_target, hps.shuffle_size)
     print(f'Prepared dataset {hps.data_name}')
 
-    lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
-    tx = optax.chain(
-            optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
-                eps=hps.adam_eps)
-            )
-
-    mod = model.make_model(hps, True, token_info)
-    objective = model.make_objective(hps, token_info)
-
-    train_loop(hps, special_toks, mod, lr_fn, objective, tx, dataset, rng_key, logger)
+    # move the save/restore logic here
+    update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
+    train_loop(hps, update_fn, lr_fn, dataset, params, opt_state, initial_step,
+            rng_key, logger)
 
 if __name__ == '__main__':
     fire.Fire(main)
