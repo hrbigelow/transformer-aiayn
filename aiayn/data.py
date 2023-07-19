@@ -113,7 +113,7 @@ def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_len
 def pipe_dataset(pad_ds, batch_size, initial_step=0):
     ds = pad_ds.repeat()
     ds = ds.batch(batch_size)
-    ds = ds.skip(initial_step)
+    # ds = ds.skip(initial_step)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = tfds.as_numpy(ds)
     return ds
