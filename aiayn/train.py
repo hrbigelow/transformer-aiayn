@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import flax
 import orbax.checkpoint
 from orbax.checkpoint import (CheckpointManager, CheckpointManagerOptions, 
-        PyTreeCheckpointer)
+        SaveArgs, PyTreeCheckpointer)
 import optax
 import haiku as hk
 import os
@@ -209,7 +209,7 @@ def setup_train(hps, rng_key):
 
     return update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn
 
-def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state,
+def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
         initial_step, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
@@ -262,8 +262,9 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state,
                 log_metrics(logger, steps, norms)
 
         if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
-            params = flax.jax_utils.unreplicate(params_repl) 
-            state_save_args = jax.tree_map(lambda _: orbax.SaveArgs(aggregate=True), params)
+            state = flax.jax_utils.unreplicate(state_m)
+            params = state['params']
+            state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), params)
             mngr.save(step, params, save_kwargs={'save_args': state_save_args})
             print(f'Saved checkpoint {step=}')
         step += 1
@@ -331,7 +332,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
 
     # move the save/restore logic here
     update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
-    train_loop(hps, update_fn, lr_fn, dataset, params, opt_state, initial_step,
+    train_loop(hps, update_fn, lr_fn, dataset, params, opt_state, mngr, initial_step,
             rng_key, logger)
 
 if __name__ == '__main__':
