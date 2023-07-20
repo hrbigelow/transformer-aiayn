@@ -290,13 +290,17 @@ def pipe_dataset(ds, seed, shuffle_size, batch_size, initial_step=0):
     return ds
 
 def main_dataset(tfrecord_glob, bos_id, eos_id, max_len1, max_len2, max_tries,
-        pack_threshold, batch_size, swap_source_target, rng_key, initial_step,
+        pack_threshold, batch_size, swap_source_target, seed, initial_step,
         shuffle_size=10000):
-    token_ds = load_tfrecord_dataset(tfrecord_glob) 
-    ds = add_special_tokens(token_ds, swap_source_target, bos_id, eos_id)
+    ds = load_tfrecord_dataset(tfrecord_glob) 
+    ds = ds.repeat()
+    ds = ds.shuffle(shuffle_size, seed, reshuffle_each_iteration=True)
+    ds = add_special_tokens(ds, swap_source_target, bos_id, eos_id)
     ds = pack_dataset(ds, max_len1, max_len2, max_tries=max_tries,
             threshold=pack_threshold, max_queue_size=100, pad_value=-1)
-    return pipe_dataset(ds, rng_key, shuffle_size, batch_size, initial_step)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size)
+    return ds
 
 def length_histo(token_ds):
     histo = tf.zeros((1000,2), dtype=tf.int32)
