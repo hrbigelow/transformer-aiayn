@@ -199,11 +199,14 @@ def setup_train(hps, rng_key):
         initial_step = hps.resume_ckpt
     else:
         enc_input, dec_input, _, _ = next(dataset.as_numpy_iterator())
-        # num_replicas = jax.local_device_count()
-        # batch_repl_size = hps.batch_dim0 // num_replicas
+        num_replicas = jax.local_device_count()
+        # model_batch_size = hps.batch_dim0 // num_replicas // hps.accum_steps
+        model_batch_size = 1
+        enc_dummy = enc_input[:model_batch_size]
+        dec_dummy = dec_input[:model_batch_size]
 
         # do I need to adjust batch size here?  maybe not
-        params = mod.init(rng_key, enc_input, dec_input)
+        params = mod.init(rng_key, enc_dummy, dec_dummy)
         opt_state = tx.init(params)
         initial_step = 0
 
