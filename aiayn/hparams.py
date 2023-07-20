@@ -91,6 +91,7 @@ logging = Hyperparams(
 data = Hyperparams(
     data_dir = None, # directory containing token_info_file, dataset, tokenizer
     data_name = None,
+    dataset_glob = None, # either filesystem or gs:// locator glob pattern
     token_info_file = None,
     tokenizer = None,
     shuffle_size = None, # if None, use length of dataset

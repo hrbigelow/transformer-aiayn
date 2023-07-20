@@ -67,6 +67,49 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     # iterate once to populate cache
     return ds, ds_info
 
+def write_records(ds, record_templ, num_shards):
+    options = tf.io.TFRecordOptions(
+            compression_type=None,
+            input_buffer_size=1000000,
+            output_buffer_size=1000000)
+
+    for shard in range(num_shards):
+        record_path = record_templ.format(shard) 
+        ds_shard = ds.shard(num_shards, shard)
+        with tf.io.TFRecordWriter(record_path, options) as file_writer:
+            for t1, t2 in iter(ds_shard):
+                s1 = tf.io.serialize_tensor(t1)
+                s2 = tf.io.serialize_tensor(t2)
+                b1 = tf.train.BytesList(value=[s1.numpy()])
+                b2 = tf.train.BytesList(value=[s2.numpy()])
+
+                record_bytes = tf.train.Example(
+                    features=tf.train.Features(feature={
+                        'x': tf.train.Feature(bytes_list=b1),
+                        'y': tf.train.Feature(bytes_list=b2)
+                        }
+                    )
+                ).SerializeToString()
+                file_writer.write(record_bytes)
+        print(f'Wrote {record_path} of {num_shards}')
+
+def parse_record(example):
+    # see https://colab.research.google.com/notebooks/tpu.ipynb#scrollTo=LtAVr-4CP1rp&line=26&uniqifier=1
+    schema = {
+            'x': tf.io.FixedLenFeature([], tf.string),
+            'y': tf.io.FixedLenFeature([], tf.string),
+            }
+    example = tf.io.parse_single_example(example, schema)
+    return {
+            'x': tf.io.parse_tensor(example['x'], out_type=tf.uint16),
+            'y': tf.io.parse_tensor(example['y'], out_type=tf.uint16)
+            }
+
+def load_tfrecord_dataset(filenames):
+    AUTO = tf.data.experimental.AUTOTUNE
+    records = tf.data.TFRecordDataset(filenames, num_parallel_reads=AUTO)
+    return records.map(parse_record, num_parallel_calls=AUTO)
+
 def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length,
         rng_key):
     """
@@ -82,30 +125,37 @@ def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_len
     bos = tf.constant([bos_id], tf.uint16)
     eos = tf.constant([eos_id, eos_id], tf.uint16)
 
-    def swap_fn(t1, t2):
-        return t2, t1
+    def expand_fn(rec):
+        return rec['x'], rec['y']
 
-    def pad_tokens_fn(tok1, tok2):
-        tok1 = tf.cast(tok1, tf.uint16)
-        tok2 = tf.cast(tok2, tf.uint16)
-        sen_len1 = tf.shape(tok1)[0]
-        sen_len2 = tf.shape(tok2)[0]
-        l1 = max_sentence_length - sen_len1
-        l2 = max_sentence_length - sen_len2 - 2
+    def swap_fn(x, y):
+        return y, x
+
+    def pad_tokens_fn(x, y):
+        # x = tf.sparse.to_dense(rec['x']) # This was needed when using 
+        # VarLenFeature during parse_record
+        # y = tf.sparse.to_dense(rec['y'])
+        x = tf.cast(x, tf.uint16)
+        y = tf.cast(y, tf.uint16)
+        xlen = tf.size(x)
+        ylen = tf.size(y)
+        l1 = max_sentence_length - xlen 
+        l2 = max_sentence_length - ylen - 2
         mask1 = tf.cast(tf.fill((l1,), mask_id), dtype=tf.uint16)
         mask2 = tf.cast(tf.fill((l2,), mask_id), dtype=tf.uint16)
-        tok1 = tf.concat(values=(tok1, mask1), axis=0)
-        tok2 = tf.concat(values=(bos, tok2, eos, mask2), axis=0)
-        return tok1, tok2, sen_len1, sen_len2 
+        x = tf.concat(values=(x, mask1), axis=0)
+        y = tf.concat(values=(bos, y, eos, mask2), axis=0)
+        return x, y, xlen, ylen 
 
-    def maxlen_fn(tok1, tok2):
-        return tf.maximum(tf.shape(tok1)[0], tf.shape(tok2)[0]) <= max_sentence_length - 2
+    def maxlen_fn(rec):
+        x, y = rec['x'], rec['y']
+        return tf.maximum(tf.size(x), tf.size(y)) <= max_sentence_length - 2
 
     ds = token_ds
+    ds = ds.filter(maxlen_fn)
+    ds = ds.map(expand_fn)
     if swap_pairs:
         ds = ds.map(swap_fn)
-
-    ds = ds.filter(maxlen_fn)
     ds = ds.shuffle(shuffle_size, rng_key, reshuffle_each_iteration=True)
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
     return ds
@@ -115,21 +165,31 @@ def pipe_dataset(pad_ds, batch_size, initial_step=0):
     ds = ds.batch(batch_size)
     # ds = ds.skip(initial_step)
     ds = ds.prefetch(tf.data.AUTOTUNE)
-    ds = tfds.as_numpy(ds)
     return ds
 
-def main_dataset(data_name, token_info, max_sentence_length, batch_size, 
+def main_dataset(tfrecord_glob, token_info, max_sentence_length, batch_size, 
         swap_source_target, rng_key, initial_step, shuffle_size=None):
     data_dir = CONFIG.get('data_dir', None)
     if data_dir is None:
         raise RuntimeError('Please call data.set_config first')
-    token_ds = tf.data.Dataset.load(os.path.join(data_dir, data_name))
+    tfrecord_names = tf.io.gfile.glob(tfrecord_glob)
+    token_ds = load_tfrecord_dataset(tfrecord_names) 
+    # token_ds = tf.data.Dataset.load(os.path.join(data_dir, data_name))
 
     if shuffle_size is None:
         shuffle_size = len(token_ds)
     pad_ds = pad_dataset(token_ds, token_info, shuffle_size, swap_source_target, 
             max_sentence_length, rng_key)
     return pipe_dataset(pad_ds, batch_size, initial_step)
+
+def length_histo(token_ds):
+    histo = tf.zeros((1000,2), dtype=tf.int32)
+    def histo_fn(h, toks):
+        l1 = tf.minimum(tf.size(toks[0]), 999)
+        l2 = tf.minimum(tf.size(toks[1]), 999)
+        inds = tf.reshape(tf.stack([l1, 0, l2, 1]), (2, 2))
+        return tf.tensor_scatter_nd_add(h, inds, tf.ones([2], dtype=tf.int32))
+    return token_ds.reduce(histo, histo_fn)
 
 def token_histo(token_ds, column_num):
     """
@@ -171,13 +231,6 @@ def load_token_info(token_file_name):
         return np.load(path)
     except:
         raise RuntimeError(f'Could not load token info file {path}')
-
-def column_counts(dataset, column):
-    def map_fn(examples, accu):
-        accu += Counter(examples)
-    cts = Counter()
-    dataset.map(map_fn, batched=True, input_columns=column, fn_kwargs=dict(accu=cts))
-    return dict(cts)
 
 def get_tokenizer():
     path = os.path.join(CONFIG['data_dir'], CONFIG['tokenizer'], 'tokenizer.json')

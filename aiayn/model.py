@@ -122,7 +122,8 @@ class DropoutAddAndNorm(hk.Module):
         # TODO: What is the meaning of the 'axis' argument here?
         # If I choose 1, then the grad_tests for decoder_layer fails, causing
         # leakage across autoregressive positions
-        self.layer_norm = hk.LayerNorm(axis=(0,2), create_scale=True, create_offset=True,
+        # Tim says: only apply across embedding axis, not batch axis
+        self.layer_norm = hk.LayerNorm(axis=(2,), create_scale=True, create_offset=True,
                 name='lnorm')
 
     def __call__(self, residual, proximal, qmask):

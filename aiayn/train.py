@@ -189,7 +189,7 @@ def setup_train(hps, rng_key):
 
     initial_step = int(hps.resume_ckpt or 0)
 
-    dataset = data.main_dataset(hps.data_name, token_info, hps.max_sentence_length,
+    dataset = data.main_dataset(hps.dataset_glob, token_info, hps.max_sentence_length,
             hps.batch_dim0, hps.swap_source_target, rng_key[0], initial_step,
             hps.shuffle_size)
 
@@ -198,7 +198,7 @@ def setup_train(hps, rng_key):
         opt_state = tx.init(params)
         initial_step = hps.resume_ckpt
     else:
-        enc_input, dec_input, _, _ = next(iter(dataset))
+        enc_input, dec_input, _, _ = next(dataset.as_numpy_iterator())
         # num_replicas = jax.local_device_count()
         # batch_repl_size = hps.batch_dim0 // num_replicas
 
@@ -234,7 +234,8 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
 
     step = initial_step 
 
-    for enc_input, dec_input, enc_lengths, dec_lengths in iter(dataset):
+    dit = dataset.as_numpy_iterator()
+    for enc_input, dec_input, enc_lengths, dec_lengths in dit:
         num_toks = enc_lengths.sum() + dec_lengths.sum()
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
