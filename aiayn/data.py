@@ -106,9 +106,14 @@ def parse_record(example):
             }
 
 def load_tfrecord_dataset(filenames):
-    AUTO = tf.data.experimental.AUTOTUNE
-    records = tf.data.TFRecordDataset(filenames, num_parallel_reads=AUTO)
-    return records.map(parse_record, num_parallel_calls=AUTO)
+    # optimization advice from https://codelabs.developers.google.com/codelabs/keras-flowers-data#4
+    AUTOTUNE = tf.data.AUTOTUNE
+    ignore_order = tf.data.Options()
+    ignore_order.experimental_deterministic = False
+
+    dataset = tf.data.TFRecordDataset(filenames, num_parallel_reads=AUTOTUNE)
+    dataset = dataset.with_options(ignore_order)
+    return dataset.map(parse_record, num_parallel_calls=AUTOTUNE)
 
 def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length,
         rng_key):
