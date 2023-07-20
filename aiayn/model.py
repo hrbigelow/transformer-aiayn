@@ -24,11 +24,12 @@ class MultiHeadAttention(hk.Module):
 
     def __call__(self, qinput, kvinput, qmask, tmask, qtmask):
         """
+        all masks have 0 or 1.  1 means ignore (mask out)
         qinput: bqm 
         kvinput: btm 
         qmask: bq  (ignore these query positions)
         tmask: bt  (ignore these target positions)
-        qtmask: qt  (ignore combinations of query, target positions)
+        qtmask: bqt  (ignore combinations of query, target positions)
         output: bqm 
         """
         B,Q,_ = qinput.shape
@@ -39,11 +40,10 @@ class MultiHeadAttention(hk.Module):
         if tmask is None:
             tmask = jnp.zeros((B,T))
         if qtmask is None:
-            qtmask = jnp.zeros((Q,T))
+            qtmask = jnp.zeros((B,Q,T))
 
         qmask = jnp.expand_dims(qmask, 2)   # b,q,1
         tmask = jnp.expand_dims(tmask, 1)   # b,1,t
-        qtmask = jnp.expand_dims(qtmask, 0) # 1,q,t
         logits_mask = jnp.maximum(tmask, qtmask)
         # jax.debug.print('tmask[0]:\n{}', tmask[0])
         # jax.debug.print('qtmask[0]:\n{}', qtmask[0])
@@ -192,18 +192,19 @@ class EncoderLayer(hk.Module):
         self.ff = PositionwiseFF(M, F)
         self.norm2 = DropoutAddAndNorm(dropout_rate, is_train)
 
-    def __call__(self, input, pad_mask):
+    def __call__(self, input, position_mask, qt_mask):
         """
         input: btm
-        pad_mask: bt
+        position_mask: bt
+        qt_mask: bqt
         returns: bqm
         """
-        att = self.att(input, input, pad_mask, pad_mask, None)
+        att = self.att(input, input, position_mask, position_mask, qt_mask)
         # return self.ff(att, pad_mask)
-        norm = self.norm1(input, att, pad_mask)
-        ff = self.ff(norm, pad_mask)
+        norm = self.norm1(input, att, position_mask)
+        ff = self.ff(norm, position_mask)
         # jax.debug.print('encoder_layer ff: {}', ff)
-        out = self.norm2(norm, ff, pad_mask)
+        out = self.norm2(norm, ff, position_mask)
         return out
 
 class Encoder(hk.Module):
@@ -211,16 +212,21 @@ class Encoder(hk.Module):
         super().__init__(name='enc')
         self.layers = [EncoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
 
-    def __call__(self, input, pad_mask):
+    def __call__(self, input, sample_mask):
         """
         input: btm
-        pad_mask: bt
+        sample_mask: bt  (-1 is non-sample, >=0 are sample numbers)
         returns: bqm
         """
+        position_mask = jnp.equal(sample_mask, -1).astype(jnp.int32)
+        qt_mask = jnp.not_equal(
+                jnp.expand_dims(sample_mask, 1),
+                jnp.expand_dims(sample_mask, 2)).astype(jnp.int32)
+        # print(f'Encoder: {position_mask.shape=}, {qt_mask.shape=}')
         out = input
         # jax.debug.print('out: {}', out)
         for mod in self.layers:
-            out = mod(out, pad_mask)
+            out = mod(out, position_mask, qt_mask)
         # jax.debug.print('encoder_out: {}', out)
         return out
 
@@ -235,27 +241,29 @@ class DecoderLayer(hk.Module):
         self.ff = PositionwiseFF(M, F)
         self.norm3 = DropoutAddAndNorm(dropout_rate, is_train)
 
-    def __call__(self, enc_out, input, enc_mask, dec_mask):
+    def __call__(self, enc_out, input, position_mask, qt_self_mask, qt_cross_mask):
         """
+        all masks have 0 or 1 (1 = mask out)
         enc_out: btm (t from encoder)
         input: bqm
-        enc_mask: bt (masked tokens from encoder)
-        dec_mask: bq (masked tokens from decoder)
+        position_mask: bq 
+        qt_self_mask: bqt
+        qt_cross_mask: bqt
         out: bqm
         """
         B, Cdec, _ = input.shape
-        if dec_mask is not None:
-            assert dec_mask.shape[1] == Cdec, f'{dec_mask.shape=} but {input.shape=}'
 
         # here both q and t are indexing into the decoder only
         # this is the auto-retressive mask
         qt_mask = 1.0 - jnp.tri(Cdec, k=0)
-        att1 = self.self_att(input, input, dec_mask, dec_mask, qt_mask)
-        norm1 = self.norm1(input, att1, dec_mask)
-        att2 = self.cross_att(norm1, enc_out, dec_mask, enc_mask, None)
-        norm2 = self.norm2(norm1, att2, dec_mask)
-        ff = self.ff(norm2, dec_mask)
-        out = self.norm3(norm2, ff, dec_mask)
+        qt_self_mask = jnp.maximum(qt_mask, qt_self_mask)
+
+        att1 = self.self_att(input, input, position_mask, position_mask, qt_self_mask)
+        norm1 = self.norm1(input, att1, position_mask)
+        att2 = self.cross_att(norm1, enc_out, position_mask, None, qt_cross_mask)
+        norm2 = self.norm2(norm1, att2, position_mask)
+        ff = self.ff(norm2, position_mask)
+        out = self.norm3(norm2, ff, position_mask)
         return out
 
 class Decoder(hk.Module):
@@ -274,8 +282,8 @@ class Decoder(hk.Module):
         """
         enc_out: btm 
         dec_in: bqm
-        enc_mask: bt
-        dec_mask: bt (t for decoder sequence position)
+        enc_mask: bt (-1 = non-sample.  >=0 is sample number)
+        dec_mask: bq (-1 = non-sample.  >=0 is sample number)
         returns: bce
         """
         if dec_mask is not None:
@@ -286,8 +294,18 @@ class Decoder(hk.Module):
                     f'Decoder shape error: {enc_out.shape=}, {enc_mask.shape=}'
 
         out = dec_in
+        dec_position_mask = jnp.equal(dec_mask, -1).astype(jnp.int32)
+        qt_cross_mask = jnp.not_equal(
+                jnp.expand_dims(dec_mask, 2),
+                jnp.expand_dims(enc_mask, 1)).astype(jnp.int32)
+
+        qt_self_mask = jnp.not_equal(
+                jnp.expand_dims(dec_mask, 1),
+                jnp.expand_dims(dec_mask, 2)).astype(jnp.int32)
+
+
         for mod in self.layers:
-            out = mod(enc_out, out, enc_mask, dec_mask)
+            out = mod(enc_out, out, dec_position_mask, qt_self_mask, qt_cross_mask)
         # print(f'Decoder.__call__: {enc_out.shape=}, {out.shape=}')
         scaled_emb_mat = self.embed_mat() * self.scale_factor
         # out = self.linear_final(out)
@@ -307,17 +325,17 @@ class Model(hk.Module):
         self.encoder = Encoder(dropout_rate, arch, is_train)
         self.decoder = Decoder(dropout_rate, arch, is_train, self.T, self.embed_mat)
 
-    def __call__(self, enc_input, dec_input, temperature=1.0):
+    def __call__(self, enc_input, dec_input, enc_mask, dec_mask, temperature=1.0):
         """
         enc_input: bc
         dec_input: bc
+        enc_mask: bc
+        dec_mask: bc
         returns: bct
         """
-        enc_mask = jnp.equal(enc_input, self.mask_id).astype(jnp.float32)
-        dec_mask = jnp.equal(dec_input, self.mask_id).astype(jnp.float32)
-
         enc_embed = self.embed_layer(enc_input)
         dec_embed = self.embed_layer(dec_input)
+        # print(f'{enc_input.shape=}, {enc_mask.shape=}')
 
         if self.is_train:
             enc_output = self.encoder(enc_embed, enc_mask)
@@ -382,13 +400,13 @@ def predict(self, enc_input):
     return seq
 
 class Objective(hk.Module):
-    def __init__(self, token_histo, mask_id, smoothing_eps=0.1):
+    def __init__(self, token_histo, bos_id, smoothing_eps=0.1):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
         super().__init__()
         # self.eps = smoothing_eps
-        self.mask_id = mask_id
+        self.bos_id = bos_id
         token_histo = token_histo.astype(jnp.float32)
         self.token_dist = token_histo / jnp.sum(token_histo)
         self.T = self.token_dist.shape[0]
@@ -401,7 +419,13 @@ class Objective(hk.Module):
         """
         # bc
         targets = dec_input[:,1:]
-        targets_active = jnp.not_equal(targets, self.mask_id)
+
+        # -1 is non-sample, bos_id represents the start of a new sample
+        # both of which should not be active as a target
+        targets_active = jnp.logical_and(
+                jnp.not_equal(targets, self.bos_id),
+                jnp.not_equal(targets, -1))
+
         # smoothing
         dist = jnp.expand_dims(self.token_dist, (0,1))
         targets = jax.nn.one_hot(targets, self.T, axis=2)
@@ -441,8 +465,8 @@ def make_test_objective(hps, token_info):
 
 def make_objective(hps, token_info):
     histo = token_info['histo']
-    mask_id = token_info['mask']
-    return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
+    bos_id = token_info['bos']
+    return hk.transform(_wrap_haiku(Objective, histo, bos_id, hps.label_smooth_eps))
 
 def make_grads(cls, inst_args, out_grad, call_args):
     """

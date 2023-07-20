@@ -94,9 +94,10 @@ data = Hyperparams(
     dataset_glob = None, # either filesystem or gs:// locator glob pattern
     token_info_file = None,
     tokenizer = None,
-    shuffle_size = None, # if None, use length of dataset
+    shuffle_size = 1000, 
     swap_source_target = True,
-    max_sentence_length = 200,
+    max_source_len = 80,
+    max_target_len = 128
     )
 
 sample = Hyperparams(

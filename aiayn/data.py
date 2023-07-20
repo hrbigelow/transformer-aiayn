@@ -3,7 +3,7 @@ import sys
 import fire
 import numpy as np
 import jax.numpy as jnp
-from collections import Counter
+from collections import Counter, deque
 from transformers import GPT2TokenizerFast
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -105,8 +105,14 @@ def parse_record(example):
             'y': tf.io.parse_tensor(example['y'], out_type=tf.uint16)
             }
 
-def load_tfrecord_dataset(filenames):
+def load_tfrecord_dataset(tfrecord_glob):
     # optimization advice from https://codelabs.developers.google.com/codelabs/keras-flowers-data#4
+    filenames = tf.io.gfile.glob(tfrecord_glob)
+    if len(filenames) == 0:
+        raise RuntimeError(
+                f'load_tfrecord_dataset: '
+                f'Couldn\'t find any files in tfrecord_glob pattern \'{tfrecord_glob}\'')
+
     AUTOTUNE = tf.data.AUTOTUNE
     ignore_order = tf.data.Options()
     ignore_order.experimental_deterministic = False
@@ -114,6 +120,116 @@ def load_tfrecord_dataset(filenames):
     dataset = tf.data.TFRecordDataset(filenames, num_parallel_reads=AUTOTUNE)
     dataset = dataset.with_options(ignore_order)
     return dataset.map(parse_record, num_parallel_calls=AUTOTUNE)
+
+def pack_dataset(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value):
+    """
+    ds:  dataset producing x, y token seqs, unpadded but with special tokens 
+    xmax, ymax: maximum length for packed x (y) sequence
+    max_tries:  maximum number of searches through the queue to extend a pack
+    threshold: [0, 1]:  mark a pack complete if it attains this fullness threshold
+    max_queue_size:  maximum size of deque used as a look-ahead buffer
+    pad_value:  use this value to pad the returned packs
+
+    Returns:
+    packx, packy, maskx, masky, lenx, leny, num_retries
+    packx, packy:  concatenated token sequences, padded to xmax (ymax) with pad_value
+    maskx, masky:  tensors with values 0, 1, etc identifying the entries in packx
+                   (packy) or -1 if non-sample
+    lenx, leny:    number of sample tokens in packx (packy)
+    num_retries:    number of queue items tried to extend this pack
+    """
+    it = ds.as_numpy_iterator()
+
+    def pack(tensors, total_len, max_len):
+        # assert sum(tf.size(t) for t in tensors) == total_len
+        if total_len > max_len: 
+            raise RuntimeError(f'Error: {total_len=} > {max_len=}')
+
+        pad = tf.fill(max_len - total_len, pad_value)
+        idx_tensors = [tf.fill(tf.size(ten), i) for i, ten in enumerate(tensors)]
+        return (tf.concat(tensors + [pad], axis=0), 
+                tf.concat(idx_tensors + [pad], axis=0))
+
+    def fill_queue(dq, it):
+        while len(dq) < max_queue_size:
+            x, y = next(it)
+            if tf.size(x).numpy() > xmax or tf.size(y).numpy() > ymax:
+                continue
+            dq.append((x, y))
+
+    def make_pack(dq):
+        xs, ys = [], []
+        x_remain, y_remain = xmax, ymax 
+        max_empty = int((1.0 - threshold) * (xmax + ymax))
+        for i in range(max_tries):
+            if x_remain + y_remain < max_empty:
+                break
+            x, y = dq.popleft()
+            xil = tf.size(x).numpy()
+            yil = tf.size(y).numpy()
+            if xil > x_remain or yil > y_remain:
+                # recycle this item
+                dq.append((x, y))
+            else:
+                xs.append(x)
+                ys.append(y)
+                x_remain -= xil
+                y_remain -= yil
+        xpack, xmask = pack(xs, xmax - x_remain, xmax)
+        ypack, ymask = pack(ys, ymax - y_remain, ymax)
+        return xpack, ypack, xmask, ymask, xmax - x_remain, ymax - y_remain, i
+
+    def gen():
+        dq = deque()
+        while True:
+            fill_queue(dq, it)
+            yield make_pack(dq)
+
+    return ds.from_generator(gen, 
+            output_signature = (
+                tf.TensorSpec(shape=(xmax,), dtype=tf.int32),
+                tf.TensorSpec(shape=(ymax,), dtype=tf.int32),
+                tf.TensorSpec(shape=(xmax,), dtype=tf.int32),
+                tf.TensorSpec(shape=(ymax,), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32)
+                )
+            )
+
+def add_special_tokens(token_ds, swap_pairs, bos_id, eos_id):
+    """
+    Appends padding to first sentence
+    Appends eos + padding to second sentence
+    token_info: loaded from save_token_info output 
+    """
+
+    # this is done so that the model will learn that 'eos' only leads to 'eos'.
+    bos = tf.constant([bos_id], tf.uint16)
+    eos = tf.constant([eos_id, eos_id], tf.uint16)
+
+    def expand_fn(rec):
+        return rec['x'], rec['y']
+
+    def swap_fn(x, y):
+        return y, x
+
+    def pad_tokens_fn(x, y):
+        # x = tf.sparse.to_dense(rec['x']) # This was needed when using 
+        # VarLenFeature during parse_record
+        # y = tf.sparse.to_dense(rec['y'])
+        x = tf.cast(x, tf.uint16)
+        y = tf.cast(y, tf.uint16)
+        y = tf.concat(values=(bos, y, eos), axis=0)
+        return x, y
+
+    ds = token_ds
+    ds = ds.map(expand_fn)
+    if swap_pairs:
+        ds = ds.map(swap_fn)
+    ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
+    return ds
+
 
 def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length,
         rng_key):
@@ -165,27 +281,22 @@ def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_len
     ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
     return ds
 
-def pipe_dataset(pad_ds, batch_size, initial_step=0):
-    ds = pad_ds.repeat()
+def pipe_dataset(ds, seed, shuffle_size, batch_size, initial_step=0):
+    ds = ds.repeat()
+    ds = ds.shuffle(shuffle_size, seed, reshuffle_each_iteration=True)
     ds = ds.batch(batch_size)
     # ds = ds.skip(initial_step)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
-def main_dataset(tfrecord_glob, token_info, max_sentence_length, batch_size, 
-        swap_source_target, rng_key, initial_step, shuffle_size=None):
-    data_dir = CONFIG.get('data_dir', None)
-    if data_dir is None:
-        raise RuntimeError('Please call data.set_config first')
-    tfrecord_names = tf.io.gfile.glob(tfrecord_glob)
-    token_ds = load_tfrecord_dataset(tfrecord_names) 
-    # token_ds = tf.data.Dataset.load(os.path.join(data_dir, data_name))
-
-    if shuffle_size is None:
-        shuffle_size = len(token_ds)
-    pad_ds = pad_dataset(token_ds, token_info, shuffle_size, swap_source_target, 
-            max_sentence_length, rng_key)
-    return pipe_dataset(pad_ds, batch_size, initial_step)
+def main_dataset(tfrecord_glob, bos_id, eos_id, max_len1, max_len2, max_tries,
+        pack_threshold, batch_size, swap_source_target, rng_key, initial_step,
+        shuffle_size=10000):
+    token_ds = load_tfrecord_dataset(tfrecord_glob) 
+    ds = add_special_tokens(token_ds, swap_source_target, bos_id, eos_id)
+    ds = pack_dataset(ds, max_len1, max_len2, max_tries=max_tries,
+            threshold=pack_threshold, max_queue_size=100, pad_value=-1)
+    return pipe_dataset(ds, rng_key, shuffle_size, batch_size, initial_step)
 
 def length_histo(token_ds):
     histo = tf.zeros((1000,2), dtype=tf.int32)
