@@ -121,6 +121,26 @@ def load_tfrecord_dataset(tfrecord_glob):
     dataset = dataset.with_options(ignore_order)
     return dataset.map(parse_record, num_parallel_calls=AUTOTUNE)
 
+def reorder(ds, bufsize, xmax):
+    # it = ds.as_numpy_iterator()
+    spec = tf.TensorSpec(shape=(None,), dtype=tf.int32)
+     # spec = tf.data.DatasetSpec.from_value(ds)
+    def filt_fn(x):
+        return tf.size(x) <= xmax
+
+    ds = ds.filter(filt_fn)
+    it = iter(ds)
+
+    def gen():
+        dq = deque()
+        while True:
+            if len(dq) < bufsize:
+                x = next(it)
+                dq.append(x)
+            yield dq.popleft()
+    ds = ds.from_generator(gen, output_signature = spec)
+    return ds
+
 def pack_dataset(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value):
     """
     ds:  dataset producing x, y token seqs, unpadded but with special tokens 
@@ -142,8 +162,8 @@ def pack_dataset(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value
 
     def pack(tensors, total_len, max_len):
         # assert sum(tf.size(t) for t in tensors) == total_len
-        if total_len > max_len: 
-            raise RuntimeError(f'Error: {total_len=} > {max_len=}')
+        # if total_len > max_len: 
+            # raise RuntimeError(f'Error: {total_len=} > {max_len=}')
 
         pad = tf.fill(max_len - total_len, pad_value)
         idx_tensors = [tf.fill(tf.size(ten), i) for i, ten in enumerate(tensors)]
@@ -157,33 +177,43 @@ def pack_dataset(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value
                 continue
             dq.append((x, y))
 
-    def make_pack(dq):
-        xs, ys = [], []
-        x_remain, y_remain = xmax, ymax 
-        max_empty = int((1.0 - threshold) * (xmax + ymax))
-        for i in range(max_tries):
-            if x_remain + y_remain < max_empty:
-                break
-            x, y = dq.popleft()
-            xil = tf.size(x).numpy()
-            yil = tf.size(y).numpy()
-            if xil > x_remain or yil > y_remain:
-                # recycle this item
-                dq.append((x, y))
-            else:
-                xs.append(x)
-                ys.append(y)
-                x_remain -= xil
-                y_remain -= yil
-        xpack, xmask = pack(xs, xmax - x_remain, xmax)
-        ypack, ymask = pack(ys, ymax - y_remain, ymax)
-        return xpack, ypack, xmask, ymask, xmax - x_remain, ymax - y_remain, i
+    def gen():
+        dq = deque()
+        xpack = tf.zeros(xmax)
+        xmask = tf.zeros(xmax)
+        ypack = tf.zeros(ymax)
+        ymask = tf.zeros(ymax)
+        while True:
+            fill_queue(dq, it)
+            xs, ys = [], []
+            x_remain, y_remain = xmax, ymax 
+            max_empty = int((1.0 - threshold) * (xmax + ymax))
+            for i in range(max_tries):
+                if x_remain + y_remain < max_empty:
+                    break
+                x, y = dq.popleft()
+                xil = tf.size(x).numpy()
+                yil = tf.size(y).numpy()
+                if xil > x_remain or yil > y_remain:
+                    # recycle this item
+                    dq.append((x, y))
+                else:
+                    xs.append(x)
+                    ys.append(y)
+                    x_remain -= xil
+                    y_remain -= yil
+            # print(f'packing after {i} tries')
+            # xpack, xmask = pack(xs, xmax - x_remain, xmax)
+            # ypack, ymask = pack(ys, ymax - y_remain, ymax)
+            yield xpack, ypack, xmask, ymask, xmax - x_remain, ymax - y_remain, i
 
+    """
     def gen():
         dq = deque()
         while True:
             fill_queue(dq, it)
             yield make_pack(dq)
+    """
 
     return ds.from_generator(gen, 
             output_signature = (
@@ -298,7 +328,7 @@ def main_dataset(tfrecord_glob, bos_id, eos_id, max_len1, max_len2, max_tries,
     ds = add_special_tokens(ds, swap_source_target, bos_id, eos_id)
     ds = pack_dataset(ds, max_len1, max_len2, max_tries=max_tries,
             threshold=pack_threshold, max_queue_size=100, pad_value=-1)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
+    ds = ds.prefetch(1000)
     ds = ds.batch(batch_size)
     return ds
 
