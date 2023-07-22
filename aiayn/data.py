@@ -7,7 +7,76 @@ from collections import Counter, deque
 from transformers import GPT2TokenizerFast
 import tensorflow as tf
 import tensorflow_datasets as tfds
+import seqio
+import functools
+from seqio.feature_converters import EncDecFeatureConverter
 
+
+def prepare(registry_item, tfrec_glob):
+    seqio.TaskRegistry.remove(registry_item)
+    seqio.TaskRegistry.add(
+            registry_item,
+            seqio.dataset_providers.TFExampleDataSource(
+                { 'train': tfrec_glob },
+                { 'x': tf.io.FixedLenFeature([], tf.string), 
+                  'y': tf.io.FixedLenFeature([], tf.string) }
+                ),
+            preprocessors = [ 
+                convert_tfrec_dataset,
+                functools.partial(
+                    seqio.preprocessors.apply_feature_converter,
+                    sequence_length={'x': 80, 'y': 128},
+                    feature_converter=EncDecFeatureConverter(pack=True)
+                    )
+                ],
+            output_features = { 
+                'inputs': seqio.Feature(
+                    seqio.PassThroughVocabulary(50257),
+                    add_eos=False,
+                    dtype=tf.int32,
+                    rank=1
+                    ),
+                'targets': seqio.Feature(
+                    seqio.PassThroughVocabulary(50257),
+                    add_eos=False,
+                    dtype=tf.int32,
+                    rank=1
+                    )
+                }
+            )
+
+def test_prepare(registry_item):
+    seqio.TaskRegistry.remove(registry_item)
+    seqio.TaskRegistry.add(
+            registry_item,
+            source=seqio.TfdsDataSource('wmt14_translate/de-en:1.0.0'),
+            output_features= {}
+            )
+        
+def parse_example(swap, example):
+    schema = {
+            'x': tf.io.FixedLenFeature([], tf.string),
+            'y': tf.io.FixedLenFeature([], tf.string),
+            }
+    record = tf.io.parse_single_example(example, schema)
+    return parse_record(swap, record)
+
+def parse_record(swap, record):
+    # see https://colab.research.google.com/notebooks/tpu.ipynb#scrollTo=LtAVr-4CP1rp&line=26&uniqifier=1
+    # print(f'example[x]: {example["x"]}')
+    x = tf.io.parse_tensor(record['x'], out_type=tf.uint16)
+    y = tf.io.parse_tensor(record['y'], out_type=tf.uint16)
+    x = tf.cast(x, tf.int32)
+    y = tf.cast(y, tf.int32)
+    if swap:
+        x, y = y, x
+    # tf.print(x)
+    return { 'inputs': x, 'targets': y }
+
+def convert_tfrec_dataset(tfrec_dataset, swap_inputs_targets):
+    return tfrec_dataset.map(
+            functools.partial(parse_record, swap_inputs_targets),
+            num_parallel_calls=tf.data.AUTOTUNE)
 
 CONFIG = { }
 
@@ -67,13 +136,16 @@ def token_dataset(download_dir, split, dataset_name, nproc):
     # iterate once to populate cache
     return ds, ds_info
 
-def write_records(ds, record_templ, num_shards):
+def write_records(ds, record_templ, num_shards, shards=None):
     options = tf.io.TFRecordOptions(
             compression_type=None,
             input_buffer_size=1000000,
             output_buffer_size=1000000)
 
-    for shard in range(num_shards):
+    if shards is None:
+        shards = range(num_shards)
+
+    for shard in shards:
         record_path = record_templ.format(shard) 
         ds_shard = ds.shard(num_shards, shard)
         with tf.io.TFRecordWriter(record_path, options) as file_writer:
@@ -93,19 +165,7 @@ def write_records(ds, record_templ, num_shards):
                 file_writer.write(record_bytes)
         print(f'Wrote {record_path} of {num_shards}')
 
-def parse_record(example):
-    # see https://colab.research.google.com/notebooks/tpu.ipynb#scrollTo=LtAVr-4CP1rp&line=26&uniqifier=1
-    schema = {
-            'x': tf.io.FixedLenFeature([], tf.string),
-            'y': tf.io.FixedLenFeature([], tf.string),
-            }
-    example = tf.io.parse_single_example(example, schema)
-    return {
-            'x': tf.io.parse_tensor(example['x'], out_type=tf.uint16),
-            'y': tf.io.parse_tensor(example['y'], out_type=tf.uint16)
-            }
-
-def load_tfrecord_dataset(tfrecord_glob):
+def load_tfrecord_dataset(tfrecord_glob, swap_inputs_targets):
     # optimization advice from https://codelabs.developers.google.com/codelabs/keras-flowers-data#4
     filenames = tf.io.gfile.glob(tfrecord_glob)
     if len(filenames) == 0:
@@ -119,7 +179,8 @@ def load_tfrecord_dataset(tfrecord_glob):
 
     dataset = tf.data.TFRecordDataset(filenames, num_parallel_reads=AUTOTUNE)
     dataset = dataset.with_options(ignore_order)
-    return dataset.map(parse_record, num_parallel_calls=AUTOTUNE)
+    fn = functools.partial(parse_example, swap_inputs_targets)
+    return dataset.map(fn, num_parallel_calls=AUTOTUNE)
 
 def reorder(ds, bufsize, xmax):
     # it = ds.as_numpy_iterator()
@@ -140,6 +201,146 @@ def reorder(ds, bufsize, xmax):
             yield dq.popleft()
     ds = ds.from_generator(gen, output_signature = spec)
     return ds
+
+def pad_and_filter(ds, feature_lengths, pad_value):
+    # filter out any entries longer than those given in feature_lengths
+    # pad
+    def filter_fn(ent):
+        return tf.logical_and(
+                tf.size(ent['inputs']) <= feature_lengths['inputs'],
+                tf.size(ent['targets']) <= feature_lengths['targets'])
+
+    def pad_fn(ent):
+        lengths = { k + '_len': tf.size(v) for k, v in ent.items() }
+        padded = {
+                k: tf.ensure_shape(
+                    tf.concat(
+                    values=[v, tf.fill([feature_lengths[k] - tf.size(v)], pad_value)], 
+                    axis=0),
+                    [feature_lengths[k]]
+                    )
+
+                for k, v in ent.items()
+                }
+        record = { **padded, **lengths }
+        return record
+
+    return ds.filter(filter_fn).map(pad_fn)
+
+def condense_buffer(buf, buf_sz, used):
+    """
+    buf: tensor of 1 or more dimensions
+    buf_sz: number of entries considered present in the buffer
+    used: 1d boolean tensor, marking entries in axis 0 
+    returns: buffer with unused slices packed towards zero
+             and new buf_sz
+    """
+    used = tf.pad(used, tf.stack([[0, buf_sz - tf.size(used)]]), constant_values = False)
+    unused_inds = tf.where(tf.logical_not(used))
+    retained_entries = tf.gather_nd(buf, unused_inds, 0)
+    new_buf_sz = tf.shape(retained_entries)[0]
+    buf = tf.scatter_nd(tf.reshape(tf.range(new_buf_sz), (-1,1)), retained_entries,
+            tf.shape(buf))
+    return buf, new_buf_sz
+
+def masked_sizes(ds, batch_sz, period, feat_lengths):
+    """
+    Maintain a buffer of token sequences that have been consumed from the source,
+    but not yet yielded.  Parallel to this, maintains the buffer of corresponding
+    token sequence lengths.  Both buffers are batch_sz * 2.
+
+    """
+    tf_update_fn = tf.tensor_scatter_nd_update
+
+    def gen():
+        input_len = feat_lengths['inputs']
+        cap1 = tf.fill(batch_sz, input_len)
+
+        # tokens buffer
+        tok_buf1 = tf.zeros((batch_sz * 2, input_len), dtype=tf.int32)
+        # sentence lengths buffer
+        slen_buf1 = tf.zeros((batch_sz * 2,), dtype=tf.int32)
+
+        # the high-water-mark for tok_buf1 and slen_buf1
+        buf_sz = 0
+        ds_iter = iter(ds.batch(batch_sz))
+        while True:
+            pack_sz = tf.zeros(batch_sz, dtype=tf.int32)
+            for i in range(period):
+                if buf_sz < batch_sz:
+                    batch = next(ds_iter)
+                    # copy batch onto the buffer
+                    dest = tf.reshape(tf.range(buf_sz, buf_sz + batch_sz), (-1,1))
+                    tok_buf1 = tf_update_fn(tok_buf1, dest, batch['inputs'])
+                    # tf.print('tok_buf1 after loading:', tok_buf1)
+                    slen_buf1 = tf_update_fn(slen_buf1, dest, batch['inputs_len'])
+                    buf_sz += batch_sz
+
+                fits = tf.less_equal(pack_sz + slen_buf1[:batch_sz], cap1)
+                fits_inds = tf.where(fits)
+                out_sz = tf.where(fits, slen_buf1[:batch_sz], tf.constant(0))
+                yield { 'seq_lens': out_sz, 'seqs': tok_buf1[:batch_sz] }
+
+                # tf.print('tok_buf1 before: ', tok_buf1)
+                old_buf_sz = buf_sz
+                tok_buf1, buf_sz = condense_buffer(tok_buf1, old_buf_sz, fits)
+                slen_buf1, _ = condense_buffer(slen_buf1, old_buf_sz, fits)
+                pack_sz = tf.add(pack_sz, out_sz)
+
+    spec = { 'seq_lens': tf.TensorSpec(shape=(batch_sz,), dtype=tf.int32),
+             'seqs': tf.TensorSpec(shape=(batch_sz, feat_lengths['inputs']), dtype=tf.int32)
+             }
+    return tf.data.Dataset.from_generator(gen, output_signature=spec)
+
+
+def pack_sequences(seq_len_ds, period):
+    """
+    Expects a dataset from masked_sizes
+    """
+"""
+Recipe for concatenation of various lengths of a source
+lens = tf.constant([5,8,0,4,6,1]
+toks = tf.constant([
+     [ ... ],
+     [ ... ],
+     [ ... ]
+     ...
+     ])
+"""
+def pack_sequences(seqs, seq_lens):
+    """
+    The 'period' is the number of
+    b = batch, p = period, o = output sequence
+    seqs: pbo
+    seq_lens: pb 
+    out_len: scalar
+    returns: po
+    """
+
+    P, B, O = tf.shape(seqs)
+    seqs = tf.transpose(seqs, (1,0,2))
+    seq_lens = tf.transpose(seq_lens, (1,0))
+
+    seq_lens = tf.expand_dims(seq_lens, 2)
+    len_rang = tf.expand_dims(tf.expand_dims(tf.range(O), 0), 1)
+    period_rang = tf.expand_dims(tf.expand_dims(tf.range(P), 0), 2)
+    seq_begs = tf.cumsum(seq_lens, axis=1, exclusive=True)
+    seq_ends = tf.cumsum(seq_lens, axis=1)
+    pre_inds = tf.add(seq_begs, len_rang)
+    mask = tf.greater(seq_lens, len_rang) 
+    inds = tf.where(mask, pre_inds, tf.constant([-1]))
+    new_inds = tf.stack([tf.broadcast_to(period_rang, tf.shape(inds)), inds], axis=3)
+    result = tf.gather_nd(seqs, new_inds)
+
+"""
+Recipe for creating this many repeats of each index value
+lens = tf.constant([5,8,0,4,6,1]
+mask = tf.reshape(tf.repeat(tf.range(30), 6, axis=0), (30, 6))
+mask = tf.transpose(mask)
+tf.reduce_sum(tf.cast(tf.less(tf.expand_dims(tf.cumsum(lens), 1), mask), dtype=tf.int32), 
+axis=0)
+"""
+
 
 def pack_dataset(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value):
     """
