@@ -1,3 +1,5 @@
+import tensorflow as tf
+import tensorflow_datasets as tfds
 import os
 import sys
 import fire
@@ -5,8 +7,6 @@ import numpy as np
 import jax.numpy as jnp
 from collections import Counter, deque
 from transformers import GPT2TokenizerFast
-import tensorflow as tf
-import tensorflow_datasets as tfds
 import seqio
 import functools
 from seqio.feature_converters import EncDecFeatureConverter
@@ -211,7 +211,7 @@ def pad_and_filter(ds, feature_lengths, pad_value):
                 tf.size(ent['targets']) <= feature_lengths['targets'])
 
     def pad_fn(ent):
-        lengths = { k + '_len': tf.size(v) for k, v in ent.items() }
+        lengths = { k: tf.size(v) for k, v in ent.items() }
         padded = {
                 k: tf.ensure_shape(
                     tf.concat(
@@ -222,12 +222,15 @@ def pad_and_filter(ds, feature_lengths, pad_value):
 
                 for k, v in ent.items()
                 }
-        record = { **padded, **lengths }
+        record = dict(
+                inputs=(padded['inputs'], lengths['inputs']),
+                targets=(padded['targets'], lengths['targets'])
+                )
         return record
 
     return ds.filter(filter_fn).map(pad_fn)
 
-def condense_buffer(buf, buf_sz, used):
+def condense_buffer(buf_sz, used, buf):
     """
     buf: tensor of 1 or more dimensions
     buf_sz: number of entries considered present in the buffer
@@ -241,108 +244,178 @@ def condense_buffer(buf, buf_sz, used):
     new_buf_sz = tf.shape(retained_entries)[0]
     buf = tf.scatter_nd(tf.reshape(tf.range(new_buf_sz), (-1,1)), retained_entries,
             tf.shape(buf))
-    return buf, new_buf_sz
+    return buf
 
-def masked_sizes(ds, batch_sz, period, feat_lengths):
+def masked_sizes(pad_ds, batch_sz, num_tries, feat_lengths):
     """
+    pad_ds: dataset from pad_and_filter 
     Maintain a buffer of token sequences that have been consumed from the source,
     but not yet yielded.  Parallel to this, maintains the buffer of corresponding
     token sequence lengths.  Both buffers are batch_sz * 2.
 
     """
     tf_update_fn = tf.tensor_scatter_nd_update
+    input_len = feat_lengths['inputs']
+    target_len = feat_lengths['targets']
+    batch_ds = pad_ds.batch(batch_sz)
+    ds_iter = iter(batch_ds)
+
+    def refill_buffer(buf_sz, buf, more):
+        dest = tf.reshape(tf.range(buf_sz, buf_sz + batch_sz), (-1,1))
+        # tf.print(f'{buf_sz=}, {buf.shape=}, {dest.shape=} {more.shape=}')
+        return tf_update_fn(buf, dest, more)
+
+    def test_fit(pack, buf, cap):
+        return tf.less_equal(pack + buf[:batch_sz], cap)
 
     def gen():
-        input_len = feat_lengths['inputs']
-        cap1 = tf.fill(batch_sz, input_len)
-
+        # capacity
+        cap = dict(
+            inputs=tf.fill(batch_sz, input_len),
+            targets=tf.fill(batch_sz, target_len))
         # tokens buffer
-        tok_buf1 = tf.zeros((batch_sz * 2, input_len), dtype=tf.int32)
-        # sentence lengths buffer
-        slen_buf1 = tf.zeros((batch_sz * 2,), dtype=tf.int32)
+        toks = dict(
+                inputs=tf.zeros((batch_sz * 2, input_len), dtype=tf.int32),
+                targets=tf.zeros((batch_sz * 2, target_len), dtype=tf.int32))
+        # lengths buffers
+        lens = dict(
+                inputs=tf.zeros((batch_sz * 2,), dtype=tf.int32),
+                targets=tf.zeros((batch_sz * 2,), dtype=tf.int32))
 
         # the high-water-mark for tok_buf1 and slen_buf1
+        # will be the same value for each field, but works well with nest.map_structure
         buf_sz = 0
-        ds_iter = iter(ds.batch(batch_sz))
         while True:
-            pack_sz = tf.zeros(batch_sz, dtype=tf.int32)
-            for i in range(period):
+            pack = dict(
+                inputs=tf.zeros(batch_sz, dtype=tf.int32),
+                targets=tf.zeros(batch_sz, dtype=tf.int32))
+
+            for i in range(num_tries):
                 if buf_sz < batch_sz:
                     batch = next(ds_iter)
-                    # copy batch onto the buffer
-                    dest = tf.reshape(tf.range(buf_sz, buf_sz + batch_sz), (-1,1))
-                    tok_buf1 = tf_update_fn(tok_buf1, dest, batch['inputs'])
-                    # tf.print('tok_buf1 after loading:', tok_buf1)
-                    slen_buf1 = tf_update_fn(slen_buf1, dest, batch['inputs_len'])
+                    new_toks = { 'inputs': batch['inputs'][0], 'targets': batch['targets'][0] }
+                    new_lens = { 'inputs': batch['inputs'][1], 'targets': batch['targets'][1] }
+                    fn = functools.partial(refill_buffer, buf_sz)
+                    toks = tf.nest.map_structure(fn, toks, new_toks)
+                    lens = tf.nest.map_structure(fn, lens, new_lens)
                     buf_sz += batch_sz
-
-                fits = tf.less_equal(pack_sz + slen_buf1[:batch_sz], cap1)
+                
+                # tf.print('buf_sz, batch_sz: ', buf_sz, batch_sz)
+                fits = tf.nest.map_structure(test_fit, pack, lens, cap)
+                fits = tf.logical_and(*fits.values())
                 fits_inds = tf.where(fits)
-                out_sz = tf.where(fits, slen_buf1[:batch_sz], tf.constant(0))
-                yield { 'seq_lens': out_sz, 'seqs': tok_buf1[:batch_sz] }
+                fits_fn = lambda l: tf.where(fits, l[:batch_sz], tf.constant([0]))
+                try_sz = tf.nest.map_structure(fits_fn, lens)
 
-                # tf.print('tok_buf1 before: ', tok_buf1)
-                old_buf_sz = buf_sz
-                tok_buf1, buf_sz = condense_buffer(tok_buf1, old_buf_sz, fits)
-                slen_buf1, _ = condense_buffer(slen_buf1, old_buf_sz, fits)
-                pack_sz = tf.add(pack_sz, out_sz)
+                y = dict(
+                        inputs=(toks['inputs'][:batch_sz], try_sz['inputs']),
+                        targets=(toks['targets'][:batch_sz], try_sz['targets']))
 
-    spec = { 'seq_lens': tf.TensorSpec(shape=(batch_sz,), dtype=tf.int32),
-             'seqs': tf.TensorSpec(shape=(batch_sz, feat_lengths['inputs']), dtype=tf.int32)
-             }
-    return tf.data.Dataset.from_generator(gen, output_signature=spec)
+                yield y
 
+                fn = functools.partial(condense_buffer, buf_sz, fits)
+                toks = tf.nest.map_structure(fn, toks)
+                lens = tf.nest.map_structure(fn, lens)
+                buf_sz -= tf.reduce_sum(tf.cast(fits, tf.int32))
+                pack = tf.nest.map_structure(tf.add, pack, try_sz)
 
-def pack_sequences(seq_len_ds, period):
+    spec = dict(
+            inputs=(
+                tf.TensorSpec(shape=(batch_sz, input_len), dtype=tf.int32),
+                tf.TensorSpec(shape=(batch_sz,), dtype=tf.int32)),
+            targets=(
+                tf.TensorSpec(shape=(batch_sz, target_len), dtype=tf.int32),
+                tf.TensorSpec(shape=(batch_sz,), dtype=tf.int32))
+            )
+
+    size_ds = tf.data.Dataset.from_generator(gen, output_signature=spec)
+    # return size_ds
+    def transpose_fn(item):
+        inp, trg = item['inputs'], item['targets']
+        return dict( 
+                inputs=(
+                    tf.transpose(inp[0], (1,0,2)),
+                    tf.transpose(inp[1], (1,0))),
+                targets=(
+                    tf.transpose(trg[0], (1,0,2)),
+                    tf.transpose(trg[1], (1,0)))
+                )
+    return size_ds.batch(num_tries).map(transpose_fn)
+
+@tf.function
+def pack_sequences(seq_and_len):
     """
-    Expects a dataset from masked_sizes
-    """
-"""
-Recipe for concatenation of various lengths of a source
-lens = tf.constant([5,8,0,4,6,1]
-toks = tf.constant([
-     [ ... ],
-     [ ... ],
-     [ ... ]
-     ...
-     ])
-"""
-def pack_sequences(seqs, seq_lens):
-    """
-    The 'period' is the number of
-    b = batch, p = period, o = output sequence
-    seqs: pbo
+    b = batch, p = tries, o = output sequence
+    seqs: bpo
     seq_lens: pb 
     out_len: scalar
     returns: po
-    """
 
-    P, B, O = tf.shape(seqs)
-    seqs = tf.transpose(seqs, (1,0,2))
-    seq_lens = tf.transpose(seq_lens, (1,0))
+    indices[slice,coord]
+    updates[slice,elem] = RANDOM(0, 10, FLOAT)
+    output[dest,elem] = 0.0 
+    output[indices[slice,:],elem] = updates[slice,elem]
+
+    slice:  B,O,P
+    coord:  2
+    elem:   () 
+    dest:   B,O
+
+    indices: B,O,P,2 (slice, coord)
+    output: B,O  (dest, elem)
+    updates: B,O,P  (slice, elem)
+    """
+    seqs, seq_lens = seq_and_len
+    B = tf.shape(seqs)[0]
+    P = tf.shape(seqs)[1]
+    O = tf.shape(seqs)[2]
+
+    # seqs = tf.transpose(seqs, (1,0,2))
+    # seq_lens = tf.transpose(seq_lens, (1,0))
 
     seq_lens = tf.expand_dims(seq_lens, 2)
-    len_rang = tf.expand_dims(tf.expand_dims(tf.range(O), 0), 1)
-    period_rang = tf.expand_dims(tf.expand_dims(tf.range(P), 0), 2)
+    o_rang = tf.expand_dims(tf.expand_dims(tf.range(O), 0), 1)
+    b_rang = tf.expand_dims(tf.expand_dims(tf.range(B), 1), 2)
+    p_rang = tf.expand_dims(tf.expand_dims(tf.range(P), 0), 2)
     seq_begs = tf.cumsum(seq_lens, axis=1, exclusive=True)
     seq_ends = tf.cumsum(seq_lens, axis=1)
-    pre_inds = tf.add(seq_begs, len_rang)
-    mask = tf.greater(seq_lens, len_rang) 
-    inds = tf.where(mask, pre_inds, tf.constant([-1]))
-    new_inds = tf.stack([tf.broadcast_to(period_rang, tf.shape(inds)), inds], axis=3)
-    result = tf.gather_nd(seqs, new_inds)
+    pre_inds = tf.add(seq_begs, o_rang)
+    mask = tf.greater(seq_lens, o_rang) 
+    inds = tf.where(mask, pre_inds, O) # B,P,O
+    slice_shape = tf.shape(inds)
+    new_inds = tf.stack([
+                tf.broadcast_to(b_rang, slice_shape), 
+                inds,
+                ], axis=3)
+    ids = tf.broadcast_to(p_rang, slice_shape)
+    packed_seqs = tf.scatter_nd(new_inds, seqs, shape=(B,O+1))[:,:O]
+    # return new_inds, ids, seqs
+    out_shape = (B,O+1)
+    packed_ids = tf.tensor_scatter_nd_update(
+            tf.fill(out_shape, -1), 
+            new_inds, ids)[:,:O]
+    return packed_seqs, packed_ids 
+    # return { 'packed_seqs': packed_seqs }
 
-"""
-Recipe for creating this many repeats of each index value
-lens = tf.constant([5,8,0,4,6,1]
-mask = tf.reshape(tf.repeat(tf.range(30), 6, axis=0), (30, 6))
-mask = tf.transpose(mask)
-tf.reduce_sum(tf.cast(tf.less(tf.expand_dims(tf.cumsum(lens), 1), mask), dtype=tf.int32), 
-axis=0)
-"""
+def pack_dataset(toks_ds, batch_size, num_tries, feature_lengths, pad_value):
+    """
+    toks_ds:  dataset yielding { 'input': input_tokens, 'target': target_tokens }
+    batch_size:  internal size for batching the packing operation
+    num_tries:  number of internal iterations for trying to pack a batch
+    feature_lengths: map of { 'input': max_input_len, 'target': max_target_len } 
+    """
+    pad_ds = pad_and_filter(toks_ds, feature_lengths, pad_value)
+    sz_ds = masked_sizes(pad_ds, batch_size, num_tries, feature_lengths)
+    def pack_pair_fn(item):
+        return dict(
+                inputs=pack_sequences(item['inputs']),
+                targets=pack_sequences(item['targets'])
+                )
 
+    pack_ds = sz_ds.map(pack_pair_fn)
+    return pack_ds.unbatch()
 
-def pack_dataset(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value):
+def pack_dataset_bck(ds, xmax, ymax, max_tries, threshold, max_queue_size, pad_value):
     """
     ds:  dataset producing x, y token seqs, unpadded but with special tokens 
     xmax, ymax: maximum length for packed x (y) sequence
