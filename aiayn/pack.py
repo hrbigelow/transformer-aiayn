@@ -1,4 +1,5 @@
 import tensorflow as tf
+from dataclasses import dataclass
 import functools
 
 """
@@ -14,9 +15,9 @@ with spec:
       'targets': (packed_input_seqs, packed_input_ids, total_pack_length) }
 
 """
-
 def pad_and_filter(ds, feature_lengths, pad_value):
     """
+    (This implementation is the same speed as the original)
     ds:  dataset with elements 
          { 'inputs': (rank-1 int32 tensor of varying length),
            'targets': (rank-1 int32 tensor of varying length) }
@@ -68,7 +69,6 @@ def masked_sizes(pad_ds, batch_sz, num_tries, feat_lengths):
     Maintain a buffer of token sequences that have been consumed from the source,
     but not yet yielded.  Parallel to this, maintains the buffer of corresponding
     token sequence lengths.  Both buffers are batch_sz * 2.
-
     """
     tf_update_fn = tf.tensor_scatter_nd_update
     input_len = feat_lengths['inputs']
@@ -157,39 +157,53 @@ def masked_sizes(pad_ds, batch_sz, num_tries, feat_lengths):
     return size_ds.batch(num_tries).map(transpose_fn)
 
 @tf.function
-def pack_sequences(seq_and_len):
+def get_scatter_inds(batch_inds, seqs, lens):
     """
-    b = batch, p = tries, o = output sequence
+    batch_inds: bpo, a materialized tensor holding value b at index bpo
     seqs: bpo
-    seq_lens: pb 
-    out_len: scalar
-    returns: po
+    lens: bp
 
-    See https://github.com/hrbigelow/einsum-tuple/blob/master/ops/scatter_nd.et
-    for scatter logic
+    returns: bpo2  last slice is [B,O] coordinates
     """
-    seqs, seq_lens = seq_and_len
+    O = tf.shape(seqs)[2]
+    lens = lens[:, :, None]
+    o_rang = tf.range(O)[None, None, :]
+    begs = tf.cumsum(lens, axis=1, exclusive=True)
+    pre_inds = tf.add(begs, o_rang)
+    mask = tf.greater(lens, o_rang) 
+    inds = tf.where(mask, pre_inds, O) # B,P,O
+    slice_shape = tf.shape(inds)
+    return tf.stack([batch_inds, inds], axis=3)
+
+@tf.function
+def pack_values(scatter_inds, values):
+    """
+    scatter_inds: bpo2
+    values: bpo
+    dest: bo
+
+    Performs the operation:
+    dest[*inds[b,p,o]] = values[b,p,o]
+    """
+    B = tf.shape(values)[0]
+    O = tf.shape(values)[2]
+    dest = tf.fill((B,O+1), -1)
+    return tf.tensor_scatter_nd_update(dest, scatter_inds, values)[:,:O]
+def pack_sequences(seq_and_len, pfx):
+    seqs, lens = seq_and_len
     B = tf.shape(seqs)[0]
     P = tf.shape(seqs)[1]
     O = tf.shape(seqs)[2]
-
-    seq_lens = seq_lens[:, :, None]
-    b_rang = tf.range(B)[:, None, None]
-    p_rang = tf.range(P)[None, :, None]
-    o_rang = tf.range(O)[None, None, :]
-    seq_begs = tf.cumsum(seq_lens, axis=1, exclusive=True)
-    seq_ends = tf.cumsum(seq_lens, axis=1)
-    pre_inds = tf.add(seq_begs, o_rang)
-    mask = tf.greater(seq_lens, o_rang) 
-    inds = tf.where(mask, pre_inds, O) # B,P,O
-    slice_shape = tf.shape(inds)
-    new_inds = tf.stack([tf.broadcast_to(b_rang, slice_shape), inds], axis=3)
-    ids = tf.broadcast_to(p_rang, slice_shape)
-    packed_seqs = tf.scatter_nd(new_inds, seqs, shape=(B,O+1))[:,:O]
-    out_shape = (B,O+1)
-    packed_ids = tf.tensor_scatter_nd_update(tf.fill(out_shape, -1), new_inds, ids)[:,:O]
-    packed_cts = tf.reduce_sum(tf.cast(tf.not_equal(packed_ids, -1), tf.int32), axis=1)
-    return packed_seqs, packed_ids, packed_cts
+    gbatch = tf.broadcast_to(tf.range(B)[:,None,None], (B,P,O))
+    seqids = tf.broadcast_to(tf.range(P)[None,:,None], (B,P,O))
+    tokids = tf.broadcast_to(tf.range(O)[None,None,:], (B,P,O))
+    scatter_inds = get_scatter_inds(gbatch, seqs, lens)
+    seqs = pack_values(scatter_inds, seqs)
+    seqids = pack_values(scatter_inds, seqids)
+    tokids = pack_values(scatter_inds, tokids)
+    counts = tf.reduce_sum(tf.cast(tf.not_equal(seqids, -1), tf.int32), axis=1)
+    keys = tuple(f'{pfx}_{sfx}' for sfx in ('seqs', 'seqids', 'tokids', 'counts'))
+    return dict(zip(keys, (seqs, seqids, tokids, counts)))
 
 def pack_dataset(toks_ds, feature_lengths, batch_size=1000, num_tries=10, pad_value=-1):
     """
@@ -200,11 +214,44 @@ def pack_dataset(toks_ds, feature_lengths, batch_size=1000, num_tries=10, pad_va
     """
     pad_ds = pad_and_filter(toks_ds, feature_lengths, pad_value)
     sz_ds = masked_sizes(pad_ds, batch_size, num_tries, feature_lengths)
+
     def pack_pair_fn(item):
-        return dict(
-                inputs=pack_sequences(item['inputs']),
-                targets=pack_sequences(item['targets']))
+        inputs = pack_sequences(item['inputs'], 'inputs') 
+        targets = pack_sequences(item['targets'], 'targets')
+        return { **inputs, **targets }
 
     pack_ds = sz_ds.map(pack_pair_fn)
     return pack_ds.unbatch()
+
+
+# OLD
+
+@dataclass
+class SeqLen:
+    seqs: tf.Tensor # bpo
+    lens: tf.Tensor # bp
+
+def pack_tries(tries_ds, feature_lengths, bp_shape):
+    # This is horribly slow for some reason
+    B,P = bp_shape
+    O = max(feature_lengths.values())
+    gbatch = tf.broadcast_to(tf.range(B)[:,None,None], (B,P,O))
+    seqids = tf.broadcast_to(tf.range(P)[None,:,None], (B,P,O))
+    tokids = tf.broadcast_to(tf.range(O)[None,None,:], (B,P,O))
+    
+    gbatch = { k: gbatch[:,:,:v] for k, v in feature_lengths.items() }
+    seqids = { k: seqids[:,:,:v] for k, v in feature_lengths.items() }
+    tokids = { k: tokids[:,:,:v] for k, v in feature_lengths.items() }
+    
+    def map_fn(elem):
+        def pack_fn(cell, gbatch, seqids, tokids): 
+            scatter_inds = get_scatter_inds(gbatch, cell.seqs, cell.lens)
+            fn = functools.partial(pack_values, scatter_inds)
+            vals = { 'seqs': cell.seqs, 'sids': seqids, 'tids': tokids }
+            pack = tf.nest.map_structure(fn, vals)
+            cts = tf.reduce_sum(tf.cast(tf.not_equal(pack['seqs'], -1), tf.int32), axis=1)
+            return { **pack, 'cts': cts }
+        elem = {k: SeqLen(*v) for k, v in elem.items()}
+        return tf.nest.map_structure(pack_fn, elem, gbatch, seqids, tokids)
+    return tries_ds.map(map_fn)
 
