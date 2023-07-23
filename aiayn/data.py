@@ -7,9 +7,9 @@ import numpy as np
 import jax.numpy as jnp
 from collections import Counter, deque
 from transformers import GPT2TokenizerFast
-import seqio
+# import seqio
 import functools
-from seqio.feature_converters import EncDecFeatureConverter
+# from seqio.feature_converters import EncDecFeatureConverter
 
 
 def prepare(registry_item, tfrec_glob):
@@ -391,11 +391,9 @@ def pack_sequences(seq_and_len):
     packed_seqs = tf.scatter_nd(new_inds, seqs, shape=(B,O+1))[:,:O]
     # return new_inds, ids, seqs
     out_shape = (B,O+1)
-    packed_ids = tf.tensor_scatter_nd_update(
-            tf.fill(out_shape, -1), 
-            new_inds, ids)[:,:O]
-    return packed_seqs, packed_ids 
-    # return { 'packed_seqs': packed_seqs }
+    packed_ids = tf.tensor_scatter_nd_update(tf.fill(out_shape, -1), new_inds, ids)[:,:O]
+    packed_cts = tf.reduce_sum(tf.cast(tf.not_equal(packed_ids, -1), tf.int32), axis=1)
+    return packed_seqs, packed_ids, packed_cts
 
 def pack_dataset(toks_ds, batch_size, num_tries, feature_lengths, pad_value):
     """

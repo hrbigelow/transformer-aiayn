@@ -203,18 +203,29 @@ def setup_train(hps, rng_key):
 
     bos_id = token_info['bos']
     eos_id = token_info['eos']
+    """
     max_tries = 20
     pack_threshold = 0.85
     dataset = data.main_dataset(hps.dataset_glob, bos_id, eos_id, hps.max_source_len,
             hps.max_target_len, max_tries, pack_threshold, hps.batch_dim0,
             hps.swap_source_target, rng_key[0], initial_step, hps.shuffle_size)
+    """
+
+    feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
+    token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
+    token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
+    pack_ds = data.pack_dataset(token_ds, 1000, 10, feature_lengths, -1) 
+    dataset = pack_ds.batch(hps.batch_dim0)
 
     if hps.resume_ckpt:
         params = mngr.restore(hps.resume_ckpt)
         opt_state = tx.init(params)
         initial_step = hps.resume_ckpt
     else:
-        enc_input, dec_input, enc_mask, dec_mask, *rest = next(dataset.as_numpy_iterator())
+        item = next(dataset.as_numpy_iterator())
+        enc_input, enc_mask, _ = item['inputs']
+        dec_input, dec_mask, _ = item['targets']
+
         num_replicas = jax.local_device_count()
         # model_batch_size = hps.batch_dim0 // num_replicas // hps.accum_steps
         model_batch_size = 1 # seems this works fine for dummy initialization
@@ -257,7 +268,9 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     step = initial_step 
 
     dit = dataset.as_numpy_iterator()
-    for enc_input, dec_input, enc_mask, dec_mask, enc_len, dec_len, _ in dit:
+    for item in dit:
+        enc_input, enc_mask, enc_len = item['inputs']
+        dec_input, dec_mask, dec_len = item['targets']
         num_toks = enc_len.sum() + dec_len.sum()
         enc_input = enc_input.reshape(shape)
         dec_input = dec_input.reshape(shape)
@@ -351,7 +364,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     else:
         logger = None
 
-    print(f'Prepared dataset {hps.data_name}')
+    print(f'Prepared dataset from {hps.dataset_glob}')
 
     # move the save/restore logic here
     update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
