@@ -254,9 +254,8 @@ class DecoderLayer(hk.Module):
         B, Cdec, _ = input.shape
 
         # here both q and t are indexing into the decoder only
-        # this is the auto-retressive mask
-        qt_mask = 1.0 - jnp.tri(Cdec, k=0)
-        qt_self_mask = jnp.maximum(qt_mask, qt_self_mask)
+        qt_causal_mask = 1.0 - jnp.tri(Cdec, k=0)
+        qt_self_mask = jnp.maximum(qt_causal_mask, qt_self_mask)
 
         att1 = self.self_att(input, input, position_mask, position_mask, qt_self_mask)
         norm1 = self.norm1(input, att1, position_mask)

@@ -14,7 +14,7 @@ import time
 import sys
 import fire
 import numpy as np
-from aiayn import model, data, hparams, report, funcs
+from aiayn import model, data, hparams, report, funcs, pack
 
 def print_range(pfx, tree):
     def fn(acc, x):
@@ -201,20 +201,10 @@ def setup_train(hps, rng_key):
 
     initial_step = int(hps.resume_ckpt or 0)
 
-    bos_id = token_info['bos']
-    eos_id = token_info['eos']
-    """
-    max_tries = 20
-    pack_threshold = 0.85
-    dataset = data.main_dataset(hps.dataset_glob, bos_id, eos_id, hps.max_source_len,
-            hps.max_target_len, max_tries, pack_threshold, hps.batch_dim0,
-            hps.swap_source_target, rng_key[0], initial_step, hps.shuffle_size)
-    """
-
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
     token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
     token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
-    pack_ds = data.pack_dataset(token_ds, 1000, 10, feature_lengths, -1) 
+    pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, -1) 
     dataset = pack_ds.batch(hps.batch_dim0)
 
     if hps.resume_ckpt:
