@@ -1,3 +1,4 @@
+import functools
 import psutil
 import jax
 import jax.numpy as jnp
@@ -33,7 +34,7 @@ def make_learning_rate_fn(warmup_steps, M):
         return new_lr
     return lr_fn
 
-def accumulate_gradient(loss_and_grad_fn, accum_steps, params, *inputs):
+def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs, targets):
     """
     Inspired by https://github.com/google-research/vision_transformer/blob/
          62a446f1b3bb9e470db5689bfd7407a8d91bae8a/vit_jax/utils.py#L99
@@ -47,42 +48,34 @@ def accumulate_gradient(loss_and_grad_fn, accum_steps, params, *inputs):
     loss: rb
     grad: pytree of params gradients
     """
-    B = inputs[0].shape[0]
+    def get_slice(i, tensor):
+        return jax.lax.dynamic_slice(tensor, (i * step_size, 0),
+                (step_size,) + tensor.shape[1:])
 
-    if accum_steps and accum_steps > 1:
-        assert B % accum_steps == 0, (
-               f'batch size {B} not a multiple of {accum_steps=}')
+    def map_add(a, b):
+        return jax.tree_map(lambda x, y: x + y, a, b)
+    
+    input_slices = jax.tree_map(functools.partial(get_slice, 0), inputs)
+    target_slices = jax.tree_map(functools.partial(get_slice, 0), targets)
+    (l, e), g = loss_and_grad_fn(params, input_slices, target_slices)
 
-        step_size = B // accum_steps
-        def get_slice(i, tensor):
-            return jax.lax.dynamic_slice(tensor, (i * step_size, 0),
-                    (step_size,) + tensor.shape[1:])
+    def acc_loss_and_grad(i, tup):
+        input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
+        target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
+        (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices)
+        l, e, g = tup
+        return (l + li, map_add(e, ei), map_add(g, gi))
 
-        input_slices = tuple(get_slice(0, ten) for ten in inputs)
-        (l, e), g = loss_and_grad_fn(params, *input_slices)
+    # 1 accum:  6 sec / 10 steps
+    # 5 accum: 9 sec / 10 steps
+    # 9 accum: 14 sec / 10 steps 
+    l, e, g = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g))
+    return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
 
-        def map_add(a, b):
-            return jax.tree_map(lambda x, y: x + y, a, b)
+def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics, tx):
+    step_size = repl_batch_size // accum_steps
 
-        def acc_loss_and_grad(i, tup):
-            input_slices = tuple(get_slice(i, ten) for ten in inputs)
-            (li, ei), gi = loss_and_grad_fn(params, *input_slices)
-            l, e, g = tup
-            return (l + li, map_add(e, ei), map_add(g, gi))
-
-        # 1 accum:  6 sec / 10 steps
-        # 5 accum: 9 sec / 10 steps
-        # 9 accum: 14 sec / 10 steps 
-        l, e, g = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g))
-        return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
-
-    else:
-        (l, e), g = loss_and_grad_fn(params, *inputs)
-        return l, e, g
-
-
-def make_update_fn(model, objective, accum_steps, with_metrics, tx):
-    def update_fn(state, *inputs):
+    def update_fn(state, inputs, targets):
         """
         The function to pass into jax.pmap
         Returns updated state, rng
@@ -96,9 +89,9 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
         _, new_rng_key = jax.random.split(rng_key)
         dropout_rng = jax.random.fold_in(rng_key, jax.lax.axis_index('batch'))
 
-        def loss_fn(params, *inputs):
-            dec_input = inputs[1]
-            dec_output = model.apply(params, dropout_rng, *inputs)
+        def loss_fn(params, inputs, targets):
+            dec_input = targets['seqs']
+            dec_output = model.apply(params, dropout_rng, inputs, targets)
             # print_range('dec_output', dec_output)
             loss, label_ent, model_ent = objective.apply(None, None, dec_input, dec_output)
             return loss, (label_ent, model_ent)
@@ -106,7 +99,7 @@ def make_update_fn(model, objective, accum_steps, with_metrics, tx):
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
         # setting accum_steps to 1 results in 
-        l, e, g = accumulate_gradient(lg_fn, accum_steps, params, *inputs)
+        l, e, g = accumulate_gradient(lg_fn, step_size, accum_steps, params, inputs, targets)
         # averages l and g across replicas, then broadcasts the average
         loss, entropy, grad = jax.lax.pmean((l, e, g), axis_name='batch')
         # loss = jax.lax.pmean(l, axis_name='batch')
@@ -181,6 +174,13 @@ def log_metrics(logger, steps, norms):
                 svlog(pfx, plot_name, key, val)
 
 def setup_train(hps, rng_key):
+    num_replicas = jax.local_device_count()
+    if hps.batch_dim0 % num_replicas != 0:
+        raise RuntimeError(f'{hps.batch_dim0=} not divisible by {num_replicas=}')
+    repl_batch_size = hps.batch_dim0 // num_replicas
+    if repl_batch_size % hps.accum_steps != 0:
+        raise RuntimeError(f'{repl_batch_size=} not divisible by {hps.accum_steps=}')
+
     data.set_config(data_dir=hps.data_dir)
     token_info = data.load_token_info(hps.token_info_file)
     # special_toks = data.get_special_tokens(token_info)
@@ -197,7 +197,9 @@ def setup_train(hps, rng_key):
 
     mod = model.make_model(hps, True, token_info)
     objective = model.make_objective(hps, token_info)
-    update_fn = make_update_fn(mod, objective, hps.accum_steps, hps.with_metrics, tx)
+
+    update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
+            hps.with_metrics, tx)
 
     initial_step = int(hps.resume_ckpt or 0)
 
@@ -205,7 +207,7 @@ def setup_train(hps, rng_key):
     token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
     token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
     pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, -1) 
-    dataset = pack_ds.batch(hps.batch_dim0)
+    dataset = pack_ds.rebatch(hps.batch_dim0)
 
     if hps.resume_ckpt:
         params = mngr.restore(hps.resume_ckpt)
@@ -213,20 +215,8 @@ def setup_train(hps, rng_key):
         initial_step = hps.resume_ckpt
     else:
         item = next(dataset.as_numpy_iterator())
-        enc_input, enc_mask, _ = item['inputs']
-        dec_input, dec_mask, _ = item['targets']
-
-        num_replicas = jax.local_device_count()
-        # model_batch_size = hps.batch_dim0 // num_replicas // hps.accum_steps
-        model_batch_size = 1 # seems this works fine for dummy initialization
-        # with too large of a
-        enc_dummy = enc_input[:1]
-        dec_dummy = dec_input[:1]
-        enc_mask_dummy = enc_mask[:1]
-        dec_mask_dummy = dec_mask[:1]
-
-        # do I need to adjust batch size here?  maybe not
-        params = mod.init(rng_key, enc_dummy, dec_dummy, enc_mask_dummy, dec_mask_dummy)
+        item = jax.tree_map(lambda ten: ten[:1], item)
+        params = mod.init(rng_key, item['inputs'], item['targets'])
         opt_state = tx.init(params)
         initial_step = 0
 
@@ -256,17 +246,16 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     print('Replicated params across devices')
 
     step = initial_step 
-
     dit = dataset.as_numpy_iterator()
+    def reshape_fn(ten):
+        return jnp.reshape(ten, shape)
+
     for item in dit:
-        enc_input, enc_mask, enc_len = item['inputs']
-        dec_input, dec_mask, dec_len = item['targets']
-        num_toks = enc_len.sum() + dec_len.sum()
-        enc_input = enc_input.reshape(shape)
-        dec_input = dec_input.reshape(shape)
-        enc_mask = enc_mask.reshape(shape)
-        dec_mask = dec_mask.reshape(shape)
-        state_m, metrics_m = update_fn_m(state_m, enc_input, dec_input, enc_mask, dec_mask) 
+        item = jax.tree_map(reshape_fn, item)
+        inputs = item['inputs']
+        targets = item['targets']
+        num_toks = inputs['counts'].sum() + targets['counts'].sum()
+        state_m, metrics_m = update_fn_m(state_m, inputs, targets) 
         metrics = flax.jax_utils.unreplicate(metrics_m)
 
         report_idx = step % hps.report_every

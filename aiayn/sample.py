@@ -42,9 +42,12 @@ def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     special_toks = data.get_special_tokens(token_info)
 
     query_toks = jnp.repeat(jnp.expand_dims(query_toks, axis=0), hps.num_sample, axis=0)
-    dec_input = jnp.full((hps.num_sample, hps.max_sentence_length), bos_id, dtype=np.int32)
+    query_mask = jnp.zeros_like(query_toks, dtype=jnp.int32)
+    dec_input = jnp.full((hps.num_sample, hps.max_target_len), bos_id, dtype=np.int32)
+    dec_mask = jnp.full((hps.num_sample, hps.max_target_len), 0, dtype=np.int32)
     # print(f'{query_toks.shape=}, {dec_input.shape=}')
-    pred_toks = mod.apply(params, rng_key, query_toks, dec_input, hps.temperature) 
+    pred_toks = mod.apply(params, rng_key, query_toks, dec_input, query_mask,
+            dec_mask, hps.temperature) 
     print(pred_toks)
     pred_sentences = data.de_tokenize(pred_toks, special_toks)
     print('\n'.join(pred_sentences))

@@ -159,26 +159,26 @@ class InputEmbedding(hk.Module):
         self.embed_mat = embed_mat
         self.pos_factor = pos_factor 
 
-    def positional_embedding(self, num_positions):
-        pos = jnp.arange(num_positions)
+    def positional_embedding(self, seq_positions):
+        # seq_positions: bc
         denom = 10000 ** jnp.linspace(0, 1, self.embed_mat.M)
-        arg = jnp.expand_dims(pos, 1) / jnp.expand_dims(denom, 0)
+        arg = seq_positions[:,:,None] / denom[None,None,:]
         # it shouldn't matter what order embeddings are placed but here I follow
         # the paper, and alternate sin with cos
-        pos_emb = jnp.empty((num_positions,self.embed_mat.M), np.float32)
+        pos_emb = jnp.empty_like(arg)
         pos_emb = pos_emb.at[:,::2].set(jnp.sin(arg[:,::2]))
         pos_emb = pos_emb.at[:,1::2].set(jnp.cos(arg[:,1::2]))
-        # C, M
         return pos_emb
 
-    def __call__(self, input):
+    def __call__(self, seq_tokens, seq_positions):
         """
-        input: bc (values: integer-encoded token ID)
+        seq_tokens: bc (end-to-end packed tokens from sentences)
+        seq_positions: bc (ids identifying position of token in a sentence)
         output: bcm
         """
-        C = input.shape[1]
-        pos_embed = self.positional_embedding(C)
-        embed = jnp.take(self.embed_mat(), input, axis=0)
+        pos_embed = self.positional_embedding(seq_positions)
+        embed = jnp.take(self.embed_mat(), seq_tokens, axis=0)
+        
         # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
         # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
         return embed + pos_embed * self.pos_factor
@@ -324,21 +324,28 @@ class Model(hk.Module):
         self.encoder = Encoder(dropout_rate, arch, is_train)
         self.decoder = Decoder(dropout_rate, arch, is_train, self.T, self.embed_mat)
 
-    def __call__(self, enc_input, dec_input, enc_mask, dec_mask, temperature=1.0):
+    def __call__(self, inputs, targets, temperature=1.0):
         """
+        inputs and targets are produced by pack.pack_dataset
+        seqs: bc => packed tokenized sequences
+        seqids: bc => corresponding input-target pair ids for sequences
+        tokids: bc => position of token within each seqid
+        counts: bt => lengths of each sequence at each 'try' (see pack)
+
         enc_input: bc
         dec_input: bc
         enc_mask: bc
         dec_mask: bc
         returns: bct
         """
-        enc_embed = self.embed_layer(enc_input)
-        dec_embed = self.embed_layer(dec_input)
+        enc_embed = self.embed_layer(inputs['seqs'], inputs['tokids'])
+        dec_embed = self.embed_layer(targets['seqs'], targets['tokids'])
         # print(f'{enc_input.shape=}, {enc_mask.shape=}')
 
         if self.is_train:
-            enc_output = self.encoder(enc_embed, enc_mask)
-            dec_output = self.decoder(enc_output, dec_embed, enc_mask, dec_mask)
+            enc_output = self.encoder(enc_embed, inputs['seqids'])
+            dec_output = self.decoder(enc_output, dec_embed, inputs['seqids'],
+                    targets['seqids'])
             # jax.debug.print('enc_input: {}\nenc_output: {}\nenc_mask: {}\n',
                     # enc_input, enc_output, enc_mask)
             # jax.debug.print('dec_input: {}\ndec_output: {}\n',
@@ -356,7 +363,7 @@ class Model(hk.Module):
             dec_embed = self.embed_layer(dec_input)
             rng_key = hk.next_rng_key()
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
-            dec_output = self.decoder(enc_output, dec_embed, enc_mask, None) / temperature
+            dec_output = self.decoder(enc_output, dec_embed, enc_mask, dec_mask) / temperature
             dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
             # print('foo: ', dec_step.shape)
             # jax.debug.print('dec_step: {}', dec_step)
