@@ -41,13 +41,21 @@ def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     bos_id = token_info['bos'].item()
     special_toks = data.get_special_tokens(token_info)
 
+    def tokids(shape): 
+        return jnp.reshape(jnp.tile(jnp.arange(shape[1]), shape[0]), shape) 
+
     query_toks = jnp.repeat(jnp.expand_dims(query_toks, axis=0), hps.num_sample, axis=0)
     query_mask = jnp.zeros_like(query_toks, dtype=jnp.int32)
+    query_tokids = tokids(query_toks.shape)
     dec_input = jnp.full((hps.num_sample, hps.max_target_len), bos_id, dtype=np.int32)
-    dec_mask = jnp.full((hps.num_sample, hps.max_target_len), 0, dtype=np.int32)
+    dec_seqids = jnp.zeros_like(dec_input, dtype=jnp.int32)
+    dec_tokids = tokids(dec_input.shape)
+
+    inputs = dict(seqs=query_toks, seqids=query_mask, tokids=query_tokids)
+    targets = dict(seqs=dec_input, seqids=dec_seqids, tokids=dec_tokids)
+
     # print(f'{query_toks.shape=}, {dec_input.shape=}')
-    pred_toks = mod.apply(params, rng_key, query_toks, dec_input, query_mask,
-            dec_mask, hps.temperature) 
+    pred_toks = mod.apply(params, rng_key, inputs, targets, hps.temperature) 
     print(pred_toks)
     pred_sentences = data.de_tokenize(pred_toks, special_toks)
     print('\n'.join(pred_sentences))

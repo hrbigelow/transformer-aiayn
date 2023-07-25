@@ -19,22 +19,6 @@ def take_jvp(primals, tangents):
     # tangent_out = 
 
 
-@custom_vjp
-def take2(matrix, indices, axis):
-    return jnp.take(matrix, indices, axis=axis)
-
-def take2_fwd(matrix, indices, axis):
-    return take2(matrix, indices, axis), (matrix, indices, axis)
-
-def take2_bwd(res, g):
-    """
-    g: 
-    """
-    matrix, indices, axis = res
-    take_vjp = jax.jvp(jnp.take, matrix, indices, axis)
-    return take_vjp(g), jnp.all(jnp.equal(g, 0), axis=axis)
-
-take2.defvjp(take2_fwd, take2_bwd)
 
 
 

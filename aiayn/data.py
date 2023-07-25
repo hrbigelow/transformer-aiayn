@@ -86,7 +86,7 @@ def load_tfrecord_dataset(tfrecord_glob, swap_inputs_targets):
     fn = functools.partial(parse_example, swap_inputs_targets)
     return dataset.map(fn, num_parallel_calls=AUTOTUNE)
 
-def add_special_tokens(token_ds, swap_pairs, bos_id, eos_id):
+def add_special_tokens(token_ds, bos_id, eos_id):
     """
     Appends padding to first sentence
     Appends eos + padding to second sentence
@@ -97,27 +97,15 @@ def add_special_tokens(token_ds, swap_pairs, bos_id, eos_id):
     bos = tf.constant([bos_id], tf.uint16)
     eos = tf.constant([eos_id, eos_id], tf.uint16)
 
-    def expand_fn(rec):
-        return rec['x'], rec['y']
+    def toks_fn(item):
+        x = tf.cast(item['inputs'], tf.uint16)
+        y = tf.cast(item['targets'], tf.uint16)
+        return dict(
+                inputs=x,
+                targets=tf.concat(values=(bos, y, eos), axis=0))
 
-    def swap_fn(x, y):
-        return y, x
-
-    def pad_tokens_fn(x, y):
-        # x = tf.sparse.to_dense(rec['x']) # This was needed when using 
-        # VarLenFeature during parse_record
-        # y = tf.sparse.to_dense(rec['y'])
-        x = tf.cast(x, tf.uint16)
-        y = tf.cast(y, tf.uint16)
-        y = tf.concat(values=(bos, y, eos), axis=0)
-        return x, y
-
-    ds = token_ds
-    ds = ds.map(expand_fn)
-    if swap_pairs:
-        ds = ds.map(swap_fn)
-    ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
-    return ds
+    return token_ds.map(toks_fn, num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False)
 
 
 def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length,

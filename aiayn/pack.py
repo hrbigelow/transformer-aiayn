@@ -41,6 +41,7 @@ def pad_and_filter(ds, feature_lengths, pad_value):
 
     def pad_fn(ent):
         def pad_len_fn(ten, L):
+            ten = tf.cast(ten, tf.int32)
             return dict(
                     toks=tf.concat([ten, tf.fill([L-tf.size(ten)], pad_value)], 0), 
                     lens=tf.size(ten))

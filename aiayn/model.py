@@ -353,22 +353,23 @@ class Model(hk.Module):
 
             return dec_output
 
-        B, Ce = enc_input.shape
-        _, Cd = dec_input.shape
+        
+        B, Ce = inputs['seqs'].shape
+        _, Cd = targets['seqs'].shape
+        dec_input = targets['seqs']
         jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
         # jax.debug.print('enc_mask: {}\n', enc_mask)
 
-        enc_output = self.encoder(enc_embed, enc_mask)
+        enc_output = self.encoder(enc_embed, inputs['seqids'])
         def sample_fn(i, dec_input): 
-            dec_embed = self.embed_layer(dec_input)
+            dec_embed = self.embed_layer(dec_input, targets['tokids'])
             rng_key = hk.next_rng_key()
             # print(f'{p=}, {enc_output.shape=}, {dec_input.shape=}')
-            dec_output = self.decoder(enc_output, dec_embed, enc_mask, dec_mask) / temperature
+            dec_output = self.decoder(enc_output, dec_embed, inputs['seqids'],
+                    targets['seqids']) / temperature
             dec_step = jax.lax.dynamic_slice(dec_output, (0, i, 0), (B, 1, self.T))
-            # print('foo: ', dec_step.shape)
             # jax.debug.print('dec_step: {}', dec_step)
             sample = jax.random.categorical(rng_key, dec_step, axis=2)
-            # jax.debug.print('sample: {}', sample)
             # print(f'{dec_step.shape=}, {sample.shape=}, {dec_input.shape=}')
             dec_input = dec_input.at[:,i+1].set(sample[:,0])
             # jax.debug.print('dec_input: {}', dec_input)

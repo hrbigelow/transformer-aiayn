@@ -202,9 +202,12 @@ def setup_train(hps, rng_key):
             hps.with_metrics, tx)
 
     initial_step = int(hps.resume_ckpt or 0)
+    bos_id = token_info['bos']
+    eos_id = token_info['eos']
 
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
     token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
+    token_ds = data.add_special_tokens(token_ds, bos_id, eos_id) 
     token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
     pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, -1) 
     dataset = pack_ds.rebatch(hps.batch_dim0)
