@@ -281,7 +281,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
             if hps.with_metrics:
                 log_metrics(logger, steps, norms)
 
-        if (step % hps.ckpt_every == 0 and step > 0 and step != hps.resume_ckpt):
+        if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
             state = flax.jax_utils.unreplicate(state_m)
             params = state['params']
             state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), params)
