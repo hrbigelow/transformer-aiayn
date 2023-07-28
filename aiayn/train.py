@@ -1,3 +1,4 @@
+import tensorflow as tf
 import functools
 import psutil
 import jax
@@ -30,7 +31,7 @@ def make_learning_rate_fn(warmup_steps, M):
     def lr_fn(step):
         factor = jax.lax.min(step ** -0.5, step * warmup_steps ** -1.5)
         new_lr = M ** -0.5 * factor
-        # jax.debug.print('learn_rate: {}', new_lr)
+        jax.debug.print('step: {}, learn_rate: {}', step, new_lr)
         return new_lr
     return lr_fn
 
@@ -85,7 +86,7 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         Note: This is only used for multi-host training (i.e. multiple computers
         each with multiple accelerators).
         """
-        params, opt_state, rng_key = state['params'], state['opt'], state['rng'] 
+        params, opt_state, rng_key = state['params'], state['opt_state'], state['rng'] 
         _, new_rng_key = jax.random.split(rng_key)
         dropout_rng = jax.random.fold_in(rng_key, jax.lax.axis_index('batch'))
 
@@ -102,9 +103,6 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         l, e, g = accumulate_gradient(lg_fn, step_size, accum_steps, params, inputs, targets)
         # averages l and g across replicas, then broadcasts the average
         loss, entropy, grad = jax.lax.pmean((l, e, g), axis_name='batch')
-        # loss = jax.lax.pmean(l, axis_name='batch')
-        # entropy = jax.lax.pmean(e, axis_name='batch')
-        # grad = jax.tree_map(lambda x: jax.lax.pmean(x, axis_name='batch'), g)
 
         # tx.update takes ~6 seconds / 10 steps
         updates, opt_state = tx.update(grad, opt_state)
@@ -116,11 +114,11 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
         if with_metrics:
             norms = jax.tree_map(tensor_norm, grad, params, updates)
-            state = dict(params=params, opt=opt_state, rng=new_rng_key)
+            state = dict(params=params, opt_state=opt_state, rng=new_rng_key)
             metrics = dict(loss=loss, entropy=entropy, norms=norms)
             return state, metrics
         else:
-            state = dict(params=params, opt=opt_state, rng=new_rng_key)
+            state = dict(params=params, opt_state=opt_state, rng=new_rng_key)
             metrics = dict(loss=loss, entropy=entropy)
             return state, metrics
             
@@ -183,19 +181,24 @@ def setup_train(hps, rng_key):
 
     data.set_config(data_dir=hps.data_dir)
     token_info = data.load_token_info(hps.token_info_file)
-    # special_toks = data.get_special_tokens(token_info)
 
     options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
+    checkpointer = dict(
+            params=PyTreeCheckpointer(),
+            opt_state=PyTreeCheckpointer(),
+            rng=PyTreeCheckpointer())
     checkpointer = PyTreeCheckpointer()
     mngr = CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
-    tx = optax.chain(
-            optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
-                eps=hps.adam_eps)
-            )
+    tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
+            eps=hps.adam_eps)
 
-    mod = model.make_model(hps, True, token_info)
+    n_vocab = token_info['histo'].shape[0]
+    mask_id = token_info['mask']
+    bos_id = token_info['bos']
+
+    mod = model.make_model(hps, True, n_vocab, bos_id, mask_id)
     objective = model.make_objective(hps, token_info)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
@@ -213,14 +216,20 @@ def setup_train(hps, rng_key):
     dataset = pack_ds.rebatch(hps.batch_dim0)
 
     if hps.resume_ckpt:
+        # state = mngr.restore(hps.resume_ckpt)
         params = mngr.restore(hps.resume_ckpt)
         opt_state = tx.init(params)
+        # opt_state = state['opt_state'] 
+        opt_state.count = hps.resume_ckpt
+        # print('restore: ', jax.tree_util.tree_structure(opt_state))
+        params = state['params']
         initial_step = hps.resume_ckpt
     else:
         item = next(dataset.as_numpy_iterator())
         item = jax.tree_map(lambda ten: ten[:1], item)
         params = mod.init(rng_key, item['inputs'], item['targets'])
         opt_state = tx.init(params)
+        print('opt_state from tx.init(params): ', jax.tree_util.tree_structure(opt_state))
         initial_step = 0
 
     return update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn
@@ -244,7 +253,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
     update_fn_m = jax.pmap(update_fn, axis_name='batch')
     print('Compiled model')
-    state = dict(params=params, opt=opt_state, rng=rng_key)
+    state = dict(params=params, opt_state=opt_state, rng=rng_key)
     state_m = flax.jax_utils.replicate(state)
     print('Replicated params across devices')
 
@@ -283,9 +292,9 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
 
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
             state = flax.jax_utils.unreplicate(state_m)
-            params = state['params']
-            state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), params)
-            mngr.save(step, params, save_kwargs={'save_args': state_save_args})
+            state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), state)
+            # mngr.save(step, state, save_kwargs={'save_args': state_save_args})
+            mngr.save(step, state)
             print(f'Saved checkpoint {step=}')
         step += 1
 

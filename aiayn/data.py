@@ -62,7 +62,7 @@ def de_tokenize(tokens, special_toks={}):
     ans = []
     for i in range(tokens.shape[0]):
         tokids = tokens[i]
-        toks = [idmap[el.item()] for el in tokids]
+        toks = [idmap[el.item()] for el in tokids if el.item() in idmap]
         # text = ''.join(idmap[el] for el in toks)
         # toks = tok.convert_ids_to_tokens(toks)
         text = tz.convert_tokens_to_string(toks)
@@ -217,7 +217,8 @@ def load_token_info(token_file_name):
         raise RuntimeError(f'Please call data.set_data_dir first')
     path = os.path.join(data_dir, token_file_name)
     try:
-        return np.load(path)
+        with tf.io.gfile.GFile(path, 'rb') as file:
+            return np.load(file)
     except:
         raise RuntimeError(f'Could not load token info file {path}')
 

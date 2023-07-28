@@ -7,8 +7,8 @@ from aiayn import model, data, hparams
 import pdb
 
 
-def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file, 
-        hps_keys: str = 'arch,reg,data,sample', 
+def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
+        print_special_toks, hps_keys: str = 'arch,reg,data,sample', 
         **hps_overrides
         ):
 
@@ -25,8 +25,11 @@ def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     print(hps)
 
     token_info = data.load_token_info(hps.token_info_file)
+    n_vocab = token_info['histo'].shape[0]
+    mask_id = token_info['mask']
+    bos_id = token_info['bos']
 
-    mod = model.make_model(hps, False, token_info) 
+    mod = model.make_test_model(hps, n_vocab, bos_id, mask_id) 
     mngr = orbax.CheckpointManager(
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()))
     params = mngr.restore(hps.resume_ckpt)
@@ -35,27 +38,18 @@ def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     rng_key = jax.random.PRNGKey(hps.random_seed)
     print('Got random key')
     query_toks = data.tokenize(query)
+    query_toks = jnp.repeat(query_toks[None,:], hps.num_sample, axis=0)
 
     print('Received query:')
-    print(data.de_tokenize(np.expand_dims(query_toks, 0))[0])
+    print(data.de_tokenize(query_toks[0:1,:])[0])
     bos_id = token_info['bos'].item()
-    special_toks = data.get_special_tokens(token_info)
 
-    def tokids(shape): 
-        return jnp.reshape(jnp.tile(jnp.arange(shape[1]), shape[0]), shape) 
+    if print_special_toks:
+        special_toks = data.get_special_tokens(token_info)
+    else:
+        special_toks = {}
 
-    query_toks = jnp.repeat(jnp.expand_dims(query_toks, axis=0), hps.num_sample, axis=0)
-    query_mask = jnp.zeros_like(query_toks, dtype=jnp.int32)
-    query_tokids = tokids(query_toks.shape)
-    dec_input = jnp.full((hps.num_sample, hps.max_target_len), bos_id, dtype=np.int32)
-    dec_seqids = jnp.zeros_like(dec_input, dtype=jnp.int32)
-    dec_tokids = tokids(dec_input.shape)
-
-    inputs = dict(seqs=query_toks, seqids=query_mask, tokids=query_tokids)
-    targets = dict(seqs=dec_input, seqids=dec_seqids, tokids=dec_tokids)
-
-    # print(f'{query_toks.shape=}, {dec_input.shape=}')
-    pred_toks = mod.apply(params, rng_key, inputs, targets, hps.temperature) 
+    pred_toks = mod.apply(params, rng_key, query_toks, hps.max_target_len, hps.temperature)
     print(pred_toks)
     pred_sentences = data.de_tokenize(pred_toks, special_toks)
     print('\n'.join(pred_sentences))

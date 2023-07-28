@@ -3,22 +3,19 @@ import numpy as np
 import tensorflow as tf
 from aiayn import data
 
-def main(token_info_file, data_path, num_samples, swap_source_target):
-    token_info = np.load(token_info_file)
-    dataset = data.main_dataset(data_path, token_info, 100, num_samples,
-            swap_source_target, 1000)
-    it = iter(dataset)
-    encs, decs, _, _ = next(iter(dataset))
+def main(data_dir, data_glob, num_samples, swap_pairs, seed):
+    data.set_config(data_dir=data_dir)
+    data.set_config(tokenizer='gpt2_tokenizer')
+    toks_ds = data.load_tfrecord_dataset(data_glob, swap_pairs)
+    toks_ds = toks_ds.shuffle(100000, seed)
+    it = toks_ds.as_numpy_iterator()
 
-    special_toks = { 
-            token_info['eos'].item(): '<EOS>',
-            token_info['bos'].item(): '<BOS>',
-            token_info['mask'].item(): '<MASK>'
-            }
-    encs = data.de_tokenize(encs, special_toks)
-    decs = data.de_tokenize(decs, special_toks)
-    for enc, dec in zip(encs, decs):
-        print(f'{enc}\n{dec}\n\n')
+    for _ in range(num_samples):
+        item = next(it) 
+        encs = data.de_tokenize(item['inputs'][None,:], {})
+        decs = data.de_tokenize(item['targets'][None,:], {})
+        for enc, dec in zip(encs, decs):
+            print(f'{enc}\n{dec}\n\n')
 
 if __name__ == '__main__':
     fire.Fire(main)

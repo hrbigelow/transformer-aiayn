@@ -49,3 +49,4 @@ class DatasetCheckpointHandler(orbax.checkpoint.CheckpointHandler):
     def structure(self, directory: epath.Path) -> Any:
         """Unimplemented. See parent class."""
         return NotImplementedError
+
