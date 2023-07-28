@@ -113,17 +113,20 @@ class MultiHeadAttention(hk.Module):
         wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
         query = jnp.einsum('hmd,bm->bhd', wq, next_input)
-        key = jnp.einsum('hmd,bm->bhd', wk, next_input)
-        val = jnp.einsum('hmd,bm->bhd', wv, next_input)
-        
+        wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
+        kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, next_input)
+
+        if self.self_attn:
+            kv_next_unsq = kv_next[None,:,:,:,None,:]
+            kvcache = jax.lax.dynamic_update_slice(kvcache, kv_next_unsq, (layer,0,0,0,step,0))
+            C = kvcache.shape[4]
+            mask = jnp.greater(jnp.arange(C), step).astype(jnp.int32)
+
         logit = jnp.einsum('bhd,bhtd->bht', query, kvcache[layer,:,:,0,:,:])
 
         if self.self_attn:
-            kvcache = kvcache.at[layer,:,:,0,step,:].set(key)
-            kvcache = kvcache.at[layer,:,:,1,step,:].set(val)
-            C = kvcache.shape[4]
-            mask = jnp.greater(jnp.arange(C), step).astype(jnp.int32)
             logit = logit + mask * -1e6
+            # jax.debug.print('step {}, logit: {}', step, logit[0])
 
         att = jax.nn.softmax(logit * self.scale_factor ** -1, axis=2)
         pre = jnp.einsum('bht,bhtd->bhd', att, kvcache[layer,:,:,1])
@@ -424,9 +427,9 @@ class Decoder(hk.Module):
         scaled_emb_mat = self.embed_mat() * self.scale_factor
 
         dec_pred = jnp.empty((B, Q), dtype=jnp.int32)
+        dec_pred = dec_pred.at[:,0].set(self.bos_id)
         dec_tokids = jnp.reshape(jnp.tile(jnp.arange(Q), B), (B,Q)) 
-        bos_ary = jnp.full((B,1), self.bos_id)
-        bos_embed = self.embed_layer(bos_ary, dec_tokids[:,0:1])
+        bos_embed = self.embed_layer(dec_pred[:,0:1], dec_tokids[:,0:1])
 
         def step_fn(step, val):
             dec_kvcache, dec_pred, next_embed = val
@@ -437,7 +440,6 @@ class Decoder(hk.Module):
             sample = jax.random.categorical(hk.next_rng_key(), logits, axis=2)
             tok_ids = jax.lax.dynamic_slice_in_dim(dec_tokids, step+1, 1, 1)
             next_embed = self.embed_layer(sample, tok_ids) 
-            print(next_embed.shape)
             dec_pred = jax.lax.dynamic_update_slice(dec_pred, sample, (0,step+1))
             return dec_kvcache, dec_pred, next_embed
 

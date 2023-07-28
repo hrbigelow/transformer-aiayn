@@ -3,13 +3,13 @@
 An original implementation of the paper [Attention is All You
 Need](https://arxiv.org/pdf/1706.03762.pdf) by Vaswani et al.
 
-![Loss (Conditional KL-Divergence in bits](assets/jul18-loss-40k.png)
+![Loss (Conditional KL-Divergence in bits](assets/jul25-loss-35k.png)
 
-Shown above is a training run for about half of an epoch.  batch size 50,000 (number
+Shown above is a training run for about 6 epochs.  batch size 60,000 (number
 of input plus output tokens) on the whole (4.5M samples) WMT-14 database.  720
 sentence-pairs in each batch, 62500 steps per epoch. Training is on TPU.
 
-![Perplexity](assets/jul18-ppl-40k.png)
+![Perplexity](assets/jul25-ppl-35k.png)
 
 Perplexity here is computed as 2 ^ entropy, given for both model (red) and dataset
 (green).

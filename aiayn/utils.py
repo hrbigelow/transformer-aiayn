@@ -12,7 +12,7 @@ class DatasetCheckpointHandler(orbax.checkpoint.CheckpointHandler):
     def __init__(self, checkpoint_filename: str):
         self._checkpoint_filename = checkpoint_filename
 
-    def save(self, directory: epath.Path, item: tf.data.Iterator):
+    def save(self, directory: epath.Path, item: ):
         """Saves the given item.
 
           Args:

@@ -1,4 +1,5 @@
 import fire
+import sys
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -7,7 +8,7 @@ from aiayn import model, data, hparams
 import pdb
 
 
-def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
+def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
         print_special_toks, hps_keys: str = 'arch,reg,data,sample', 
         **hps_overrides
         ):
@@ -36,23 +37,29 @@ def main(query, ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     print('Restored model from checkpoint')
 
     rng_key = jax.random.PRNGKey(hps.random_seed)
-    print('Got random key')
-    query_toks = data.tokenize(query)
-    query_toks = jnp.repeat(query_toks[None,:], hps.num_sample, axis=0)
-
-    print('Received query:')
-    print(data.de_tokenize(query_toks[0:1,:])[0])
-    bos_id = token_info['bos'].item()
 
     if print_special_toks:
         special_toks = data.get_special_tokens(token_info)
     else:
         special_toks = {}
+    bos_id = token_info['bos'].item()
+    print('Enter text (Ctrl-D to exit)')
 
-    pred_toks = mod.apply(params, rng_key, query_toks, hps.max_target_len, hps.temperature)
-    print(pred_toks)
-    pred_sentences = data.de_tokenize(pred_toks, special_toks)
-    print('\n'.join(pred_sentences))
+    try:
+        while True:
+            query = input('> ')
+            if len(query) == 0:
+                continue
+            query_toks = data.tokenize(query)
+            query_toks = jnp.repeat(query_toks[None,:], hps.num_sample, axis=0)
+            pred_toks = mod.apply(params, rng_key, query_toks, hps.max_target_len, hps.temperature)
+            # print(pred_toks)
+            pred_sentences = data.de_tokenize(pred_toks, special_toks)
+            print('\n'.join(pred_sentences))
+            print('\n')
+    except EOFError:
+        print('Bye')
+        sys.exit(0)
 
 
 if __name__ == '__main__':
