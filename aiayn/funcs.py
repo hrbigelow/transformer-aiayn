@@ -104,9 +104,8 @@ def gather_cache(cache, inds):
     inds = jnp.stack(jnp.broadcast_arrays(jnp.arange(B)[:,None], inds), 2)
     gd = jax.lax.GatherDimensionNumbers((0,3,4,5,6), (1,2), (1,2))
     out = jax.lax.gather(cache, inds, gd, (L,1,1,*cache.shape[3:]))
-    print(f'{out.shape=}')
+    # print(f'{out.shape=}')
     return out
-
 
 
 """
@@ -178,18 +177,24 @@ def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
     xattn = gather_seqs(xattn, k_seq_inds)
     dec_kvcache = gather_cache(dec_kvcache, k_seq_inds)
     live_seqs = live_seqs.at[:,:,step].set(k_tok_inds)
-    jax.debug.print('step: {}, live_seqs:\n{}', step, live_seqs)
+    # jax.debug.print('step: {}, live_seqs:\n{}', step, live_seqs)
 
     any_finished = jnp.any(jnp.equal(k_tok_inds, eos_id))
+    # jax.debug.print('step: {}, any_finished: {}', step, any_finished)
 
     def update_fn(args):
         dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores = args
         tmp_scores = score_fn(step, live_scores, xattn)
         tmp_scores = jnp.where(live_seqs[:,:,step] == eos_id, tmp_scores, -jnp.inf)
-        live_scores = jnp.where(live_seqs[:,:,step] != eos_id, live_scores, -jnp.inf)
         fin_scores = jnp.concatenate((fin_scores, tmp_scores), axis=1)
         fin_scores, fin_inds = jax.lax.top_k(fin_scores, beam_size)
+        fin_seqs = jnp.concatenate((fin_seqs, live_seqs), axis=1)
+        # jax.debug.print('Before gather: step: {}, fin_seqs:\n{}', step, fin_seqs)
         fin_seqs = gather_seqs(fin_seqs, fin_inds)
+        live_scores = jnp.where(live_seqs[:,:,step] != eos_id, live_scores, -jnp.inf)
+        # jax.debug.print('step: {}, fin_inds:\n{}', step, fin_inds)
+        # jax.debug.print('step: {}, fin_scores:\n{}', step, fin_scores)
+        # jax.debug.print('After gather: step: {}, fin_seqs:\n{}', step, fin_seqs)
         return dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores
 
     def passthru_fn(args):

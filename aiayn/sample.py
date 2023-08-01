@@ -27,9 +27,9 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
 
     token_info = data.load_token_info(hps.token_info_file)
     n_vocab = token_info['histo'].shape[0]
-    mask_id = token_info['mask']
-    bos_id = token_info['bos']
-    eos_id = token_info['eos']
+    mask_id = token_info['mask'].item()
+    bos_id = token_info['bos'].item()
+    eos_id = token_info['eos'].item()
     tok_map = dict(bos=bos_id, eos=eos_id, mask=mask_id, n_vocab=n_vocab)
 
     mod = model.make_test_model(hps, tok_map) 
@@ -44,7 +44,6 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
         special_toks = data.get_special_tokens(token_info)
     else:
         special_toks = {}
-    bos_id = token_info['bos'].item()
     print('Enter text (Ctrl-D to exit)')
 
     try:
@@ -56,9 +55,10 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
             query_toks = jnp.repeat(query_toks[None,:], hps.num_sample, axis=0)
             pred_toks = mod.apply(params, rng_key, query_toks, hps.beam_search_alpha,
                     hps.beam_search_beta, hps.beam_size, hps.max_target_len)
-            print(pred_toks)
-            # pred_sentences = data.de_tokenize(pred_toks, special_toks)
-            # print('\n'.join(pred_sentences))
+            # print(pred_toks)
+            print('Inference for batch element 0:')
+            pred_sentences = data.de_tokenize(pred_toks[0], eos_id, special_toks)
+            print('\n'.join(pred_sentences))
             print('\n')
     except EOFError:
         print('Bye')

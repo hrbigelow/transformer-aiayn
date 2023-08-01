@@ -50,7 +50,7 @@ def get_special_tokens(token_info):
             token_info['mask'].item(): '<MASK>'
             }
 
-def de_tokenize(tokens, special_toks={}):
+def de_tokenize(tokens, eos_id, special_toks={}):
     """
     tokens: np array of shape batch, length
     special_toks: map of id => token_string
@@ -60,9 +60,12 @@ def de_tokenize(tokens, special_toks={}):
     idmap = { v: k for k, v in tz.vocab.items() }
     idmap.update(special_toks)
     ans = []
+
+
     for i in range(tokens.shape[0]):
-        tokids = tokens[i]
-        toks = [idmap[el.item()] for el in tokids if el.item() in idmap]
+        tokids = tokens[i].tolist()
+        end = len(tokids) if eos_id not in tokids else tokids.index(eos_id)
+        toks = [idmap[el] for el in tokids[:end] if el in idmap]
         # text = ''.join(idmap[el] for el in toks)
         # toks = tok.convert_ids_to_tokens(toks)
         text = tz.convert_tokens_to_string(toks)

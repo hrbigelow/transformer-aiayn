@@ -108,7 +108,7 @@ sample = Hyperparams(
     num_sample = 10,
     beam_size = 4, # From section 6.1
     beam_search_alpha = 0.6, # From section 6.1 
-    beam_search_beta = 0.0, # Not mentioned in paper (FIXME)
+    beam_search_beta = 0.4, # see https://arxiv.org/pdf/1609.08144.pdf Table 2 
     beam_search_maxlen = 100 
     )
 

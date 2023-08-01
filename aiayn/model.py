@@ -343,9 +343,9 @@ class DecoderLayer(hk.Module):
         xattn:  bt  (cumulative attention on encoder embeddings)
         next_embed: b1m
         """
-        print(f'DecoderLayer::incremental: '
-                f'{enc_kvcache.shape=}, {dec_kvcache.shape=}, '
-                f'{xattn.shape=} {next_embed.shape=}')
+        # print(f'DecoderLayer::incremental: '
+                # f'{enc_kvcache.shape=}, {dec_kvcache.shape=}, '
+                # f'{xattn.shape=} {next_embed.shape=}')
         dec_kvcache, att1 = self.self_att.incremental(layer, step, dec_kvcache, next_embed)
         norm1 = self.norm1(next_embed, att1)
         coeff, att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm1)
@@ -407,32 +407,6 @@ class Decoder(hk.Module):
             kvcache.append(mod.enc_kvcache(enc_out))
         return jnp.stack(kvcache)
 
-    def logits_step(self, enc_kvcache, step, dec_kvcache, xattn, new_toks):
-        """
-        step: token position of new_toks
-        enc_kvcache: lbhstd  (encoder cache precomputed from some input)
-        dec_kvcache: lbhsqd  (decoder cache populated up to q=step-1)
-        xattn: bt
-        new_toks: b  (batch of token ids at position step)
-
-        returns:
-        dec_kvcache, xattn updated with information at position step
-        logits:  for choosing tokens at position step+1
-        """
-        print(f'Decoder::logits_step: '
-                f'{enc_kvcache.shape=} {dec_kvcache.shape=} {xattn.shape=} '
-                f'{new_toks.shape=}')
-        tok_ids = jnp.full_like(new_toks[:,None], step)
-        new_embed = self.embed_layer(new_toks[:,None], tok_ids)
-
-        for layer, mod in enumerate(self.layers):
-            dec_kvcache, xattn, next_embed = mod.incremental(layer, step,
-                    enc_kvcache, dec_kvcache, xattn, new_embed) 
-
-        scaled_emb_mat = self.embed_mat() * self.scale_factor
-        logits = jnp.einsum('bcm,vm -> bcv', new_embed, scaled_emb_mat)
-        return dec_kvcache, xattn, logits 
-
     def infer_simple(self, enc_out, max_gen_length, temperature=1.0):
         """
         Create an inference using direct sampling with temperature.
@@ -481,6 +455,32 @@ class Decoder(hk.Module):
         _, dec_pred, _ = jax.lax.fori_loop(0, Q-1, step_fn, init)
 
         return dec_pred
+
+    def logits_step(self, enc_kvcache, step, dec_kvcache, xattn, new_toks):
+        """
+        step: token position of new_toks
+        enc_kvcache: lbhstd  (encoder cache precomputed from some input)
+        dec_kvcache: lbhsqd  (decoder cache populated up to q=step-1)
+        xattn: bt
+        new_toks: b  (batch of token ids at position step)
+
+        returns:
+        dec_kvcache, xattn updated with information at position step
+        logits:  for choosing tokens at position step+1
+        """
+        # print(f'Decoder::logits_step: '
+                # f'{enc_kvcache.shape=} {dec_kvcache.shape=} {xattn.shape=} '
+                # f'{new_toks.shape=}')
+        tok_ids = jnp.full_like(new_toks[:,None], step)
+        new_embed = self.embed_layer(new_toks[:,None], tok_ids)
+
+        for layer, mod in enumerate(self.layers):
+            dec_kvcache, xattn, new_embed = mod.incremental(layer, step,
+                    enc_kvcache, dec_kvcache, xattn, new_embed) 
+
+        scaled_emb_mat = self.embed_mat() * self.scale_factor
+        logits = jnp.einsum('bcm,vm -> bcv', new_embed, scaled_emb_mat)
+        return dec_kvcache, xattn, logits 
 
     def beam_search(self, enc_out, alpha, beta, beam_size, max_length):
         """
@@ -538,10 +538,10 @@ class Decoder(hk.Module):
         outs = jax.lax.fori_loop(0, max_length, bsearch_loop_fn, inits)
         _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
         jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
-        jax.debug.print('fin_seqs:\n{}', fin_seqs)
-        jax.debug.print('fin_scores:\n{}', fin_scores)
-        jax.debug.print('live_seqs:\n{}', live_seqs)
-        jax.debug.print('live_scores:\n{}', live_scores)
+        # jax.debug.print('Final: fin_seqs:\n{}', fin_seqs)
+        # jax.debug.print('Final: fin_scores:\n{}', fin_scores)
+        # jax.debug.print('Final: live_seqs:\n{}', live_seqs)
+        # jax.debug.print('Final: live_scores:\n{}', live_scores)
         return fin_seqs
 
 
