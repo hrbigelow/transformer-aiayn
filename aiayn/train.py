@@ -7,7 +7,6 @@ import flax
 import orbax.checkpoint
 from orbax.checkpoint import (CheckpointManager, CheckpointManagerOptions, 
         SaveArgs, PyTreeCheckpointer)
-from orbax.checkpoint import checkpoint_utils
 import optax
 import haiku as hk
 import os
@@ -223,7 +222,7 @@ def setup_train(hps, rng_key):
     if hps.resume_ckpt:
         init_state = dict(params=params, opt_state=opt_state)
         shardings = jax.tree_map(lambda x: x.sharding, init_state)
-        restore_args = checkpoint_utils.construct_restore_args(init_state, shardings)
+        restore_args = utils.construct_restore_args(init_state, shardings)
         state = mngr.restore(hps.resume_ckpt, items=init_state, restore_kwargs=
                 {'restore_args': restore_args})
         print(f'Restored from checkpoint {hps.resume_ckpt}')

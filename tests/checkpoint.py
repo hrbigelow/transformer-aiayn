@@ -7,7 +7,7 @@ import pdb
 import orbax
 from orbax.checkpoint import (CheckpointManager, CheckpointManagerOptions, 
         SaveArgs, Checkpointer, PyTreeCheckpointer, PyTreeCheckpointHandler)
-from orbax.checkpoint import type_handlers, checkpoint_utils
+from orbax.checkpoint import type_handlers
 
 def main(ckpt_dir, step):
     hps = hparams.setup_hparams('tiny,reg,train,data,logging', {})
@@ -26,7 +26,7 @@ def main(ckpt_dir, step):
     save_state = dict(params=params, opt_state=opt_state)
 
     shardings = jax.tree_map(lambda x: x.sharding, save_state)
-    restore_args = checkpoint_utils.construct_restore_args(save_state, shardings)
+    restore_args = utils.construct_restore_args(save_state, shardings)
     
     # print('automatically constructed restore_args:\n', restore_args)
     # restore_args = jax.tree_map(
