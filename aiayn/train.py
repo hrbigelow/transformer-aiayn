@@ -7,6 +7,7 @@ import flax
 import orbax.checkpoint
 from orbax.checkpoint import (CheckpointManager, CheckpointManagerOptions, 
         SaveArgs, PyTreeCheckpointer)
+from orbax.checkpoint import checkpoint_utils
 import optax
 import haiku as hk
 import os
@@ -16,7 +17,7 @@ import time
 import sys
 import fire
 import numpy as np
-from aiayn import model, data, hparams, report, funcs, pack
+from aiayn import model, data, hparams, report, utils, funcs, pack
 
 def print_range(pfx, tree):
     def fn(acc, x):
@@ -31,7 +32,7 @@ def make_learning_rate_fn(warmup_steps, M):
     def lr_fn(step):
         factor = jax.lax.min(step ** -0.5, step * warmup_steps ** -1.5)
         new_lr = M ** -0.5 * factor
-        jax.debug.print('step: {}, learn_rate: {}', step, new_lr)
+        # jax.debug.print('step: {}, learn_rate: {}', step, new_lr)
         return new_lr
     return lr_fn
 
@@ -179,9 +180,11 @@ def setup_train(hps, rng_key):
     if repl_batch_size % hps.accum_steps != 0:
         raise RuntimeError(f'{repl_batch_size=} not divisible by {hps.accum_steps=}')
 
-    data.set_config(data_dir=hps.data_dir)
-    token_info = data.load_token_info(hps.token_info_file)
+    # Set up orbax to save/restore custom optax types
+    utils.register_handlers()
 
+    data.set_config(data_dir=hps.data_dir)
+    tok_map = data.load_token_info(hps.token_info_file)
 
     options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
     checkpointer = dict(
@@ -195,44 +198,39 @@ def setup_train(hps, rng_key):
     tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
             eps=hps.adam_eps)
 
-    n_vocab = token_info['histo'].shape[0]
-    mask_id = token_info['mask']
-    bos_id = token_info['bos']
-    tok_map = dict(bos=bos_id, eos=eos_id, mask=mask_id, n_vocab=n_vocab)
-
-    mod = model.make_model(hps, True, tok_map)
-    objective = model.make_objective(hps, token_info)
+    mod = model.make_train_model(hps, tok_map)
+    objective = model.make_objective(hps, tok_map)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx)
 
     initial_step = int(hps.resume_ckpt or 0)
-    bos_id = token_info['bos']
-    eos_id = token_info['eos']
 
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
     token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
-    token_ds = data.add_special_tokens(token_ds, bos_id, eos_id) 
+    token_ds = data.add_special_tokens(token_ds, tok_map['bos'], tok_map['eos']) 
     token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
     pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, -1) 
     dataset = pack_ds.rebatch(hps.batch_dim0)
 
+    # Initialize state de-novo
+    item = next(dataset.as_numpy_iterator())
+    item = jax.tree_map(lambda ten: ten[:1], item)
+    params = mod.init(rng_key, item['inputs'], item['targets'])
+    opt_state = tx.init(params)
+    initial_step = 0
+    
     if hps.resume_ckpt:
-        # state = mngr.restore(hps.resume_ckpt)
-        params = mngr.restore(hps.resume_ckpt)
-        opt_state = tx.init(params)
-        # opt_state = state['opt_state'] 
-        opt_state.count = hps.resume_ckpt
-        # print('restore: ', jax.tree_util.tree_structure(opt_state))
+        init_state = dict(params=params, opt_state=opt_state)
+        shardings = jax.tree_map(lambda x: x.sharding, init_state)
+        restore_args = checkpoint_utils.construct_restore_args(init_state, shardings)
+        state = mngr.restore(hps.resume_ckpt, items=init_state, restore_kwargs=
+                {'restore_args': restore_args})
+        print(f'Restored from checkpoint {hps.resume_ckpt}')
         params = state['params']
+        opt_state = state['opt_state']
+        # print('restore: ', jax.tree_util.tree_structure(opt_state))
         initial_step = hps.resume_ckpt
-    else:
-        item = next(dataset.as_numpy_iterator())
-        item = jax.tree_map(lambda ten: ten[:1], item)
-        params = mod.init(rng_key, item['inputs'], item['targets'])
-        opt_state = tx.init(params)
-        print('opt_state from tx.init(params): ', jax.tree_util.tree_structure(opt_state))
-        initial_step = 0
 
     return update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn
 
@@ -295,8 +293,8 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
             state = flax.jax_utils.unreplicate(state_m)
             state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), state)
-            # mngr.save(step, state, save_kwargs={'save_args': state_save_args})
-            mngr.save(step, state)
+            mngr.save(step, state, save_kwargs={'save_args': state_save_args})
+            # mngr.save(step, state)
             print(f'Saved checkpoint {step=}')
         step += 1
 

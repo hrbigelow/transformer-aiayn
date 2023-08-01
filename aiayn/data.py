@@ -221,7 +221,13 @@ def load_token_info(token_file_name):
     path = os.path.join(data_dir, token_file_name)
     try:
         with tf.io.gfile.GFile(path, 'rb') as file:
-            return np.load(file)
+            z = np.load(file)
+            return dict(
+                    bos=z['bos'].item(),
+                    eos=z['eos'].item(),
+                    mask=z['mask'].item(),
+                    n_vocab=z['histo'].shape[0],
+                    histo=z['histo'])
     except:
         raise RuntimeError(f'Could not load token info file {path}')
 

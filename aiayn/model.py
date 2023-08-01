@@ -694,7 +694,7 @@ def _wrap_haiku(mod_cls, *args):
     # This is convenient if you just want to call the '__call__' method of the module
     def wrapped_fn(*call_args):
         mod = mod_cls(*args)
-        return mod(mod, *call_args)
+        return mod(*call_args)
     return wrapped_fn
 
 def make_train_model(hps, tok_map):
