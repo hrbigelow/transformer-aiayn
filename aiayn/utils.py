@@ -1,52 +1,34 @@
 import jax
 import os
+import optax
 import orbax.checkpoint
 from etils import epath
-from typing import Optional, Any
+from typing import Optional, Any, NamedTuple, List
 import tensorflow as tf
 
-# From https://github.com/google-research/t5x/blob/main/t5x/checkpoints.py#L1889
-class DatasetCheckpointHandler(orbax.checkpoint.CheckpointHandler):
-    """A CheckpointHandler implementation that handles tf.data.Iterator."""
+class NamedTupleHandler(orbax.checkpoint.type_handlers.TypeHandler):
+  def __init__(self, cls):
+    self.cls = cls
 
-    def __init__(self, checkpoint_filename: str):
-        self._checkpoint_filename = checkpoint_filename
+  async def serialize(
+      self,
+      value: NamedTuple,
+      info: orbax.checkpoint.type_handlers.ParamInfo,
+      args: Optional[orbax.checkpoint.SaveArgs] = None) -> List[orbax.checkpoint.future.Future]:
+    # A more sophisticated implementation would make this write asynchronous.
+    (info.path / 'data.txt').write_text(value._asdict())
+    print('got here in serialize')
+    return []
 
-    def save(self, directory: epath.Path, item: ):
-        """Saves the given item.
+  async def deserialize(
+      self,
+      info: orbax.checkpoint.type_handlers.ParamInfo,
+      args: Optional[orbax.checkpoint.RestoreArgs] = None):
+    entries = (info.path / 'data.txt').read_text()
+    return self.cls(**entries)
 
-          Args:
-            directory: save location directory.
-            item: a tf.data.Iterator to be saved.
-        """
-        if jax.process_count() > 1:
-            directory /= f'process_{jax.process_index()}-of-{jax.process_count()}'
-            directory.mkdir(parents=False, exist_ok=False)
-        ckpt = tf.train.Checkpoint(ds=item)
-        ckpt.write(os.fspath(directory / self._checkpoint_filename))
-        # multihost_utils.sync_global_devices('DatasetCheckpointHandler:save')
-
-    def restore(self,
-            directory: epath.Path,
-            item: Optional[tf.data.Iterator] = None) -> tf.data.Iterator:
-        """Restores the given item.
-
-        Args:
-          directory: restore location directory.
-          item: a tf.data.Iterator to be restored. Not Optional
-
-        Returns:
-          a tf.data.Iterator restored from `directory`.
-        """
-        if item is None:
-            raise ValueError('Must provide item to restore')
-        if jax.process_count() > 1:
-            directory /= f'process_{jax.process_index()}-of-{jax.process_count()}'
-        ckpt = tf.train.Checkpoint(ds=item)
-        ckpt.read(os.fspath(directory / self._checkpoint_filename)).assert_consumed()
-        return item
-
-    def structure(self, directory: epath.Path) -> Any:
-        """Unimplemented. See parent class."""
-        return NotImplementedError
+orbax.checkpoint.type_handlers.register_type_handler(optax.ScaleByAdamState,
+        NamedTupleHandler(optax.ScaleByAdamState), override=True)
+orbax.checkpoint.type_handlers.register_type_handler(optax.ScaleByScheduleState,
+        NamedTupleHandler(optax.ScaleByScheduleState), override=True)
 

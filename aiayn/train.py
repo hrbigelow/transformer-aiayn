@@ -182,6 +182,7 @@ def setup_train(hps, rng_key):
     data.set_config(data_dir=hps.data_dir)
     token_info = data.load_token_info(hps.token_info_file)
 
+
     options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
     checkpointer = dict(
             params=PyTreeCheckpointer(),
@@ -197,8 +198,9 @@ def setup_train(hps, rng_key):
     n_vocab = token_info['histo'].shape[0]
     mask_id = token_info['mask']
     bos_id = token_info['bos']
+    tok_map = dict(bos=bos_id, eos=eos_id, mask=mask_id, n_vocab=n_vocab)
 
-    mod = model.make_model(hps, True, n_vocab, bos_id, mask_id)
+    mod = model.make_model(hps, True, tok_map)
     objective = model.make_objective(hps, token_info)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,

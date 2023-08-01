@@ -29,8 +29,10 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     n_vocab = token_info['histo'].shape[0]
     mask_id = token_info['mask']
     bos_id = token_info['bos']
+    eos_id = token_info['eos']
+    tok_map = dict(bos=bos_id, eos=eos_id, mask=mask_id, n_vocab=n_vocab)
 
-    mod = model.make_test_model(hps, n_vocab, bos_id, mask_id) 
+    mod = model.make_test_model(hps, tok_map) 
     mngr = orbax.CheckpointManager(
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()))
     params = mngr.restore(hps.resume_ckpt)
@@ -52,10 +54,11 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
                 continue
             query_toks = data.tokenize(query)
             query_toks = jnp.repeat(query_toks[None,:], hps.num_sample, axis=0)
-            pred_toks = mod.apply(params, rng_key, query_toks, hps.max_target_len, hps.temperature)
-            # print(pred_toks)
-            pred_sentences = data.de_tokenize(pred_toks, special_toks)
-            print('\n'.join(pred_sentences))
+            pred_toks = mod.apply(params, rng_key, query_toks, hps.beam_search_alpha,
+                    hps.beam_search_beta, hps.beam_size, hps.max_target_len)
+            print(pred_toks)
+            # pred_sentences = data.de_tokenize(pred_toks, special_toks)
+            # print('\n'.join(pred_sentences))
             print('\n')
     except EOFError:
         print('Bye')

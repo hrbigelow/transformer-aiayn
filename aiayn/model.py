@@ -89,11 +89,11 @@ class MultiHeadAttention(hk.Module):
         wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
         return jnp.einsum('hmsd,btm->bhstd', wkv, kvinput)
 
-    def incremental(self, layer, step, kvcache, next_input):
+    def incremental(self, layer, step, kvcache, new_toks):
         """
         kvcache: lbhstd (s=0 means key, s=1 means val)
-        next_input: b1m
-        i: index into kcache and vcache where next_input resides
+        new_toks: b1m
+        i: index into kcache and vcache where new_toks resides
 
         returns a tuple of:
         kvcache (updated at position i)
@@ -101,20 +101,21 @@ class MultiHeadAttention(hk.Module):
         """
         assert isinstance(layer, int), f'{layer=}'
         assert kvcache.ndim == 6, f'{kvcache.shape=}'
-        next_input = next_input[:,0,:]
+        assert new_toks.ndim == 3, f'{new_toks.shape=}'
+        new_toks = new_toks[:,0,:]
 
         kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
-        dtype = next_input.dtype
+        dtype = new_toks.dtype
 
         wq = hk.get_parameter('wq', [self.H,self.M,self.K], dtype, kqv_init)
         wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
         wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
         wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
-        query = jnp.einsum('hmd,bm->bhd', wq, next_input)
+        query = jnp.einsum('hmd,bm->bhd', wq, new_toks)
         wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
-        kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, next_input)
+        kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, new_toks)
 
         if self.self_attn:
             kv_next_unsq = kv_next[None,:,:,:,None,:]
@@ -128,14 +129,16 @@ class MultiHeadAttention(hk.Module):
             logit = logit + mask * -1e6
             # jax.debug.print('step {}, logit: {}', step, logit[0])
 
-        att = jax.nn.softmax(logit * self.scale_factor ** -1, axis=2)
-        pre = jnp.einsum('bht,bhtd->bhd', att, kvcache[layer,:,:,1])
+        coeff = jax.nn.softmax(logit * self.scale_factor ** -1, axis=2)
+        pre = jnp.einsum('bht,bhtd->bhd', coeff, kvcache[layer,:,:,1])
         out = jnp.einsum('hdm,bhd->bm', wo, pre)
+
+        coeff_summary = coeff.sum(axis=1) # sum over heads
 
         if self.self_attn: 
             return kvcache, out[:,None,:]
         else:
-            return out[:,None,:]
+            return coeff_summary, out[:,None,:]
 
 class PositionwiseFF(hk.Module):
     """
@@ -206,14 +209,14 @@ class DropoutAddAndNorm(hk.Module):
         return self.layer_norm(add)
 
 class EmbedMatrix(hk.Module):
-    def __init__(self, T, M):
+    def __init__(self, V, M):
         super().__init__(name='embed_matrix')
-        self.T = T
+        self.V = V
         self.M = M
 
     def __call__(self):
         init = hk.initializers.RandomNormal(1.0, 0.0)
-        return hk.get_parameter('emb', [self.T, self.M], np.float32, init) 
+        return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
 
 class InputEmbedding(hk.Module):
     def __init__(self, embed_mat, pos_factor):
@@ -333,32 +336,37 @@ class DecoderLayer(hk.Module):
         # return bhstd  (s in [0, 1], key or val)
         return self.cross_att.get_keys_values(enc_out)
 
-    def incremental(self, layer, step, enc_kvcache, dec_kvcache, next_embed):
+    def incremental(self, layer, step, enc_kvcache, dec_kvcache, xattn, next_embed):
         """
-        enc_kvcache:  
+        enc_kvcache: lbhstd 
+        dec_kvcache: lbhsqd
+        xattn:  bt  (cumulative attention on encoder embeddings)
         next_embed: b1m
         """
+        print(f'DecoderLayer::incremental: '
+                f'{enc_kvcache.shape=}, {dec_kvcache.shape=}, '
+                f'{xattn.shape=} {next_embed.shape=}')
         dec_kvcache, att1 = self.self_att.incremental(layer, step, dec_kvcache, next_embed)
         norm1 = self.norm1(next_embed, att1)
-        att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm1)
+        coeff, att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm1)
+        xattn = xattn + coeff
         norm2 = self.norm2(norm1, att2)
         ff = self.ff(norm2)
         out = self.norm3(norm2, ff)
-        return dec_kvcache, out
+        return dec_kvcache, xattn, out
 
 class Decoder(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, bos_id, T, pos_enc_factor,
+    def __init__(self, dropout_rate, arch, is_train, tok_map, pos_enc_factor,
             embed_mat=None):
         super().__init__(name='dec')
         self.is_train = is_train
         self.L = arch['L']
         self.H = arch['H']
         self.K = arch['K']
-        self.T = T
-        self.bos_id = bos_id
+        self.tok_map = tok_map
 
         if embed_mat is None:
-            self.embed_mat = EmbedMatrix(T, arch['M']) 
+            self.embed_mat = EmbedMatrix(self.tok_map['n_vocab'], arch['M']) 
         else:
             self.embed_mat = embed_mat
 
@@ -399,6 +407,32 @@ class Decoder(hk.Module):
             kvcache.append(mod.enc_kvcache(enc_out))
         return jnp.stack(kvcache)
 
+    def logits_step(self, enc_kvcache, step, dec_kvcache, xattn, new_toks):
+        """
+        step: token position of new_toks
+        enc_kvcache: lbhstd  (encoder cache precomputed from some input)
+        dec_kvcache: lbhsqd  (decoder cache populated up to q=step-1)
+        xattn: bt
+        new_toks: b  (batch of token ids at position step)
+
+        returns:
+        dec_kvcache, xattn updated with information at position step
+        logits:  for choosing tokens at position step+1
+        """
+        print(f'Decoder::logits_step: '
+                f'{enc_kvcache.shape=} {dec_kvcache.shape=} {xattn.shape=} '
+                f'{new_toks.shape=}')
+        tok_ids = jnp.full_like(new_toks[:,None], step)
+        new_embed = self.embed_layer(new_toks[:,None], tok_ids)
+
+        for layer, mod in enumerate(self.layers):
+            dec_kvcache, xattn, next_embed = mod.incremental(layer, step,
+                    enc_kvcache, dec_kvcache, xattn, new_embed) 
+
+        scaled_emb_mat = self.embed_mat() * self.scale_factor
+        logits = jnp.einsum('bcm,vm -> bcv', new_embed, scaled_emb_mat)
+        return dec_kvcache, xattn, logits 
+
     def infer_simple(self, enc_out, max_gen_length, temperature=1.0):
         """
         Create an inference using direct sampling with temperature.
@@ -418,7 +452,7 @@ class Decoder(hk.Module):
         logits_step: bm     (prediction logits for step)
         """
         B, _, M = enc_out.shape
-        L, H, K, T = self.L, self.H, self.K, self.T
+        L, H, K, V = self.L, self.H, self.K, self.tok_map['n_vocab']
         S = 2 # channels for key and value
         Q = max_gen_length
 
@@ -427,7 +461,7 @@ class Decoder(hk.Module):
         scaled_emb_mat = self.embed_mat() * self.scale_factor
 
         dec_pred = jnp.empty((B, Q), dtype=jnp.int32)
-        dec_pred = dec_pred.at[:,0].set(self.bos_id)
+        dec_pred = dec_pred.at[:,0].set(self.tok_map['bos'])
         dec_tokids = jnp.reshape(jnp.tile(jnp.arange(Q), B), (B,Q)) 
         bos_embed = self.embed_layer(dec_pred[:,0:1], dec_tokids[:,0:1])
 
@@ -448,22 +482,81 @@ class Decoder(hk.Module):
 
         return dec_pred
 
+    def beam_search(self, enc_out, alpha, beta, beam_size, max_length):
+        """
+        Inputs:
+        enc_out: btm  (output embedding from encoder)  
+
+        See funcs.beam_search_step for details
+        """
+        B, C, M = enc_out.shape
+        L, H, K, V = self.L, self.H, self.K, self.tok_map['n_vocab']
+        O, E = beam_size, 2 * beam_size
+        S = 2 # channels for key and value
+        Q = max_length
+
+        enc_kvcache = self.enc_kvcache(enc_out)
+        enc_kvcache = jnp.repeat(enc_kvcache, E, 1)
+        beam_step_fn = functools.partial(funcs.beam_search_step, self.tok_map['eos'],
+                alpha, beta, beam_size)
+        logits_fn = functools.partial(self.logits_step, enc_kvcache)
+
+        def bsearch_loop_fn(step, args):
+            """
+            all loop variables are populated in [:step]
+            live_seqs, live_scores are populated in [:step+1]
+            Returns: updated version of args
+            """
+            dec_kvcache, xattn, live_seqs, *rest = args
+            new_toks = jax.lax.dynamic_slice_in_dim(live_seqs, step, 1, 2).ravel()
+            # fills in next step info for dec_kvcache and xattn, and computes logits
+            dec_kvcache = dec_kvcache.reshape(L,B*E,H,S,Q,K)
+            xattn = xattn.reshape(B*E,C)
+
+            # populates xattn and dec_kvcache at position step
+            # produces logits for position step+1 
+            dec_kvcache, xattn, logits = logits_fn(step, dec_kvcache, xattn, new_toks)
+
+            dec_kvcache = dec_kvcache.reshape(L,B,E,H,S,Q,K)
+            xattn = xattn.reshape(B,E,C)
+            logits = logits.reshape(B,E,V)
+
+            # produces  
+            return beam_step_fn(step+1, logits, dec_kvcache, xattn, live_seqs, *rest)
+
+        # these two are local to the decoding step so have a flattened B*O batch dim
+        dec_kvcache = jnp.empty((L,B,E,H,S,Q,K), dtype=jnp.float32)
+        xattn = jnp.zeros((B,E,C), dtype=jnp.float32)
+
+        live_seqs = jnp.zeros((B,E,Q), dtype=jnp.int32)
+        live_seqs = live_seqs.at[:,0,0].set(self.tok_map['bos'])
+        live_scores = jnp.full((B,E), -jnp.inf)
+        live_scores = live_scores.at[:,0].set(0.0)
+        fin_seqs = jnp.zeros((B,O,Q), dtype=jnp.int32)
+        fin_scores = jnp.full((B,O), -jnp.inf)
+        inits = dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores 
+        outs = jax.lax.fori_loop(0, max_length, bsearch_loop_fn, inits)
+        _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
+        jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
+        jax.debug.print('fin_seqs:\n{}', fin_seqs)
+        jax.debug.print('fin_scores:\n{}', fin_scores)
+        jax.debug.print('live_seqs:\n{}', live_seqs)
+        jax.debug.print('live_scores:\n{}', live_scores)
+        return fin_seqs
+
 
 class Model(hk.Module):
-    def __init__(self, dropout_rate, pos_enc_factor, arch, is_train, n_vocab, bos_id,
-            mask_id):
+    def __init__(self, dropout_rate, pos_enc_factor, arch, is_train, tok_map):
         super().__init__(name='tx')
         self.is_train = is_train
-        self.T = n_vocab 
         self.L = arch['L']  
         self.H = arch['H']
-        self.mask_id = mask_id
-        self.bos_id = bos_id
-        self.embed_mat = EmbedMatrix(self.T, arch['M']) 
+        self.tok_map = tok_map
+        self.embed_mat = EmbedMatrix(self.tok_map['n_vocab'], arch['M']) 
         # self.embed_layer = InputEmbedding(self.embed_mat, pos_enc_factor) 
         self.encoder = Encoder(dropout_rate, arch, is_train, pos_enc_factor,
                 self.embed_mat)
-        self.decoder = Decoder(dropout_rate, arch, is_train, self.bos_id, self.T,
+        self.decoder = Decoder(dropout_rate, arch, is_train, self.tok_map,
                 pos_enc_factor, self.embed_mat)
 
     def batch(self, inputs, targets):
@@ -496,11 +589,35 @@ class Model(hk.Module):
         if self.is_train:
             raise RuntimeError(f'Model.infer_simple called while in training mode')
 
+        B,V = enc_tokens.shape
+        enc_tokids = jnp.reshape(jnp.tile(jnp.arange(V), B), (B,V)) 
+        enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
+        enc_out = self.encoder(enc_tokens, enc_seqids, enc_tokids)
+        return self.decoder.infer_simple(enc_out, max_gen_length, temperature)
+
+    """
+    From the authors of https://arxiv.org/pdf/1609.08144.pdf: 
+
+     Firstly, at each step, we only consider tokens that have local scores that are not
+     more than beamsize below the best token for this step. Secondly, after a normalized
+     best score has been found according to equation 14, we prune all hypotheses that are
+     more than beamsize below the best normalized score so far. The latter type of
+     pruning only applies to full hypotheses because it compares scores in the normalized
+     space, which is only available when a hypothesis ends. This latter form of pruning
+     also has the effect that very quickly no more hypotheses will be generated once a
+     sufficiently good hypothesis has been found, so the search will end quickly
+
+    """
+    def beam_search(self, enc_tokens, alpha, beta, beam_size, max_gen_length):
+        """
+        enc_tokens: bt
+        alpha, beta, beam_size, max_gen_length: parameters for beam search
+        """
         B,T = enc_tokens.shape
         enc_tokids = jnp.reshape(jnp.tile(jnp.arange(T), B), (B,T)) 
         enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
         enc_out = self.encoder(enc_tokens, enc_seqids, enc_tokids)
-        return self.decoder.infer_simple(enc_out, max_gen_length, temperature)
+        return self.decoder.beam_search(enc_out, alpha, beta, beam_size, max_gen_length)
 
     def total_params(self):
         # get total number of parameters
@@ -511,7 +628,7 @@ class Model(hk.Module):
         shape_map = Counter(tuple(par.shape) for par in self.params_dict().values())
         return
 
-    def dec_enc_attention(self, enc_input, dec_input):
+    def dec_enc_attention(self, enc_kvcache, dec_input):
         """
         c, d are lengths in tokens
         enc_input: bc
@@ -541,7 +658,7 @@ class Objective(hk.Module):
         self.bos_id = bos_id
         token_histo = token_histo.astype(jnp.float32)
         self.token_dist = token_histo / jnp.sum(token_histo)
-        self.T = self.token_dist.shape[0]
+        self.V = self.token_dist.shape[0]
         self.eps = smoothing_eps
 
     def __call__(self, dec_input, dec_output_logits):
@@ -560,7 +677,7 @@ class Objective(hk.Module):
 
         # smoothing
         dist = jnp.expand_dims(self.token_dist, (0,1))
-        targets = jax.nn.one_hot(targets, self.T, axis=2)
+        targets = jax.nn.one_hot(targets, self.V, axis=2)
         targets = (1.0 - self.eps) * targets + self.eps * dist 
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
@@ -580,20 +697,20 @@ def _wrap_haiku(mod_cls, *args):
         return mod(mod, *call_args)
     return wrapped_fn
 
-def make_train_model(hps, n_vocab, bos_id, mask_id):
+def make_train_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = hps.dropout_rate, hps.pos_encoding_factor, arch, True, n_vocab, bos_id, mask_id
+    args = hps.dropout_rate, hps.pos_encoding_factor, arch, True, tok_map 
     def wrap_fn(*call_args):
         mod = Model(*args)
         return mod.batch(*call_args)
     return hk.transform(wrap_fn)
 
-def make_test_model(hps, n_vocab, bos_id, mask_id):
+def make_test_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = hps.dropout_rate, hps.pos_encoding_factor, arch, False, n_vocab, bos_id, mask_id
+    args = hps.dropout_rate, hps.pos_encoding_factor, arch, False, tok_map 
     def wrap_fn(*call_args):
         mod = Model(*args)
-        return mod.infer_simple(*call_args)
+        return mod.beam_search(*call_args)
     return hk.transform(wrap_fn)
 
 def make_test_objective(hps, token_info):
