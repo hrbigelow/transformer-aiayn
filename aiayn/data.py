@@ -214,13 +214,9 @@ def save_token_info(token_ds_path, column_num, histo_path):
     h = np.concatenate((h, np.zeros(2)))
     np.savez(histo_path, histo=h.numpy(), bos=bos_id, eos=eos_id, mask=mask_id)
 
-def load_token_info(token_file_name):
-    data_dir = CONFIG.get('data_dir', None)
-    if data_dir is None: 
-        raise RuntimeError(f'Please call data.set_data_dir first')
-    path = os.path.join(data_dir, token_file_name)
+def load_token_info(token_path):
     try:
-        with tf.io.gfile.GFile(path, 'rb') as file:
+        with tf.io.gfile.GFile(token_path, 'rb') as file:
             z = np.load(file)
             return dict(
                     bos=z['bos'].item(),

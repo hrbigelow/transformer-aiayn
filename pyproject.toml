@@ -12,6 +12,7 @@ dependencies = [
   "flax",
   "jax",
   "optax",
+  "orbax-checkpoint",
   "tensorflow",
   "tensorflow-datasets>=4.9.2",
   "dm-haiku @ git+https://github.com/deepmind/dm-haiku",

@@ -182,7 +182,7 @@ def setup_train(hps, rng_key):
     # Set up orbax to save/restore custom optax types
     utils.register_handlers()
 
-    data.set_config(data_dir=hps.data_dir)
+    # data.set_config(data_dir=hps.data_dir)
     tok_map = data.load_token_info(hps.token_info_file)
 
     options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
