@@ -170,8 +170,6 @@ def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
     # jax.debug.print('step: {}, new_scores[0,0]:\n{}', step, new_scores[0,0])
     # jax.debug.print('step: {}, live_scores[0]:\n{}', step, live_scores[0])
     k_seq_inds, k_tok_inds = jnp.divmod(k_prod_inds, V)
-    # jax.debug.print('step: {}, k_seq_inds: {}', step, k_seq_inds)
-    # jax.debug.print('step: {}, k_tok_inds: {}', step, k_tok_inds)
     # Could skip these gather steps if k_seq_inds is the same set as arange(E)
     live_seqs = gather_seqs(live_seqs, k_seq_inds)
     xattn = gather_seqs(xattn, k_seq_inds)
@@ -192,8 +190,6 @@ def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
         # jax.debug.print('Before gather: step: {}, fin_seqs:\n{}', step, fin_seqs)
         fin_seqs = gather_seqs(fin_seqs, fin_inds)
         live_scores = jnp.where(live_seqs[:,:,step] != eos_id, live_scores, -jnp.inf)
-        # jax.debug.print('step: {}, fin_inds:\n{}', step, fin_inds)
-        # jax.debug.print('step: {}, fin_scores:\n{}', step, fin_scores)
         # jax.debug.print('After gather: step: {}, fin_seqs:\n{}', step, fin_seqs)
         return dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores
 
@@ -223,90 +219,4 @@ def beam_search_score(alpha, beta, out_len, scores, xattn):
     lp = numer / denom
     cp = beta * jnp.log(jnp.minimum(xattn, 1.0)).sum(axis=2)
     return scores / lp + cp
-
-def extend_paths(i, model, enc_seq, live_seq, live_logprob):
-    """
-    Computes the conditional log probability of each possible final token conditioned
-    on all previously generated decoder sequence and the encoder sequence.
-
-    i: new sequence position index to create prediction for
-    model: conditional model log P(token | prev_seq, encoder_seq)
-    live_seq: [batch_size, beam_size, max_seq_len]
-       token sequences predicted by the decoder so far
-       live_seq[:,:,:i] are populated, while the rest are filled with a PAD token
-    live_logprob: [batch_size, beam_size]
-    Returns:
-    ext_logprob: [batch_size, beam_size, num_tokens]
-    """
-    log_prob = model(enc_seq, live_seq)
-    return live_logprob * log_prob[:,i,:].unsqueeze(1)
-
-
-def topk_seqs(seqs, scores, k):
-    """
-    seqs: [batch_size, other, context_size]
-    scores: [batch_size, other]
-
-    Return the top-k scoring seqs and scores for each batch
-    """
-    top_scores, inds = tf.topk(scores, k, dim=1)
-    top_seqs = gather_nd(seqs, inds, axes=(1,))
-    return top_seqs, top_scores
-
-"""
-Indices Legend:
-    b: batch
-    o: buffer (2 * beam_size)
-    e: beam (beam_size)
-    v: vocab (tokens)
-    q: query position (in the token sequence)
-"""
-
-def merge_extended(i, eos_id, model, ext_seq, ext_logprob, complete_seq,
-        complete_scores, k):
-    """
-    ext_seq: boq
-    ext_logprob: bo
-    complete_seq: beq
-    complete_scores: be
-
-    Identifies the subset of ext_seq that end in EOS
-    Computes length-normalized scores for those sequences
-    Takes top k among the newly completed sequences and existing complete_seq
-    Returns:
-
-    merged_seq [batch_size, beam_size, max_seq_len]
-    merged_scores [batch_size, beam_size]
-    """
-    current_seqlen = i + 1
-    # compute adjusted scores for all ext_seq
-    dec_enc_att = model.dec_enc_attention()
-    ext_score = adjusted_score(alpha, beta, current_seqlen, ext_logprob, dec_enc_att)
-    ext_score = jnp.where(ext_seq[:,:,i] == eos_id, -tf.inf, ext_score)
-    # need to pad complete_seq
-
-    # batch_size, 3*beam_size
-    all_seq = jnp.concatenate((ext_seq, complete_seq), axis=1)
-    all_score = jnp.concatenate((ext_score, complete_score), axis=1)
-    new_seq, new_score = topk_seqs(all_seq, all_score, k)
-    return new_seq, new_score
-
-def beam_search(model, alpha, beta, beam_size, max_length, enc_input):
-    """
-    """
-    # initialize
-    batch_size = enc_input.shape[0]
-    live_seq = t.full(batch_size, 2*beam_size, max_length, pad_token_id)
-    live_logprob = t.full(live_seq.shape[:2], 0.0)
-
-    complete_seq = t.full((batch_size, beam_size, max_length), pad_token_id)
-    complete_score = t.full(complete_seq.shape[:2], 0.0)
-
-    for i in range(max_length):
-        ext_logprob = extend_paths(i, model, enc_input, live_seq, live_logprob)
-        ext_seq, ext_logprob = topk_seqs(live_seq, ext_logprob, 2*beam_size)
-        complete_seq, complete_score = \
-            merge_extended(i, model, ext_seq, ext_logprob, complete_seq,
-                    complete_score, beam_size)
-    return complete_seq, complete_score
 
