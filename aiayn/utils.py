@@ -50,7 +50,7 @@ def construct_restore_args(target, sharding_tree, set_global_shape=True):
         if isinstance(value, jax.Array):
             return type_handlers.ArrayRestoreArgs(
                     restore_type=restore_type,
-                    sharding=sharding,
+                    # sharding=sharding,
                     global_shape=value.shape if set_global_shape else None,
                     dtype=value.dtype
           )

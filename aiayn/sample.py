@@ -25,17 +25,13 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
     print('Running with parameters:')
     print(hps)
 
-    token_info = data.load_token_info(hps.token_info_file)
-    n_vocab = token_info['histo'].shape[0]
-    mask_id = token_info['mask'].item()
-    bos_id = token_info['bos'].item()
-    eos_id = token_info['eos'].item()
-    tok_map = dict(bos=bos_id, eos=eos_id, mask=mask_id, n_vocab=n_vocab)
+    tok_map = data.load_token_info(hps.token_info_file)
 
     mod = model.make_test_model(hps, tok_map) 
     mngr = orbax.CheckpointManager(
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()))
-    params = mngr.restore(hps.resume_ckpt)
+    state = mngr.restore(hps.resume_ckpt)
+    params = state['params']
     print('Restored model from checkpoint')
 
     rng_key = jax.random.PRNGKey(hps.random_seed)
@@ -57,7 +53,7 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
                     hps.beam_search_beta, hps.beam_size, hps.max_target_len)
             # print(pred_toks)
             print('Inference for batch element 0:')
-            pred_sentences = data.de_tokenize(pred_toks[0], eos_id, special_toks)
+            pred_sentences = data.de_tokenize(pred_toks[0], tok_map['eos'], special_toks)
             print('\n'.join(pred_sentences))
             print('\n')
     except EOFError:
