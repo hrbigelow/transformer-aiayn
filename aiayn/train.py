@@ -186,10 +186,6 @@ def setup_train(hps, rng_key):
     tok_map = data.load_token_info(hps.token_info_file)
 
     options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
-    checkpointer = dict(
-            params=PyTreeCheckpointer(),
-            opt_state=PyTreeCheckpointer(),
-            rng=PyTreeCheckpointer())
     checkpointer = PyTreeCheckpointer()
     mngr = CheckpointManager(hps.ckpt_dir, checkpointer, options)
 

@@ -34,8 +34,8 @@ def main(ckpt_dir, step):
 
     state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), save_state)
     # print('restore_args: ', restore_args)
-    # mngr = CheckpointManager(ckpt_dir, Checkpointer(PyTreeCheckpointHandler()))
-    mngr = CheckpointManager(ckpt_dir, PyTreeCheckpointer())
+    mngr = CheckpointManager(ckpt_dir, Checkpointer(PyTreeCheckpointHandler()))
+    # mngr = CheckpointManager(ckpt_dir, PyTreeCheckpointer())
     mngr.save(step, save_state, save_kwargs={'save_args': state_save_args})
     # mngr.save(step, save_state)
     # restore_args = jax.tree_util.tree_map(lambda item:
