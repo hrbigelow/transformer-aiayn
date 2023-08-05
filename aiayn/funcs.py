@@ -161,6 +161,7 @@ def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
     """
     jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
     score_fn = functools.partial(beam_search_score, alpha, beta)
+    # jax.debug.print('step {}, xattn: {}', step, xattn)
 
     V = logits.shape[2]
     B,E,Q = live_seqs.shape
@@ -214,9 +215,35 @@ def beam_search_score(alpha, beta, out_len, scores, xattn):
     Author's note:
     When alpha = 0 and beta = 0, decoder falls back to pure beam search by probability
     """
+    print(f'beam_search_score: {alpha=}, {beta=}')
     numer = (5.0 + out_len) ** alpha
     denom = 6.0 ** alpha
     lp = numer / denom
-    cp = beta * jnp.log(jnp.minimum(xattn, 1.0)).sum(axis=2)
+    sum_log_attn = jnp.log(jnp.minimum(xattn, 1.0)).sum(axis=2)
+    # jax.debug.print('sum_log_attn:\n{}', sum_log_attn)
+    cp = beta * sum_log_attn 
     return scores / lp + cp
+
+
+def input_attn(score_model, params, enc_embed, enc_seqids, dec_seqs):
+    """
+    Compute magnitude of influence each input position has on the probability
+    assigned to the decoder sequences
+
+    score_model: create from model.make_score_model
+    enc_embed: btm (as output from encoder.embed_layer)
+    enc_seqids: bt (ids of each sequence, or -1 if masked
+    dec_seqs: bq 
+
+    Returns:
+    norms of gradients of embedding vectors w.r.t. log prob
+    """
+
+    B, _ = enc_seqids.shape
+
+    primal, vjp_fn = jax.vjp(score_model.apply, params, enc_embed, enc_seqids, dec_seqs)
+    out_grads = jnp.ones((B,), dtype=jnp.float32)
+    _, _, enc_embed_grad, _, _ = vjp_fn(out_grads)
+    return jnp.sqrt(jnp.power(enc_embed_grad, 2).sum(axis=2))
+
 

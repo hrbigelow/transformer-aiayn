@@ -13,6 +13,7 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
         **hps_overrides
         ):
 
+    jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
     opts = { 
             'ckpt_dir': ckpt_dir, 
             'resume_ckpt': resume_ckpt, 
@@ -49,12 +50,14 @@ def main(ckpt_dir, resume_ckpt, tokenizer_name, token_info_file,
                 continue
             query_toks = data.tokenize(query)
             query_toks = jnp.repeat(query_toks[None,:], hps.num_sample, axis=0)
-            pred_toks = mod.apply(params, rng_key, query_toks, hps.beam_search_alpha,
-                    hps.beam_search_beta, hps.beam_size, hps.max_target_len)
-            # print(pred_toks)
-            print('Inference for batch element 0:')
+            pred_toks, pred_scores = mod.apply(params, rng_key, query_toks,
+                    hps.beam_search_alpha, hps.beam_search_beta, hps.beam_size,
+                    hps.max_target_len)
+            pred_scores0 = pred_scores[0].tolist()
+            # print('Inference for batch element 0:')
             pred_sentences = data.de_tokenize(pred_toks[0], tok_map['eos'], special_toks)
-            print('\n'.join(pred_sentences))
+            for score, sentence in zip(pred_scores0, pred_sentences):
+                print(f'{score:0.2f} {sentence}')
             print('\n')
     except EOFError:
         print('Bye')

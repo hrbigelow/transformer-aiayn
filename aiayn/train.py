@@ -331,6 +331,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         enc_feed_forward = r'encoder.body.(\d+).ff..*'
         )
     """
+    jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
     hps = hparams.setup_hparams(hps_keys, hps_overrides)
     print('Now running with parameters:')
     print(hps)
