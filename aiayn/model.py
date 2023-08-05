@@ -768,19 +768,22 @@ class Objective(hk.Module):
                 jnp.not_equal(targets, self.bos_id),
                 jnp.not_equal(targets, -1))
 
-        # smoothing
-        dist = jnp.expand_dims(self.token_dist, (0,1))
+        # bqv
         targets = jax.nn.one_hot(targets, self.V, axis=2)
-        targets = (1.0 - self.eps) * targets + self.eps * dist 
+        targets = (1.0 - self.eps) * targets + self.eps * self.token_dist[None,None,:]
+
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
-        dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
+
+        # dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
         kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
         mean_kldiv = kldiv.mean(where=targets_active)
+
+        cross_entropy = funcs.cross_entropy(targets, dec_pred_logits, 2)
+        mean_cross_entropy = cross_entropy.mean(where=targets_active)
+
         label_entropy = funcs.entropy(targets, axis=2).mean(where=targets_active)
-        model_entropy = funcs.entropy(dec_pred, axis=2).mean(where=targets_active)
-        # TODO: don't return model_entropy, it is wrong
-        return mean_kldiv, label_entropy, model_entropy
+        return mean_kldiv, label_entropy, mean_cross_entropy
 
 
 def _wrap_haiku(mod_cls, *args):

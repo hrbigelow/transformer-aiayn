@@ -35,6 +35,13 @@ def fused_kldiv_softmax(q, p_logits, axis):
     # jax.debug.print("{}", kl) 
     return kl
 
+def cross_entropy(q, p_logits, axis):
+    p_logits = jax.nn.log_softmax(p_logits, axis)
+    log2e = jnp.log2(jnp.exp(1.0))
+    xent = jnp.sum(safe_xy(q, - p_logits), axis)
+    return xent * log2e
+
+
 def gather_nd(value, index, axes):
     """
     value: any shape

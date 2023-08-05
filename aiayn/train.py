@@ -94,8 +94,8 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
             dec_input = targets['seqs']
             dec_output = model.apply(params, dropout_rng, inputs, targets)
             # print_range('dec_output', dec_output)
-            loss, label_ent, model_ent = objective.apply(None, None, dec_input, dec_output)
-            return loss, (label_ent, model_ent)
+            loss, label_ent, cross_ent = objective.apply(None, None, dec_input, dec_output)
+            return loss, (label_ent, cross_ent)
 
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
@@ -278,7 +278,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
         if step > 0 and report_idx % hps.report_every == 0:
             loss = metrics['loss']
             entropy = metrics['entropy']
-            print(f'step {step}, {num_toks=}, model_entropy={entropy[1]:3.2f} loss={loss:3.2f}')
+            print(f'step {step}, {num_toks=}, cross_ent={entropy[1]:3.2f} loss={loss:3.2f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, losses, entropies) 
