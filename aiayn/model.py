@@ -389,7 +389,10 @@ class DecoderLayer(hk.Module):
         return out
 
     def enc_kvcache(self, enc_out):
-        # return bhstd  (s in [0, 1], key or val)
+        """
+        Compute the keys and values of the encoder output for this decoder layer
+        return bhstd  (s in [0, 1], key or val)
+        """
         return self.cross_att.get_keys_values(enc_out)
 
     def incremental(self, layer, step, enc_kvcache, dec_kvcache, xattn, next_embed):
@@ -464,7 +467,10 @@ class Decoder(hk.Module):
         return out
 
     def enc_kvcache(self, enc_out):
-        # return kvcache: lbhstd (s=0 means key, s=1 means val)
+        """
+        Computes the
+        return kvcache: lbhstd (s=0 means key, s=1 means val)
+        """
         kvcache = []
         for mod in self.layers:
             kvcache.append(mod.enc_kvcache(enc_out))
@@ -578,6 +584,7 @@ class Decoder(hk.Module):
         S = 2 # channels for key and value
         Q = max_length
 
+        enc_out = self.xnorm(enc_out)
         enc_kvcache = self.enc_kvcache(enc_out)
         enc_kvcache = jnp.repeat(enc_kvcache, E, 1)
         beam_step_fn = functools.partial(funcs.beam_search_step, self.tok_map['eos'],
@@ -708,8 +715,8 @@ class Model(hk.Module):
         enc_tokids = jnp.reshape(jnp.tile(jnp.arange(T), B), (B,T)) 
         enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
         enc_out = self.encoder(enc_tokens, enc_seqids, enc_tokids)
-        jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[0,:,0:5]\n{}', 
-                enc_out.shape, enc_out[0,:,0:5])
+        # jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[0,:,0:5]\n{}', 
+                # enc_out.shape, enc_out[0,:,0:5])
         return self.decoder.beam_search(enc_out, alpha, beta, beam_size, max_gen_length)
 
     def total_params(self):
