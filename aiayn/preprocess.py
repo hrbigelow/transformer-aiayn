@@ -41,10 +41,12 @@ def write_records(ds, path_template, num_shards, shards=None):
 
     if shards is None:
         shards = range(num_shards)
-
+    chunk_size = len(ds) // num_shards
+    chunks = [(chunk_size * i, chunk_size * (i+1)) for i in shards]
     for shard in shards:
         record_path = path_template.format(shard) 
-        ds_shard = ds.shard(num_shards, shard)
+        beg, end = chunks[shard]
+        ds_shard = ds.skip(beg).take(end - beg)
         with tf.io.TFRecordWriter(record_path, options) as file_writer:
             for t1, t2 in iter(ds_shard):
                 s1 = tf.io.serialize_tensor(t1)
@@ -60,5 +62,5 @@ def write_records(ds, path_template, num_shards, shards=None):
                     )
                 ).SerializeToString()
                 file_writer.write(record_bytes)
-        print(f'Wrote {record_path} of {num_shards}')
+        print(f'Wrote records [{beg}, {end}) to {record_path} of {num_shards} shards')
 
