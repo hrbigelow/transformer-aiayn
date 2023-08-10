@@ -41,48 +41,6 @@ def cross_entropy(q, p_logits, axis):
     xent = jnp.sum(safe_xy(q, - p_logits), axis)
     return xent * log2e
 
-
-def gather_nd(value, index, axes):
-    """
-    value: any shape
-    index: [*dest, d]
-    axes: tuple of d axes into value
-
-    For some setting of the tuple `dest`, index[*dest,:] gives a tuple of d
-    coordinates.  Combining those d coordinates with ':' in the shape of value: 
-
-    addr = index[*dest,:]
-    output[*dest] = value[interp(*addr,:)]
-    """
-    # check `axes` are valid relative to `value` shape
-    # check `index` shape is valid relative to `axes`
-    if any(a not in range(value.ndim) for a in axes):
-        raise RuntimeError(
-            f'axes should all be valid axes into `value`.  Got {axes=}, '
-            f'{value.shape=}')
-    if index.ndim == 0 or index.shape[-1] != len(axes):
-        raise RuntimeError(
-            f'index.shape[0] must equal number of axes.  Got {index.shape=}, '
-            f'{axes=}')
-    if index.dtype.is_floating_point or index.dtype.is_complex:
-        raise RuntimeError(
-            f'index.dtype must be integral.  Got {index.dtype=}')
-
-    # do not check for out-of-bounds?
-    num_axes = len(axes)
-    perm = axes + tuple(i for i in range(value.ndim) if i not in axes)
-    perm_value = value.permute(*perm)
-    num_slice = np.prod(perm_value.shape[:num_axes])
-    slice_shape = perm_value.shape[num_axes:]
-    flat_value = perm_value.reshape(num_slice, *slice_shape)
-    cumul_axes = [np.prod(axes[i+1:], initial=1) for i in range(num_axes)]
-    cumul_axes = tf.constant(cumul_axes, dtype=tf.int64)
-    flat_index = tf.einsum('...k,k->...', index, cumul_axes)
-    out_shape = list(flat_index.shape)
-    flat_result = tf.index_select(flat_value, 0, flat_index.flatten())
-    result = flat_result.reshape(*out_shape, *slice_shape)
-    return result
-
 def gather_seqs(seqs, inds):
     """
     Inputs:
@@ -222,7 +180,7 @@ def beam_search_score(alpha, beta, out_len, scores, xattn):
     Author's note:
     When alpha = 0 and beta = 0, decoder falls back to pure beam search by probability
     """
-    print(f'beam_search_score: {alpha=}, {beta=}')
+    # print(f'beam_search_score: {alpha=}, {beta=}')
     numer = (5.0 + out_len) ** alpha
     denom = 6.0 ** alpha
     lp = numer / denom

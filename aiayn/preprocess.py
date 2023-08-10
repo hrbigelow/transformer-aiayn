@@ -1,11 +1,17 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+import fire
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from transformers import PreTrainedTokenizerFast
 
-def token_dataset(download_dir, split, dataset_name, tokenizer, nproc):
+def token_dataset(download_dir, dataset_name, split, tokenizer, nproc):
     """
     """
-    builder = tfds.builder(f'wmt14_translate/{dataset_name}', data_dir=download_dir)
-    builder.download_and_prepare(download_dir=download_dir)
+    builder = tfds.builder(dataset_name, data_dir=download_dir)
+    # the download_dir argument of download_and_prepare seems to be ignored in favor
+    # of tfds.builder(data_dir=...)
+    builder.download_and_prepare()
     ds = builder.as_dataset(split=split, shuffle_files=True)
     ds_info = builder.info
 
@@ -36,8 +42,8 @@ def write_records(ds, path_template, num_shards, shards=None):
     """
     options = tf.io.TFRecordOptions(
             compression_type=None,
-            input_buffer_size=1000000,
-            output_buffer_size=1000000)
+            input_buffer_size=100000,
+            output_buffer_size=100000)
 
     if shards is None:
         shards = range(num_shards)
@@ -63,4 +69,17 @@ def write_records(ds, path_template, num_shards, shards=None):
                 ).SerializeToString()
                 file_writer.write(record_bytes)
         print(f'Wrote records [{beg}, {end}) to {record_path} of {num_shards} shards')
+
+def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards, out_template):
+    """
+    Write a tfrecord dataset to out_template (must contain '{}') 
+    """
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
+    print('Preparing dataset')
+    ds, _ = token_dataset(download_dir, dataset_name, split, tokenizer, nproc)
+    print('Writing tfrecords')
+    write_records(ds, out_template, num_shards) 
+
+if __name__ == '__main__':
+    fire.Fire(main)
 

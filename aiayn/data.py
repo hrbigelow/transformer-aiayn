@@ -39,9 +39,15 @@ def set_config(**kwargs):
     global CONFIG 
     CONFIG.update(kwargs)
 
-def tokenize(query):
-    tokenizer = get_tokenizer()
-    return jnp.array(tokenizer(query)['input_ids'])
+def tokenize(tokenizer, queries, pad_value):
+    """
+    queries
+    """
+    toks = tokenizer(queries)['input_ids']
+    max_len = max(len(l) for l in toks)
+    toks = [ l + [pad_value] * (max_len - len(l)) for l in toks]
+    return jnp.array(toks, dtype=jnp.int32)
+
 
 def get_special_tokens(token_info):
     return { 
@@ -50,17 +56,16 @@ def get_special_tokens(token_info):
             token_info['mask'].item(): '<MASK>'
             }
 
-def de_tokenize(tokens, eos_id, special_toks={}):
+def de_tokenize(tokenizer, tokens, eos_id, special_toks={}):
     """
-    tokens: np array of shape batch, length
-    special_toks: map of id => token_string
+    tokenizer: must have eos_token_id set
+    tokens: np array of shape [batch, length]
+    special_toks: map of id => token_string.  If set, additionally decode these 
     returns: python list of strings
     """
-    tz = get_tokenizer()
-    idmap = { v: k for k, v in tz.vocab.items() }
+    idmap = { v: k for k, v in tokenizer.vocab.items() }
     idmap.update(special_toks)
     ans = []
-
 
     for i in range(tokens.shape[0]):
         tokids = tokens[i].tolist()
@@ -68,7 +73,7 @@ def de_tokenize(tokens, eos_id, special_toks={}):
         toks = [idmap[el] for el in tokids[:end] if el in idmap]
         # text = ''.join(idmap[el] for el in toks)
         # toks = tok.convert_ids_to_tokens(toks)
-        text = tz.convert_tokens_to_string(toks)
+        text = tokenizer.convert_tokens_to_string(toks)
         ans.append(text)
     return ans
 

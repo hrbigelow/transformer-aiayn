@@ -92,17 +92,22 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
         def loss_fn(params, inputs, targets):
             dec_input = targets['seqs']
-            dec_output = model.apply(params, dropout_rng, inputs, targets)
+            dec_output, attn_ent = model.apply(params, dropout_rng, inputs, targets)
             # print_range('dec_output', dec_output)
             loss, label_ent, cross_ent = objective.apply(None, None, dec_input, dec_output)
-            return loss, (label_ent, cross_ent)
+            metrics = dict(
+                    label_entropy=label_ent,
+                    cross_entropy=cross_ent,
+                    attn_entropy=attn_ent)
+            return loss, metrics 
 
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
         # setting accum_steps to 1 results in 
-        l, e, g = accumulate_gradient(lg_fn, step_size, accum_steps, params, inputs, targets)
+        l, metrics, g = accumulate_gradient(lg_fn, step_size, accum_steps, params,
+                inputs, targets)
         # averages l and g across replicas, then broadcasts the average
-        loss, entropy, grad = jax.lax.pmean((l, e, g), axis_name='batch')
+        loss, metrics, grad = jax.lax.pmean((l, metrics, g), axis_name='batch')
 
         # tx.update takes ~6 seconds / 10 steps
         updates, opt_state = tx.update(grad, opt_state)
@@ -115,11 +120,11 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         if with_metrics:
             norms = jax.tree_map(tensor_norm, grad, params, updates)
             state = dict(params=params, opt_state=opt_state, rng=new_rng_key)
-            metrics = dict(loss=loss, entropy=entropy, norms=norms)
+            metrics = {'loss': loss, 'norms': norms, **metrics}
             return state, metrics
         else:
             state = dict(params=params, opt_state=opt_state, rng=new_rng_key)
-            metrics = dict(loss=loss, entropy=entropy)
+            metrics = {'loss': loss, **metrics} 
             return state, metrics
             
     return update_fn
@@ -139,17 +144,41 @@ def make_line_plot(logger, label, steps, vals, palette='Viridis256'):
     plot = jnp.stack((val_steps, vals), axis=2)
     logger.tandem_lines(label, plot, palette)
 
-def log_steps(logger, steps, learn_rate, losses, entropies):
-    make_line_plot(logger, 'loss', steps, losses)
+def log_steps(logger, steps, learn_rate, metrics):
     make_line_plot(logger, 'learn_rate', steps, learn_rate)
-    make_line_plot(logger, 'cond_entropy_bits', steps, entropies, 'RdYlGn8')
-    make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies), 'RdYlGn8')
+    for key, metric in metrics.items():
+        if metric.ndim == 1:
+            make_line_plot(logger, key, steps, metric, 'RdYlGn8')
+        else:
+            make_tandem_plot(logger, key, steps, metric, 'Viridis256')
+    # make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies), 'RdYlGn8')
+
+def make_tandem_plot(logger, key, steps, values, palette):
+    """
+    Create a tandem lines plot with name `key`
+    steps:  b
+    values: bl 
+    b lines, each with l points
+    line i, point p is (steps[i], values[i][p])
+    """
+    steps = jnp.tile(steps[:,None], values.shape[1])
+    plot = jnp.stack((steps, values), axis=2)
+    plot = jnp.transpose(plot, (1,0,2))
+    # jax.debug.print('plot:\n{}', plot) # bl2  
+    logger.tandem_lines(key, plot, palette=palette)
 
 def log_metrics(logger, steps, norms): 
 
+    def make_plot_data(step_data, steps):
+        num_values = step_data.shape[0]
+        val_steps = jnp.repeat(steps[None,:], num_values, axis=0)
+        plot = jnp.stack((val_steps, step_data), axis=2)
+        return plot
+
     def svlog(prefix, label, key, values):
         vals = report.get_layer_values(pfx, values, key)
-        make_plot_data(logger, label, steps, vals)
+        plot = make_plot_data(logger, label, steps, vals)
+        logger.tandem_lines(label, plot, palette='Viridis256')
    
     cats = {
             'enc_att': 'tx/~/enc/~/(layer\d+)/~/att',
@@ -235,15 +264,22 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
 
+    steps = np.empty(hps.report_every)
+    losses = np.empty(hps.report_every)
+    label_entropy = np.empty(hps.report_every)
+    cross_entropy = np.empty(hps.report_every)
+    attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
+    learn_rate = np.empty(hps.report_every)
+    report_metrics = dict(
+            loss=losses,
+            label_entropy=label_entropy,
+            cross_entropy=cross_entropy,
+            attn_entropy=attn_entropy)
+
     if hps.with_metrics: 
         names = ('grad', 'param', 'update')
         fn = lambda x: { l: np.empty(hps.report_every) for l in names } 
         norms = jax.tree_map(fn, params)
-
-    steps = np.empty(hps.report_every)
-    losses = np.empty(hps.report_every)
-    entropies = np.empty((hps.report_every, 2)) # data, model
-    learn_rate = np.empty(hps.report_every)
 
     # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
     update_fn_m = jax.pmap(update_fn, axis_name='batch')
@@ -267,8 +303,9 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
 
         report_idx = step % hps.report_every
         steps[report_idx] = step
-        losses[report_idx] = metrics['loss']
-        entropies[report_idx] = metrics['entropy']
+        for key, metric in metrics.items():
+            if key in report_metrics:
+                report_metrics[key][report_idx] = metric
         learn_rate[report_idx] = learn_rate_fn(step + 1)
 
         if hps.with_metrics:
@@ -276,12 +313,13 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
             norms = jax.tree_map(fn, norms, metrics['norms'])
 
         if step > 0 and report_idx % hps.report_every == 0:
-            loss = metrics['loss']
-            entropy = metrics['entropy']
-            print(f'step {step}, {num_toks=}, cross_ent={entropy[1]:3.2f} loss={loss:3.2f}')
+            loss = report_metrics['loss'][report_idx]
+            ce = report_metrics['cross_entropy'][report_idx]
+            print(f'step {step}, {num_toks=}, cross_ent={ce:3.2f} loss={loss:3.2f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
-            log_steps(logger, steps, learn_rate, losses, entropies) 
+            log_steps(logger, steps, learn_rate, report_metrics) 
+            # jax.debug.print('report:\n{}', report_metrics)
             if hps.with_metrics:
                 log_metrics(logger, steps, norms)
 

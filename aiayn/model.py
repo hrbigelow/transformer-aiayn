@@ -4,6 +4,7 @@ import re
 import numpy as np
 from . import hparams
 from . import funcs
+from . import data
 import pdb
 import jax
 import jax.numpy as jnp
@@ -14,7 +15,7 @@ class MultiHeadAttention(hk.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, is_self_attn, H, M, K, V):
+    def __init__(self, is_self_attn, H, M, K, V, with_attn_entropy=False):
         super().__init__(name='att')
         self.H = H
         self.M = M
@@ -24,6 +25,7 @@ class MultiHeadAttention(hk.Module):
         self.vscale = np.sqrt(self.V) ** -1
         self.scale_factor = np.sqrt(self.K)
         self.self_attn = is_self_attn
+        self.with_attn_entropy = with_attn_entropy
 
     def __call__(self, qinput, kvinput, qmask, tmask, qtmask):
         """
@@ -65,14 +67,32 @@ class MultiHeadAttention(hk.Module):
         key = jnp.einsum('hmd,btm->bhtd', wk, kvinput)
         val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
         
-        logit_adj = jnp.expand_dims(logits_mask, 1) * -1e6
+        logit_adj = logits_mask[:,None,:,:] * -1e6
         alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
         att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3)
+
+        # compute marginal entropy
+        if self.with_attn_entropy:
+            occu = 1 - logits_mask # bqt
+            row_occu = jnp.sum(occu, axis=2, keepdims=True)[:,None,:,:] # bhqt
+            target_marg = jnp.sum(att * row_occu, axis=(1,2)) # bt
+            target_sum = jnp.sum(target_marg, axis=(1,), keepdims=True) # bt
+            target_norm = target_marg / target_sum
+            target_entr = funcs.entropy(target_norm, axis=1)
+            c = jnp.sum(jnp.max(occu, axis=1), axis=1) # b
+            # jax.debug.print('target_norm[0]:{}\n', target_norm[0])
+            scaled_entr = target_entr / jnp.log2(c)
+            # jax.debug.print('scaled_entr:\n{}', scaled_entr)
+            # jax.debug.print('c:\n{}', c)
+
         pre = jnp.einsum('bhqt,bhtd->bhqd', att, val)
         out = jnp.einsum('hdm,bhqd->bqm', wo, pre)
         out = out * (1.0 - qmask) # to protect gradients of masked positions
         # jax.debug.print('qinput: {}\nkvinput: {}\n', qinput, kvinput)
-        return out
+        if self.with_attn_entropy:
+            return out, scaled_entr
+        else:
+            return out
 
     def get_keys_values(self, kvinput):
         """
@@ -237,10 +257,10 @@ class InputEmbedding(hk.Module):
         self.embed_mat = embed_mat
         self.pos_factor = pos_factor 
 
-    def positional_embedding(self, seq_positions):
-        # seq_positions: bc
+    def positional_embedding(self, tokids):
+        # tokids: bc
         denom = 10000 ** jnp.linspace(0, 1, self.embed_mat.M)
-        arg = seq_positions[:,:,None] / denom[None,None,:]
+        arg = tokids[:,:,None] / denom[None,None,:]
         # it shouldn't matter what order embeddings are placed but here I follow
         # the paper, and alternate sin with cos
         pos_emb = jnp.empty_like(arg)
@@ -248,20 +268,22 @@ class InputEmbedding(hk.Module):
         pos_emb = pos_emb.at[:,1::2].set(jnp.cos(arg[:,1::2]))
         return pos_emb
 
-    def __call__(self, seq_tokens, seq_positions):
+    def __call__(self, seq_tokens, tokids):
         """
         seq_tokens: bc (end-to-end packed tokens from sentences)
-        seq_positions: bc (ids identifying position of token in a sentence)
+        tokids: bc (ids identifying position of token in a sentence, or -1 if masked)
         output: bcm
         """
-        pos_embed = self.positional_embedding(seq_positions)
+        pos_embed = self.positional_embedding(tokids)
         # jax.debug.print('pos_factor: {}, pos_embed[0]:\n{}', self.pos_factor, pos_embed[0])
-        # jax.debug.print('seq_positions: {}', seq_positions[0])
+        # jax.debug.print('tokids: {}', tokids[0])
         embed = jnp.take(self.embed_mat(), seq_tokens, axis=0)
+        embed = jnp.where(jnp.equal(tokids, -1)[:,:,None], 0, embed)
         
         # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
         # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
         return embed + pos_embed * self.pos_factor
+
 
 class EncoderLayer(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, layer_num):
@@ -270,7 +292,7 @@ class EncoderLayer(hk.Module):
         self.layer_num = layer_num
         self.is_train = is_train
         self.dropout_rate = dropout_rate
-        self.att = MultiHeadAttention(True, H, M, K, V)
+        self.att = MultiHeadAttention(True, H, M, K, V, True)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
         self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
         self.ff = PositionwiseFF(M, F)
@@ -280,7 +302,9 @@ class EncoderLayer(hk.Module):
         input: btm
         position_mask: bt
         qt_mask: bqt
-        returns: bqm
+        returns: 
+        output_embedding: bqm
+        attn_entropy: b
 
         Architecture is the pre-LN Layer as described in https://arxiv.org/pdf/2002.04745.pdf
         but with additional dropout added in the same position as in https://arxiv.org/abs/1706.03762
@@ -289,7 +313,7 @@ class EncoderLayer(hk.Module):
         embeddings (all embedding vectors at every position were nearly identical)
         """
         norm1 = self.norm1(input)
-        att = self.att(norm1, norm1, position_mask, position_mask, qt_mask)
+        att, attn_entropy = self.att(norm1, norm1, position_mask, position_mask, qt_mask)
         if self.is_train:
             att = hk.dropout(hk.next_rng_key(), self.dropout_rate, att)
         post_add1 = input + att
@@ -300,7 +324,7 @@ class EncoderLayer(hk.Module):
         out = post_add1 + ff 
         # jax.debug.print('encoder_layer {}: out[0,:,100:110]:\n{}', 
                 # self.layer_num, out[0,:,100:110])
-        return out 
+        return out, attn_entropy
 
 class Encoder(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, embed_mat):
@@ -313,19 +337,24 @@ class Encoder(hk.Module):
         seqs: bt    (tokens)
         seqids: bt  (ids grouping tokens into separate sequences)
         tokids: bt  (-1 is non-sample, >=0 are token ids, i.e. positions within a sentence)
-        returns: bqm
+        returns
+        output embedding: bqm
+        attention entropy: bl
         """
         position_mask = jnp.equal(tokids, -1).astype(jnp.int32)
         qt_mask = jnp.not_equal(seqids[:,None,:], seqids[:,:,None]).astype(jnp.int32)
 
         input_embed = self.embed_layer(seqs, tokids) 
+        # jax.debug.print('input_embed[:,:,0:2]:\n{}', input_embed[:,:,0:2])
         out = input_embed
         # pdb.set_trace()
-        # jax.debug.print('out: {}', out)
+        attn_entropies = []
         for mod in self.layers:
-            out = mod(out, position_mask, qt_mask)
+            out, attn_entropy = mod(out, position_mask, qt_mask)
+            attn_entropies.append(attn_entropy)
         # jax.debug.print('encoder_out: {}', out)
-        return out
+        attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
+        return out, attn_entropy_all
 
     def from_embedding(self, embed, seqids):
         """
@@ -659,10 +688,10 @@ class Model(hk.Module):
         if not self.is_train:
             raise RuntimeError(f'Model.__call__ is only for training')
 
-        enc_output = self.encoder(inputs['seqs'], inputs['seqids'], inputs['tokids'])
+        enc_output, attn_entropy = self.encoder(inputs['seqs'], inputs['seqids'], inputs['tokids'])
         dec_output = self.decoder(enc_output, inputs['seqids'], 
                 targets['seqs'], targets['seqids'], targets['tokids'])
-        return dec_output
+        return dec_output, attn_entropy.mean(axis=0)
 
     def infer_simple(self, enc_tokens, max_gen_length, temperature=1.0):
         """
@@ -706,17 +735,19 @@ class Model(hk.Module):
      sufficiently good hypothesis has been found, so the search will end quickly
 
     """
-    def beam_search(self, enc_tokens, alpha, beta, beam_size, max_gen_length):
+    def beam_search(self, enc_tokens, pad_value, alpha, beta, beam_size, max_gen_length):
         """
-        enc_tokens: bt
+        enc_tokens: bt (tokens, padded with pad_value
         alpha, beta, beam_size, max_gen_length: parameters for beam search
         """
         B,T = enc_tokens.shape
         enc_tokids = jnp.reshape(jnp.tile(jnp.arange(T), B), (B,T)) 
+        enc_tokids = jnp.where(enc_tokens == pad_value, -1, enc_tokids)
+        # jax.debug.print('enc_tokids:\n{}', enc_tokids)
         enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
         enc_out = self.encoder(enc_tokens, enc_seqids, enc_tokids)
-        # jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[0,:,0:5]\n{}', 
-                # enc_out.shape, enc_out[0,:,0:5])
+        # jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[:,0:2,0:2]\n{}', 
+                # enc_out.shape, enc_out[:,0:2,0:2])
         return self.decoder.beam_search(enc_out, alpha, beta, beam_size, max_gen_length)
 
     def total_params(self):
@@ -808,8 +839,9 @@ def make_train_model(hps, tok_map):
         return mod.batch(*call_args)
     return hk.transform(wrap_fn)
 
-def make_test_model(hps, tok_map):
+def make_test_model(hps):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
+    tok_map = data.load_token_info(hps.token_info_file)
     args = hps.dropout_rate, hps.pos_encoding_factor, arch, False, tok_map 
     def wrap_fn(*call_args):
         mod = Model(*args)
