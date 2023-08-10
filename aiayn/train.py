@@ -64,6 +64,13 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
         input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
         target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
         (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices)
+        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
+        # flattened, _ = jax.tree_util.tree_flatten_with_path(nan_grads)
+        # jax.debug.print('nan_grads:\n{}', nan_grads)
+        # flattened = [(jax.tree_util.keystr(k), v) for k, v in flattened]
+        # jax.debug.print('nan_grads:\n{}', nan_grads)
+        # for path, val in flattened:
+            # jax.debug.print('{path}: {}', val, path=jax.tree_util.keystr(path))
         l, e, g = tup
         return (l + li, map_add(e, ei), map_add(g, gi))
 
@@ -94,11 +101,9 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
             dec_input = targets['seqs']
             dec_output, attn_ent = model.apply(params, dropout_rng, inputs, targets)
             # print_range('dec_output', dec_output)
-            loss, label_ent, cross_ent = objective.apply(None, None, dec_input, dec_output)
-            metrics = dict(
-                    label_entropy=label_ent,
-                    cross_entropy=cross_ent,
-                    attn_entropy=attn_ent)
+            metrics = objective.metrics(dec_input, dec_output, attn_ent)
+            # jax.debug.print('bla-metrics:{}', metrics)
+            loss = objective.loss(metrics['kldiv'], metrics['attn_loss'])
             return loss, metrics 
 
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -223,7 +228,8 @@ def setup_train(hps, rng_key):
             eps=hps.adam_eps)
 
     mod = model.make_train_model(hps, tok_map)
-    objective = model.make_objective(hps, tok_map)
+    objective = model.Objective(tok_map['histo'], tok_map['bos'],
+            hps.label_smooth_eps, hps.attn_loss_weight)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx)

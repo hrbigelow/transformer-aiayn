@@ -16,13 +16,19 @@ def safe_xy(x, y):
     safe_y = jnp.where(x_ok, y, 1.)
     return jnp.where(x_ok, lax.mul(safe_x, safe_y), jnp.zeros_like(x))
 
-def entropy(p, axis):
+def entropy(p, axis, where=None):
     """
     Compute entropy in bits along axis
+    p: any shape including at least `axis`
+    where: same shape as p
     """
-    log2e = jnp.log2(jnp.exp(1.0))
-    h_nat = jnp.sum(safe_xy(p, - jnp.log(p)), axis)
-    return h_nat * log2e
+    if where is None:
+        return jnp.sum(p * -jnp.log2(p), axis=axis) 
+    else:
+        assert p.shape == where.shape
+        wp0 = jnp.where(where, p, 0.0)
+        wp1 = jnp.where(where, p, 1.0)
+        return jnp.sum(wp0 * -jnp.log2(wp1), axis=axis)
 
 def fused_kldiv_softmax(q, p_logits, axis):
     # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations

@@ -72,6 +72,7 @@ train = Hyperparams(
     adam_beta2 = 0.98,
     adam_eps = 1e-9,
     label_smooth_eps = 0.1,
+    attn_loss_weight = 0.01,
     warmup_steps = 4000,
     random_seed = 982349820,
     ckpt_every = 5000,

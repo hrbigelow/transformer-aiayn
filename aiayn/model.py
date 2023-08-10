@@ -75,13 +75,18 @@ class MultiHeadAttention(hk.Module):
         if self.with_attn_entropy:
             occu = 1 - logits_mask # bqt
             row_occu = jnp.sum(occu, axis=2, keepdims=True)[:,None,:,:] # bhqt
+            active_cols = jnp.max(occu, axis=1) # bt
             target_marg = jnp.sum(att * row_occu, axis=(1,2)) # bt
             target_sum = jnp.sum(target_marg, axis=(1,), keepdims=True) # bt
             target_norm = target_marg / target_sum
-            target_entr = funcs.entropy(target_norm, axis=1)
-            c = jnp.sum(jnp.max(occu, axis=1), axis=1) # b
-            # jax.debug.print('target_norm[0]:{}\n', target_norm[0])
+            target_entr = funcs.entropy(target_norm, axis=1, where=active_cols)
+            c = jnp.sum(active_cols, axis=1) # b
+
             scaled_entr = target_entr / jnp.log2(c)
+            # scaled_entr = target_entr
+            # jax.debug.print('scaled_entr: nan: {}, inf: {}\n',
+             #        jnp.any(jnp.isnan(scaled_entr)),
+              #       jnp.any(jnp.isinf(scaled_entr)))
             # jax.debug.print('scaled_entr:\n{}', scaled_entr)
             # jax.debug.print('c:\n{}', c)
 
@@ -779,23 +784,24 @@ def predict(self, enc_input):
     seq, score = funcs.beam_search(self, alpha, beta, beam_size, max_length, enc_input)
     return seq
 
-class Objective(hk.Module):
-    def __init__(self, token_histo, bos_id, smoothing_eps=0.1):
+class Objective:
+    def __init__(self, token_histo, bos_id, smoothing_eps=0.1, attn_loss_weight=0):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
-        super().__init__()
         # self.eps = smoothing_eps
         self.bos_id = bos_id
         token_histo = token_histo.astype(jnp.float32)
         self.token_dist = token_histo / jnp.sum(token_histo)
         self.V = self.token_dist.shape[0]
         self.eps = smoothing_eps
+        self.attn_loss_weight = attn_loss_weight
 
-    def __call__(self, dec_input, dec_output_logits):
+    def metrics(self, dec_input, dec_output_logits, attn_entropy):
         """
         dec_input: bq
         dec_output_logits: bqv
+        attn_entropy: bl
         """
         # bc
         targets = dec_input[:,1:]
@@ -816,12 +822,21 @@ class Objective(hk.Module):
         # dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
         kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
         mean_kldiv = kldiv.mean(where=targets_active)
+        attn_entropy_loss = jnp.sum((1.0 - attn_entropy) ** 2) 
 
-        cross_entropy = funcs.cross_entropy(targets, dec_pred_logits, 2)
-        mean_cross_entropy = cross_entropy.mean(where=targets_active)
+        cross_ent = funcs.cross_entropy(targets, dec_pred_logits, 2)
+        mean_cross_ent = cross_ent.mean(where=targets_active)
+        label_ent = funcs.entropy(targets, axis=2).mean(where=targets_active)
+        return dict(
+                kldiv=mean_kldiv, 
+                label_entropy=label_ent,
+                cross_entropy=mean_cross_ent, 
+                attn_entropy=attn_entropy,
+                attn_loss=attn_entropy_loss)
 
-        label_entropy = funcs.entropy(targets, axis=2).mean(where=targets_active)
-        return mean_kldiv, label_entropy, mean_cross_entropy
+    def loss(self, mean_kldiv, attn_entropy_loss):
+        return mean_kldiv + attn_entropy_loss * self.attn_loss_weight
+        # return mean_kldiv 
 
 
 def _wrap_haiku(mod_cls, *args):
@@ -860,11 +875,6 @@ def make_test_objective(hps, token_info):
     histo = token_info['histo']
     mask_id = token_info['mask']
     return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
-
-def make_objective(hps, token_info):
-    histo = token_info['histo']
-    bos_id = token_info['bos']
-    return hk.transform(_wrap_haiku(Objective, histo, bos_id, hps.label_smooth_eps))
 
 def make_grads(cls, inst_args, out_grad, call_args):
     """
