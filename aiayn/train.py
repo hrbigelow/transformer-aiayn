@@ -64,12 +64,9 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
         input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
         target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
         (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices)
-        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
-        got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
+        # nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
+        # got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
         # jax.debug.print('got nan: {}', got_nan)
-        _ = jax.lax.cond(got_nan,
-                lambda: jax.debug.print('one or more nans in nan_grads:\n{}', nan_grads),
-                lambda: None)
         # flattened, _ = jax.tree_util.tree_flatten_with_path(nan_grads)
         # flattened = [(jax.tree_util.keystr(k), v) for k, v in flattened]
         # jax.debug.print('nan_grads:\n{}', nan_grads)
