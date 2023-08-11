@@ -28,7 +28,7 @@ def entropy(p, axis, where=None):
         assert p.shape == where.shape
         wp0 = jnp.where(where, p, 0.0)
         wp1 = jnp.where(where, p, 1.0)
-        return jnp.sum(wp0 * -jnp.log2(wp1), axis=axis)
+        return jnp.sum(safe_xy(wp0, -jnp.log2(wp1)), axis=axis)
 
 def fused_kldiv_softmax(q, p_logits, axis):
     # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations

@@ -65,8 +65,12 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
         target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
         (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices)
         nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
+        got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
+        # jax.debug.print('got nan: {}', got_nan)
+        _ = jax.lax.cond(got_nan,
+                lambda: jax.debug.print('one or more nans in nan_grads:\n{}', nan_grads),
+                lambda: None)
         # flattened, _ = jax.tree_util.tree_flatten_with_path(nan_grads)
-        # jax.debug.print('nan_grads:\n{}', nan_grads)
         # flattened = [(jax.tree_util.keystr(k), v) for k, v in flattened]
         # jax.debug.print('nan_grads:\n{}', nan_grads)
         # for path, val in flattened:
@@ -275,12 +279,15 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     label_entropy = np.empty(hps.report_every)
     cross_entropy = np.empty(hps.report_every)
     attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
+    attn_loss = np.empty(hps.report_every)
     learn_rate = np.empty(hps.report_every)
     report_metrics = dict(
-            loss=losses,
+            kldiv=losses,
             label_entropy=label_entropy,
             cross_entropy=cross_entropy,
-            attn_entropy=attn_entropy)
+            attn_entropy=attn_entropy,
+            attn_loss=attn_loss
+            )
 
     if hps.with_metrics: 
         names = ('grad', 'param', 'update')
@@ -309,9 +316,8 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
 
         report_idx = step % hps.report_every
         steps[report_idx] = step
-        for key, metric in metrics.items():
-            if key in report_metrics:
-                report_metrics[key][report_idx] = metric
+        for key in report_metrics:
+            report_metrics[key][report_idx] = metrics[key]
         learn_rate[report_idx] = learn_rate_fn(step + 1)
 
         if hps.with_metrics:
@@ -319,9 +325,11 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
             norms = jax.tree_map(fn, norms, metrics['norms'])
 
         if step > 0 and report_idx % hps.report_every == 0:
-            loss = report_metrics['loss'][report_idx]
+            loss = report_metrics['kldiv'][report_idx]
+            attn_loss = report_metrics['attn_loss'][report_idx]
             ce = report_metrics['cross_entropy'][report_idx]
-            print(f'step {step}, {num_toks=}, cross_ent={ce:3.2f} loss={loss:3.2f}')
+            print(f'step {step}, {num_toks=}, cross_ent={ce:3.2f} loss={loss:3.2f}'
+                    f' attn_loss={attn_loss:2.4f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, report_metrics) 
