@@ -1,41 +1,35 @@
 FROM tensorflow/tensorflow:latest-gpu
 
-RUN apt update
-RUN yes | apt install git
+RUN apt-get update && \
+    apt-get install -y curl gnupg && \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg  add - && \
+    apt-get update -y && \
+    apt-get install google-cloud-sdk -y
+
+# RUN apt-get -y update
+RUN apt-get -y install git
+
+# COPY pyproject.toml pyproject.toml 
+# RUN python -m piptools compile -o requirements.txt pyproject.toml
+# COPY requirements.txt .
+# RUN python -m pip install -r requirements.txt
+
+# RUN groupadd -r henry && useradd -r -g henry henry
+
 RUN python -m pip install --upgrade "jax[cuda11_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 RUN python -m pip install --upgrade requests
 RUN python -m pip install --upgrade pip
 RUN python -m pip install pip-tools
 
+# USER henry:henry
 # ARG USERNAME=henry
 # ENV HOME /home/${USERNAME}
 
-COPY requirements.txt .
-# COPY pyproject.toml pyproject.toml 
-# RUN python -m piptools compile -o requirements.txt pyproject.toml
-RUN python -m pip install -r requirements.txt
 
 # COPY ${HOME}/.bashrc . 
 
-RUN GCSFUSE_REPO=gcsfuse-$(lsb_release -c -s) && \
-      echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" \
-      | tee /etc/apt/sources.list.d/gcsfuse.list
-RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys B53DC80D13EDEF05
-
-# RUN CLOUD_SDK_REPO=cloud-sdk-$(lsb_release -c -s) && \
-  #      echo "deb http://packages.cloud.google.com/apt $CLOUD_SDK_REPO main" \
-  #    | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-
-RUN apt update
-RUN apt install -y gcsfuse
-# RUN apt install google-cloud-sdk
 WORKDIR /root
-
-ADD https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-435.0.1-linux-x86_64.tar.gz \
-  google-cloud-cli.tar.gz
-
-RUN tar -xf google-cloud-cli.tar.gz
-RUN yes | google-cloud-sdk/install.sh
 
 # no idea why this works.  .rcfile is empty, yet including this instead of
 # CMD ["/bin/bash"] allows the running container access to environment variables

@@ -382,7 +382,7 @@ class DecoderLayer(hk.Module):
         self.dropout_rate = dropout_rate
         self.is_train = is_train
         self.self_att = MultiHeadAttention(True, H, M, K, V)
-        self.cross_att = MultiHeadAttention(False, H, M, K, V)
+        self.cross_att = MultiHeadAttention(False, H, M, K, V, True)
         self.ff = PositionwiseFF(M, F)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
         self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
@@ -411,7 +411,7 @@ class DecoderLayer(hk.Module):
         post_add1 = input + att1
         norm2 = self.norm2(post_add1)
 
-        att2 = self.cross_att(norm2, enc_out, position_mask, None, qt_cross_mask)
+        att2, attn_entropy = self.cross_att(norm2, enc_out, position_mask, None, qt_cross_mask)
         if self.is_train:
             att2 = hk.dropout(hk.next_rng_key(), self.dropout_rate, att2)
         post_add2 = post_add1 + att2
@@ -420,7 +420,7 @@ class DecoderLayer(hk.Module):
         if self.is_train:
             ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add2 + ff
-        return out
+        return out, attn_entropy
 
     def enc_kvcache(self, enc_out):
         """
@@ -491,14 +491,17 @@ class Decoder(hk.Module):
         # TODO: find out if this is really needed 
         enc_out = self.xnorm(enc_out)
 
+        attn_entropies = []
         out = dec_embed
         for mod in self.layers:
-            out = mod(enc_out, out, dec_position_mask, qt_self_mask, qt_cross_mask)
+            out, attn_entropy = mod(enc_out, out, dec_position_mask, qt_self_mask, qt_cross_mask)
+            attn_entropies.append(attn_entropy)
+        attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
 
         scaled_emb_mat = self.embed_mat() * self.scale_factor
         out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
         # jax.debug.print('decoder_out: {}', out[0,0:5,0:20])
-        return out
+        return out, attn_entropy_all
 
     def enc_kvcache(self, enc_out):
         """
@@ -570,7 +573,7 @@ class Decoder(hk.Module):
         _,Q = dec.shape
         dec_seqids = jnp.zeros((B,Q), dtype=jnp.int32)
         dec_tokids = jnp.repeat(jnp.arange(Q)[:,None], B, axis=0)
-        dec_out = self(enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids)
+        dec_out, _ = self(enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids)
 
         dec_probs = jax.nn.log_softmax(dec_out, axis=2) # bqv
 
@@ -693,10 +696,11 @@ class Model(hk.Module):
         if not self.is_train:
             raise RuntimeError(f'Model.__call__ is only for training')
 
-        enc_output, attn_entropy = self.encoder(inputs['seqs'], inputs['seqids'], inputs['tokids'])
-        dec_output = self.decoder(enc_output, inputs['seqids'], 
+        enc_output, enc_attn_entropy = self.encoder(inputs['seqs'], inputs['seqids'],
+                inputs['tokids'])
+        dec_output, dec_attn_entropy = self.decoder(enc_output, inputs['seqids'], 
                 targets['seqs'], targets['seqids'], targets['tokids'])
-        return dec_output, attn_entropy.mean(axis=0)
+        return dec_output, enc_attn_entropy.mean(axis=0), dec_attn_entropy.mean(axis=0)
 
     def infer_simple(self, enc_tokens, max_gen_length, temperature=1.0):
         """
@@ -750,7 +754,7 @@ class Model(hk.Module):
         enc_tokids = jnp.where(enc_tokens == pad_value, -1, enc_tokids)
         # jax.debug.print('enc_tokids:\n{}', enc_tokids)
         enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
-        enc_out = self.encoder(enc_tokens, enc_seqids, enc_tokids)
+        enc_out, _ = self.encoder(enc_tokens, enc_seqids, enc_tokids)
         # jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[:,0:2,0:2]\n{}', 
                 # enc_out.shape, enc_out[:,0:2,0:2])
         return self.decoder.beam_search(enc_out, alpha, beta, beam_size, max_gen_length)
@@ -797,11 +801,13 @@ class Objective:
         self.eps = smoothing_eps
         self.attn_loss_weight = attn_loss_weight
 
-    def metrics(self, dec_input, dec_output_logits, attn_entropy):
+    def metrics(self, dec_input, dec_output_logits, enc_attn_entropy,
+            dec_attn_entropy):
         """
         dec_input: bq
         dec_output_logits: bqv
-        attn_entropy: bl
+        enc_attn_entropy: bl
+        dec_attn_entropy: bl
         """
         # bc
         targets = dec_input[:,1:]
@@ -822,6 +828,7 @@ class Objective:
         # dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
         kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
         mean_kldiv = kldiv.mean(where=targets_active)
+        attn_entropy = jnp.concatenate([enc_attn_entropy, dec_attn_entropy], axis=0) 
         attn_entropy_loss = jnp.sum((1.0 - attn_entropy) ** 2) 
 
         cross_ent = funcs.cross_entropy(targets, dec_pred_logits, 2)
@@ -831,7 +838,8 @@ class Objective:
                 kldiv=mean_kldiv, 
                 label_entropy=label_ent,
                 cross_entropy=mean_cross_ent, 
-                attn_entropy=attn_entropy,
+                enc_attn_entropy=enc_attn_entropy,
+                dec_attn_entropy=dec_attn_entropy,
                 attn_loss=attn_entropy_loss)
 
     def loss(self, mean_kldiv, attn_entropy_loss):

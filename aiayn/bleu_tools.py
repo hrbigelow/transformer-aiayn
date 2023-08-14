@@ -248,8 +248,8 @@ def bleu_wrapper(ref_filename, hyp_filename, case_sensitive=False):
   print(f'Parsed {len(ref_lines)} lines')
   assert len(ref_lines) == len(hyp_lines), ("{} != {}".format(
       len(ref_lines), len(hyp_lines)))
-  ref_lines = [line.split('\t')[2] for line in ref_lines if line != '']
-  hyp_lines = [line.split('\t')[2] for line in hyp_lines if line != '']
+  # ref_lines = [line.split('\t')[2] for line in ref_lines if line != '']
+  # hyp_lines = [line.split('\t')[2] for line in hyp_lines if line != '']
   if not case_sensitive:
     ref_lines = [x.lower() for x in ref_lines]
     hyp_lines = [x.lower() for x in hyp_lines]

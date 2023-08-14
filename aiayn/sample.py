@@ -62,7 +62,7 @@ def predict_batch(mod, params, tokenizer, tok_map, batch_file, hps):
     Generate translations for each input sentence in batch_file.
     tokenizer:  must have pad_token_id and eos_token_id set
     batch_file has lines of the form:
-    sample_id  <tab>  sentence
+    sentence
     """
     rng_key = jax.random.PRNGKey(hps.random_seed)
     pad_value = tok_map['n_vocab'] # hack
@@ -70,12 +70,13 @@ def predict_batch(mod, params, tokenizer, tok_map, batch_file, hps):
     fh = open(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
     for lines in bit:
-        lines = [ l.split('\t') for l in lines if l is not None ]
-        ids = [ int(item) for item, _, _ in lines ]
-        pairs = [ (a.strip(), b.strip()) for _, a, b in lines ]
-        first = [ f for f,_ in pairs ]
-        second = [ s for _,s in pairs ]
-        inputs = data.tokenize(tokenizer, first, pad_value)
+        lines = [ l.strip() for l in lines ]
+        # lines = [ l.split('\t') for l in lines if l is not None ]
+        # ids = [ int(item) for item, _, _ in lines ]
+        # pairs = [ (a.strip(), b.strip()) for _, a, b in lines ]
+        # first = [ f for f,_ in pairs ]
+        # second = [ s for _,s in pairs ]
+        inputs = data.tokenize(tokenizer, lines, pad_value)
         # pdb.set_trace()
 
         pred_toks, pred_scores = mod.apply(params, rng_key, inputs,
@@ -87,10 +88,11 @@ def predict_batch(mod, params, tokenizer, tok_map, batch_file, hps):
         top_scores = pred_scores[:,0].tolist()
         top_seqs = data.de_tokenize(tokenizer, top_toks, tok_map['eos'])
         for i in range(len(top_seqs)):
-            _id = ids[i]
+            # _id = ids[i]
             seq = top_seqs[i]
             score = top_scores[i]
-            print(f'{_id}\t{score:2.3f}\t{seq}')
+            print(seq)
+            # print(f'{_id}\t{score:2.3f}\t{seq}')
     fh.close()
 
 def main(ckpt_dir, resume_ckpt, tokenizer_file, token_info_file, batch_file = None,

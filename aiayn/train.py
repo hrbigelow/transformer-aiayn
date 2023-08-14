@@ -100,9 +100,10 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
         def loss_fn(params, inputs, targets):
             dec_input = targets['seqs']
-            dec_output, attn_ent = model.apply(params, dropout_rng, inputs, targets)
+            dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, dropout_rng,
+                    inputs, targets)
             # print_range('dec_output', dec_output)
-            metrics = objective.metrics(dec_input, dec_output, attn_ent)
+            metrics = objective.metrics(dec_input, dec_output, enc_attn_ent, dec_attn_ent)
             # jax.debug.print('bla-metrics:{}', metrics)
             loss = objective.loss(metrics['kldiv'], metrics['attn_loss'])
             return loss, metrics 
@@ -275,14 +276,16 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     losses = np.empty(hps.report_every)
     label_entropy = np.empty(hps.report_every)
     cross_entropy = np.empty(hps.report_every)
-    attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
+    enc_attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
+    dec_attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
     attn_loss = np.empty(hps.report_every)
     learn_rate = np.empty(hps.report_every)
     report_metrics = dict(
             kldiv=losses,
             label_entropy=label_entropy,
             cross_entropy=cross_entropy,
-            attn_entropy=attn_entropy,
+            enc_attn_entropy=enc_attn_entropy,
+            dec_attn_entropy=dec_attn_entropy,
             attn_loss=attn_loss
             )
 
