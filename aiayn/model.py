@@ -67,11 +67,18 @@ class MultiHeadAttention(hk.Module):
         key = jnp.einsum('hmd,btm->bhtd', wk, kvinput)
         val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
         
-        logit_adj = logits_mask[:,None,:,:] * -1e6
-        alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
-        att = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3)
+        # logit_adj = logits_mask[:,None,:,:] * -1e6
+        # alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
+        alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key)
+        active = jnp.broadcast_to(1 - logits_mask[:,None,:,:], alogit.shape)
+        # att2 = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3, where=active,
+                # initial=0.0)
+        att = funcs.softmax(alogit * self.scale_factor ** -1, axis=3, where=active,
+                initial=0.0)
 
-        # compute marginal entropy
+        """
+        Computes the 
+        """
         if self.with_attn_entropy:
             occu = 1 - logits_mask # bqt
             row_occu = jnp.sum(occu, axis=2, keepdims=True)[:,None,:,:] # bhqt
@@ -83,6 +90,11 @@ class MultiHeadAttention(hk.Module):
             c = jnp.sum(active_cols, axis=1) # b
 
             scaled_entr = target_entr / jnp.log2(c)
+            # if not self.self_attn:
+                # jax.debug.print('using my att: {}, {}',
+                        # jnp.any(jnp.isnan(alogit)),
+                        # jnp.any(jnp.isnan(att)))
+
             # scaled_entr = target_entr
             # jax.debug.print('scaled_entr: nan: {}, inf: {}\n',
              #        jnp.any(jnp.isnan(scaled_entr)),
@@ -497,6 +509,7 @@ class Decoder(hk.Module):
             out, attn_entropy = mod(enc_out, out, dec_position_mask, qt_self_mask, qt_cross_mask)
             attn_entropies.append(attn_entropy)
         attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
+        # attn_entropy_all = jnp.zeros_like(attn_entropy_all)
 
         scaled_emb_mat = self.embed_mat() * self.scale_factor
         out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
@@ -575,7 +588,8 @@ class Decoder(hk.Module):
         dec_tokids = jnp.repeat(jnp.arange(Q)[:,None], B, axis=0)
         dec_out, _ = self(enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids)
 
-        dec_probs = jax.nn.log_softmax(dec_out, axis=2) # bqv
+        # dec_probs = jax.nn.log_softmax(dec_out, axis=2) # bqv
+        dec_probs = funcs.log_softmax(dec_out, axis=2) # bqv
 
         inds = jnp.concat((jnp.arange(B)[:,None,None], dec_tokids), axis=2) # b,q,2
         gd = jax.lax.GatherDimensionNumbers((), (0,1), (0,1,2))
@@ -831,9 +845,11 @@ class Objective:
         attn_entropy = jnp.concatenate([enc_attn_entropy, dec_attn_entropy], axis=0) 
         attn_entropy_loss = jnp.sum((1.0 - attn_entropy) ** 2) 
 
-        cross_ent = funcs.cross_entropy(targets, dec_pred_logits, 2)
+        where = jnp.broadcast_to(targets_active[:,:,None], targets.shape)
+        cross_ent = funcs.cross_entropy(targets, dec_pred_logits, 2, where)
         mean_cross_ent = cross_ent.mean(where=targets_active)
-        label_ent = funcs.entropy(targets, axis=2).mean(where=targets_active)
+        label_ent = funcs.entropy(targets, 2, where)
+        label_ent = label_ent.mean(where=targets_active)
         return dict(
                 kldiv=mean_kldiv, 
                 label_entropy=label_ent,

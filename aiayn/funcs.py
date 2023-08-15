@@ -7,45 +7,66 @@ import numpy as np
 
 import pdb
 
-def safe_xy(x, y):
-    """
-    Return 0 if x == 0, else x * y
-    """
-    x_ok = x != 0.
-    safe_x = jnp.where(x_ok, x, 1.)
-    safe_y = jnp.where(x_ok, y, 1.)
-    return jnp.where(x_ok, lax.mul(safe_x, safe_y), jnp.zeros_like(x))
-
 def entropy(p, axis, where=None):
     """
     Compute entropy in bits along axis
     p: any shape including at least `axis`
     where: same shape as p
     """
-    if where is None:
-        return jnp.sum(p * -jnp.log2(p), axis=axis) 
-    else:
-        assert p.shape == where.shape
-        wp0 = jnp.where(where, p, 0.0)
-        wp1 = jnp.where(where, p, 1.0)
-        return jnp.sum(safe_xy(wp0, -jnp.log2(wp1)), axis=axis)
+    log_p = jnp.log2(jnp.where(p == 0.0, 1e-30, p))
+    return jnp.sum(p * -log_p, axis=axis, where=where, initial=0.0) 
 
-def fused_kldiv_softmax(q, p_logits, axis):
+def cross_entropy(q, p_logits, axis, where=None):
+    log2e = jnp.log2(jnp.exp(1.0))
+    # p_logits = jax.nn.log_softmax(p_logits, axis, where=where, initial=1.0) * log2e
+    p_logits = log_softmax(p_logits, axis, where, 0.0) * log2e
+    return jnp.sum(q * -p_logits, axis, where=where, initial=0.0)
+
+def fused_kldiv_softmax(q, p_logits, axis, where=None):
     # compute D[q(x) || softmax(p_logits)] implicitly fusing the operations
     # returns value in bits
-    p_logits = jax.nn.log_softmax(p_logits, axis)
     log2e = jnp.log2(jnp.exp(1.0))
-    log_q = jnp.log(q)
-    kl_nats = jnp.sum(safe_xy(q, log_q - p_logits), axis)
-    kl = kl_nats * log2e
-    # jax.debug.print("{}", kl) 
-    return kl
+    p_logits = log_softmax(p_logits, axis, where, 0.0) * log2e
+    log_q = jnp.log2(jnp.where(q == 0.0, 1e-30, q))
+    return jnp.sum(q * (log_q - p_logits), axis, where=where, initial=0)
 
-def cross_entropy(q, p_logits, axis):
-    p_logits = jax.nn.log_softmax(p_logits, axis)
-    log2e = jnp.log2(jnp.exp(1.0))
-    xent = jnp.sum(safe_xy(q, - p_logits), axis)
-    return xent * log2e
+def softmax(x, axis, where=None, initial=None):
+    x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+    scaled = x - x_max
+    if where is not None:
+        scaled = jnp.where(where, scaled, -1000.0)
+    unnormalized = jnp.exp(scaled)
+    result = unnormalized / jnp.sum(unnormalized, axis, where=where, keepdims=True)
+    if where is not None:
+        result = jnp.where(where, result, 0.0)
+    return result
+
+def log_softmax(x, axis, where=None, initial=None):
+    x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+    shifted = x - lax.stop_gradient(x_max)
+    if where is not None:
+        shifted = jnp.where(where, shifted, -1000.0)
+    shifted_logsumexp = jnp.log(
+            jnp.sum(jnp.exp(shifted), axis, where=where, keepdims=True))
+    result = shifted - shifted_logsumexp
+    if where is not None:
+        return jnp.where(where, result, -jnp.inf)
+    return result
+
+
+"""
+def _softmax(
+    x,
+    axis: Optional[Union[int, tuple[int, ...]]] = -1,
+    where: Optional[Array] = None,
+    initial: Optional[Array] = None) -> Array:
+  x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+  unnormalized = jnp.exp(x - x_max)
+  result = unnormalized / jnp.sum(unnormalized, axis, where=where, keepdims=True)
+  if where is not None:
+    result = jnp.where(where, result, 0)
+  return result
+"""
 
 def gather_seqs(seqs, inds):
     """
