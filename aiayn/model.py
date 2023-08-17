@@ -834,7 +834,10 @@ class Objective:
 
         # bqv
         targets = jax.nn.one_hot(targets, self.V, axis=2)
-        targets = (1.0 - self.eps) * targets + self.eps * self.token_dist[None,None,:]
+
+        # From https://arxiv.org/pdf/1512.00567.pdf "we used the uniform distribution u(k)"
+        targets = (1.0 - self.eps) * targets + self.eps * self.V ** -1 
+        # targets = (1.0 - self.eps) * targets + self.eps * self.token_dist[None,None,:]
 
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
