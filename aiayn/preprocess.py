@@ -62,8 +62,8 @@ def token_dataset(download_dir, dataset_name, split, tokenizer_file, nproc):
             one = tokenizer.encode_batch(unicode_decode(one))
             two = tokenizer.encode_batch(unicode_decode(two))
             yield from [(
-                np.array(a.ids, dtype=np.uint16), 
-                np.array(b.ids, dtype=np.uint16)) 
+                tf.constant(a.ids, dtype=np.uint16), 
+                tf.constant(b.ids, dtype=np.uint16)) 
                 for a, b in zip(one, two)]
     return gen(ds), num_elem
 
