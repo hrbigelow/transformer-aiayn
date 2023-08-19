@@ -1,5 +1,7 @@
+from collections import namedtuple
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from tokenizers import Tokenizer
 import os
 import sys
 import fire
@@ -163,10 +165,24 @@ def load_token_info(token_path):
     except:
         raise RuntimeError(f'Could not load token info file {path}')
 
-def get_tokenizer():
-    path = os.path.join(CONFIG['data_dir'], CONFIG['tokenizer'], 'tokenizer.json')
-    from transformers import PreTrainedTokenizerFast as ptf
-    return ptf(tokenizer_file=path)
+def get_tokenizer(tokenizer_path):
+    try:
+        content = tf.io.gfile.GFile(tokenizer_path).read()
+    except Exception as ex:
+        raise RuntimeError(
+            f'Couldn\'t load tokenizer JSON file from {tokenizer_path}')
+    return Tokenizer.from_str(content)
+
+def get_special_tokens(tokenizer_path):
+    import json
+    try:
+        j = json.load(tf.io.gfile.GFile(tokenizer_path))
+    except Exception as ex:
+        raise RuntimeError(
+            f'Couldn\'t load tokenizer JSON file from {tokenizer_path}')
+    Toks = namedtuple('tokens', 'bos_id eos_id pad_id')
+    m = { item['content']: item['id'] for item in j['added_tokens'] }
+    return Toks(m['[BOS]'], m['[EOS]'], m['[PAD]'])
 
 if __name__ == '__main__':
     cmds = dict(save_token_info=save_token_info)
