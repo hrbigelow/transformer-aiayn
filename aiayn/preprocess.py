@@ -5,7 +5,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from transformers import PreTrainedTokenizerFast
 
-def token_dataset(download_dir, dataset_name, split, tokenizer, nproc):
+def token_dataset(download_dir, dataset_name, split, encode_fn, nproc):
     """
     """
     builder = tfds.builder(dataset_name, data_dir=download_dir)
@@ -17,8 +17,8 @@ def token_dataset(download_dir, dataset_name, split, tokenizer, nproc):
 
     def tokenize_fn(item):
         def _py_fn(one, two):
-            one = tokenizer(one.numpy().decode())['input_ids']
-            two = tokenizer(two.numpy().decode())['input_ids']
+            one = encode_fn(one.numpy().decode())
+            two = encode_fn(two.numpy().decode())
             return tf.constant(one, dtype=tf.uint16), tf.constant(two, dtype=tf.uint16)
         return tf.py_function(_py_fn, inp=item.values(), Tout=[tf.uint16, tf.uint16])
 
@@ -42,44 +42,64 @@ def write_records(ds, path_template, num_shards, shards=None):
     """
     options = tf.io.TFRecordOptions(
             compression_type=None,
-            input_buffer_size=100000,
-            output_buffer_size=100000)
+            input_buffer_size=10000,
+            output_buffer_size=10000)
 
-    if shards is None:
-        shards = range(num_shards)
+    shards = range(num_shards)
     chunk_size = len(ds) // num_shards
-    chunks = [(chunk_size * i, chunk_size * (i+1)) for i in shards]
-    for shard in shards:
-        record_path = path_template.format(shard) 
-        beg, end = chunks[shard]
-        ds_shard = ds.skip(beg).take(end - beg)
-        with tf.io.TFRecordWriter(record_path, options) as file_writer:
-            for t1, t2 in iter(ds_shard):
-                s1 = tf.io.serialize_tensor(t1)
-                s2 = tf.io.serialize_tensor(t2)
-                b1 = tf.train.BytesList(value=[s1.numpy()])
-                b2 = tf.train.BytesList(value=[s2.numpy()])
+    begs = [chunk_size * i for i in range(num_shards)]
 
-                record_bytes = tf.train.Example(
-                    features=tf.train.Features(feature={
-                        'x': tf.train.Feature(bytes_list=b1),
-                        'y': tf.train.Feature(bytes_list=b2)
-                        }
-                    )
-                ).SerializeToString()
-                file_writer.write(record_bytes)
-        print(f'Wrote records [{beg}, {end}) to {record_path} of {num_shards} shards')
+    chunk = -1
+    for i, (t1, t2) in enumerate(iter(ds)):
+        if chunk != i // chunk_size:
+            chunk = i // chunk_size
+            record_path = path_template.format(chunk)
+            print(f'Writing chunk {chunk} to {record_path} of {num_shards} shards')
+            file_writer = tf.io.TFRecordWriter(record_path, options)
 
-def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards, out_template):
+        s1 = tf.io.serialize_tensor(t1)
+        s2 = tf.io.serialize_tensor(t2)
+        b1 = tf.train.BytesList(value=[s1.numpy()])
+        b2 = tf.train.BytesList(value=[s2.numpy()])
+
+        example = tf.train.Example(
+            features=tf.train.Features(feature={
+                'x': tf.train.Feature(bytes_list=b1),
+                'y': tf.train.Feature(bytes_list=b2)
+                }
+            )
+        )
+        record_bytes = example.SerializeToString()
+        file_writer.write(record_bytes)
+
+def main(download_dir, dataset_name, split, vocab_dir, nproc, num_shards,
+        out_template, shards=None):
     """
     Write a tfrecord dataset to out_template (must contain '{}') 
     """
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
+    from tensor2tensor import problems
+    ende_problem = problems.problem('translate_ende_wmt32k')
+    encoders = ende_problem.feature_encoders(vocab_dir)
+    encode_fn = encoders['inputs'].encode
+
+    # tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
     print('Preparing dataset')
-    ds, _ = token_dataset(download_dir, dataset_name, split, tokenizer, nproc)
+    ds, _ = token_dataset(download_dir, dataset_name, split, encode_fn, nproc)
     print('Writing tfrecords')
-    write_records(ds, out_template, num_shards) 
+    write_records(ds, out_template, num_shards, shards) 
+
+def encoder_stats(vocab_dir):
+    from tensor2tensor import problems
+    ende_problem = problems.problem('translate_ende_wmt32k')
+    encoders = ende_problem.feature_encoders(vocab_dir)
+    # in this case the input and target encoders are the same
+    encoder = encoders['inputs']
+    print(f'n_vocab: {encoder.vocab_size}')
+    print(f'token 0: {encoder.decode([0])}')
+    print(f'token 1: {encoder.decode([1])}')
+
 
 if __name__ == '__main__':
-    fire.Fire(main)
+    cmds=dict(make=main, encoder_stats=encoder_stats)
+    fire.Fire(cmds)
 

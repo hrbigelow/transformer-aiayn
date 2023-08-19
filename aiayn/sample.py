@@ -10,7 +10,7 @@ import pdb
 
 
 def load_model(hps):
-    mod = model.make_test_model(hps) 
+    mod = model.make_model(hps, False) 
     mngr = orbax.CheckpointManager(
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()))
     state = mngr.restore(hps.resume_ckpt)

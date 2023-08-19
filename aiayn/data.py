@@ -28,11 +28,6 @@ def parse_record(swap, record):
     # tf.print(x)
     return { 'inputs': x, 'targets': y }
 
-def convert_tfrec_dataset(tfrec_dataset, swap_inputs_targets):
-    return tfrec_dataset.map(
-            functools.partial(parse_record, swap_inputs_targets),
-            num_parallel_calls=tf.data.AUTOTUNE)
-
 CONFIG = { }
 
 def set_config(**kwargs):
@@ -114,70 +109,6 @@ def add_special_tokens(token_ds, bos_id, eos_id):
 
     return token_ds.map(toks_fn, num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False)
-
-
-def pad_dataset(token_ds, token_info, shuffle_size, swap_pairs, max_sentence_length,
-        rng_key):
-    """
-    Appends padding to first sentence
-    Appends eos + padding to second sentence
-    token_info: loaded from save_token_info output 
-    """
-
-    # this is done so that the model will learn that 'eos' only leads to 'eos'.
-    eos_id = token_info['eos'].item()
-    bos_id = token_info['bos'].item()
-    mask_id = token_info['mask'].item()
-    bos = tf.constant([bos_id], tf.uint16)
-    eos = tf.constant([eos_id, eos_id], tf.uint16)
-
-    def expand_fn(rec):
-        return rec['x'], rec['y']
-
-    def swap_fn(x, y):
-        return y, x
-
-    def pad_tokens_fn(x, y):
-        # x = tf.sparse.to_dense(rec['x']) # This was needed when using 
-        # VarLenFeature during parse_record
-        # y = tf.sparse.to_dense(rec['y'])
-        x = tf.cast(x, tf.uint16)
-        y = tf.cast(y, tf.uint16)
-        xlen = tf.size(x)
-        ylen = tf.size(y)
-        l1 = max_sentence_length - xlen 
-        l2 = max_sentence_length - ylen - 2
-        mask1 = tf.cast(tf.fill((l1,), mask_id), dtype=tf.uint16)
-        mask2 = tf.cast(tf.fill((l2,), mask_id), dtype=tf.uint16)
-        x = tf.concat(values=(x, mask1), axis=0)
-        y = tf.concat(values=(bos, y, eos, mask2), axis=0)
-        return x, y, xlen, ylen 
-
-    def maxlen_fn(rec):
-        x, y = rec['x'], rec['y']
-        return tf.maximum(tf.size(x), tf.size(y)) <= max_sentence_length - 2
-
-    ds = token_ds
-    ds = ds.filter(maxlen_fn)
-    ds = ds.map(expand_fn)
-    if swap_pairs:
-        ds = ds.map(swap_fn)
-    ds = ds.shuffle(shuffle_size, rng_key, reshuffle_each_iteration=True)
-    ds = ds.map(pad_tokens_fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
-    return ds
-
-def main_dataset(tfrecord_glob, bos_id, eos_id, max_len1, max_len2, max_tries,
-        pack_threshold, batch_size, swap_source_target, seed, initial_step,
-        shuffle_size=10000):
-    ds = load_tfrecord_dataset(tfrecord_glob) 
-    ds = ds.repeat()
-    ds = ds.shuffle(shuffle_size, seed, reshuffle_each_iteration=True)
-    ds = add_special_tokens(ds, swap_source_target, bos_id, eos_id)
-    ds = pack_dataset(ds, max_len1, max_len2, max_tries=max_tries,
-            threshold=pack_threshold, max_queue_size=100, pad_value=-1)
-    ds = ds.prefetch(1000)
-    ds = ds.batch(batch_size)
-    return ds
 
 def length_histo(token_ds):
     histo = tf.zeros((1000,2), dtype=tf.int32)

@@ -17,10 +17,10 @@ class MultiHeadAttention(hk.Module):
     """
     def __init__(self, is_self_attn, H, M, K, V, with_attn_entropy=False):
         super().__init__(name='att')
-        self.H = H
-        self.M = M
-        self.K = K
-        self.V = V
+        self.H = H # number of heads
+        self.M = M # d_model, or 'embedding dimension'
+        self.K = K # number of components in the key
+        self.V = V # number of components in the value
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
         self.scale_factor = np.sqrt(self.K)
@@ -464,18 +464,17 @@ class DecoderLayer(hk.Module):
         return dec_kvcache, xattn, out
 
 class Decoder(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, tok_map, pos_enc_factor,
-            embed_mat=None):
+    def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, n_vocab, embed_mat=None):
         super().__init__(name='dec')
         self.is_train = is_train
         self.L = arch['L']
         self.H = arch['H']
         self.K = arch['K']
-        self.tok_map = tok_map
+        self.n_vocab = n_vocab
         self.xnorm = hk.LayerNorm((2,), True, True, name='lnormx')
 
         if embed_mat is None:
-            self.embed_mat = EmbedMatrix(self.tok_map['n_vocab'], arch['M']) 
+            self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
         else:
             self.embed_mat = embed_mat
 
@@ -545,7 +544,7 @@ class Decoder(hk.Module):
         logits_step: bm     (prediction logits for step)
         """
         B, _, M = enc_out.shape
-        L, H, K, V = self.L, self.H, self.K, self.tok_map['n_vocab']
+        L, H, K, V = self.L, self.H, self.K, self.n_vocab
         S = 2 # channels for key and value
         Q = max_gen_length
 
@@ -554,7 +553,7 @@ class Decoder(hk.Module):
         scaled_emb_mat = self.embed_mat() * self.scale_factor
 
         dec_pred = jnp.empty((B, Q), dtype=jnp.int32)
-        dec_pred = dec_pred.at[:,0].set(self.tok_map['bos'])
+        dec_pred = dec_pred.at[:,0].set(self.bos_id)
         dec_tokids = jnp.reshape(jnp.tile(jnp.arange(Q), B), (B,Q)) 
         bos_embed = self.embed_layer(dec_pred[:,0:1], dec_tokids[:,0:1])
 
@@ -630,7 +629,7 @@ class Decoder(hk.Module):
         See funcs.beam_search_step for details
         """
         B, C, M = enc_out.shape
-        L, H, K, V = self.L, self.H, self.K, self.tok_map['n_vocab']
+        L, H, K, V = self.L, self.H, self.K, self.n_vocab
         O, E = beam_size, 2 * beam_size
         S = 2 # channels for key and value
         Q = max_length
@@ -638,7 +637,7 @@ class Decoder(hk.Module):
         enc_out = self.xnorm(enc_out)
         enc_kvcache = self.enc_kvcache(enc_out)
         enc_kvcache = jnp.repeat(enc_kvcache, E, 1)
-        beam_step_fn = functools.partial(funcs.beam_search_step, self.tok_map['eos'],
+        beam_step_fn = functools.partial(funcs.beam_search_step, self.eos_id,
                 alpha, beta, beam_size)
         logits_fn = functools.partial(self.logits_step, enc_kvcache)
 
@@ -670,7 +669,7 @@ class Decoder(hk.Module):
         xattn = jnp.zeros((B,E,C), dtype=jnp.float32)
 
         live_seqs = jnp.zeros((B,E,Q), dtype=jnp.int32)
-        live_seqs = live_seqs.at[:,0,0].set(self.tok_map['bos'])
+        live_seqs = live_seqs.at[:,0,0].set(self.bos_id)
         live_scores = jnp.full((B,E), -jnp.inf)
         live_scores = live_scores.at[:,0].set(0.0)
         fin_seqs = jnp.zeros((B,O,Q), dtype=jnp.int32)
@@ -683,18 +682,20 @@ class Decoder(hk.Module):
 
 
 class Model(hk.Module):
-    def __init__(self, dropout_rate, pos_enc_factor, arch, is_train, tok_map):
+    def __init__(self, dropout_rate, pos_enc_factor, arch, is_train, bos_id, eos_id,
+            n_vocab):
         super().__init__(name='tx')
         self.is_train = is_train
         self.L = arch['L']  
         self.H = arch['H']
-        self.tok_map = tok_map
-        self.embed_mat = EmbedMatrix(self.tok_map['n_vocab'], arch['M']) 
-        # self.embed_layer = InputEmbedding(self.embed_mat, pos_enc_factor) 
+        self.bos_id = bos_id
+        self.eos_id = eos_id
+        self.n_vocab = n_vocab # includes bos_id and eos_id but not pad_id
+        self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
         self.encoder = Encoder(dropout_rate, arch, is_train, pos_enc_factor,
                 self.embed_mat)
-        self.decoder = Decoder(dropout_rate, arch, is_train, self.tok_map,
-                pos_enc_factor, self.embed_mat)
+        self.decoder = Decoder(dropout_rate, arch, is_train, pos_enc_factor, n_vocab,
+                self.embed_mat)
 
     def batch(self, inputs, targets):
         """
@@ -803,15 +804,13 @@ def predict(self, enc_input):
     return seq
 
 class Objective:
-    def __init__(self, token_histo, bos_id, smoothing_eps=0.1, attn_loss_weight=0):
+    def __init__(self, bos_id, n_vocab, smoothing_eps=0.1, attn_loss_weight=0):
         """
         page 8, Label Smoothing: using eps = 0.1
         """
         # self.eps = smoothing_eps
         self.bos_id = bos_id
-        token_histo = token_histo.astype(jnp.float32)
-        self.token_dist = token_histo / jnp.sum(token_histo)
-        self.V = self.token_dist.shape[0]
+        self.V = n_vocab 
         self.eps = smoothing_eps
         self.attn_loss_weight = attn_loss_weight
 
@@ -837,7 +836,6 @@ class Objective:
 
         # From https://arxiv.org/pdf/1512.00567.pdf "we used the uniform distribution u(k)"
         targets = (1.0 - self.eps) * targets + self.eps * self.V ** -1 
-        # targets = (1.0 - self.eps) * targets + self.eps * self.token_dist[None,None,:]
 
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
@@ -873,21 +871,16 @@ def _wrap_haiku(mod_cls, *args):
         return mod(*call_args)
     return wrapped_fn
 
-def make_train_model(hps, tok_map):
+def make_model(hps, is_train):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = hps.dropout_rate, hps.pos_encoding_factor, arch, True, tok_map 
+    args = (hps.dropout_rate, hps.pos_encoding_factor, arch, is_train, hps.bos_id,
+            hps.eos_id, hps.n_vocab)
     def wrap_fn(*call_args):
         mod = Model(*args)
-        return mod.batch(*call_args)
-    return hk.transform(wrap_fn)
-
-def make_test_model(hps):
-    arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    tok_map = data.load_token_info(hps.token_info_file)
-    args = hps.dropout_rate, hps.pos_encoding_factor, arch, False, tok_map 
-    def wrap_fn(*call_args):
-        mod = Model(*args)
-        return mod.beam_search(*call_args)
+        if is_train:
+            return mod.batch(*call_args)
+        else:
+            return mod.beam_search(*call_args)
     return hk.transform(wrap_fn)
 
 def make_score_model(hps, tok_map):
@@ -897,11 +890,6 @@ def make_score_model(hps, tok_map):
         mod = Model(*args)
         return mod.embed_to_score(*call_args)
     return hk.transform(wrap_fn, apply_rng=False)
-
-def make_test_objective(hps, token_info):
-    histo = token_info['histo']
-    mask_id = token_info['mask']
-    return hk.transform(_wrap_haiku(Objective, histo, mask_id, hps.label_smooth_eps))
 
 def make_grads(cls, inst_args, out_grad, call_args):
     """

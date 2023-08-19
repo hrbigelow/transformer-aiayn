@@ -136,29 +136,20 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
             
     return update_fn
 
-def make_line_plot(logger, label, steps, vals, palette='Viridis256'):
+def make_line_plot(logger, label, steps, vals):
     """
     steps: [num_steps]
     vals: [num_steps] or [num_steps, num_lines] 
     Create a tandem_lines plot
     """
-    if len(vals.shape) == 1:
-        vals = jnp.expand_dims(vals, axis=1)
-
-    vals = jnp.transpose(vals, (1, 0))
-    num_lines = vals.shape[0]
-    val_steps = jnp.repeat(jnp.expand_dims(steps, axis=0), num_lines, axis=0)
-    plot = jnp.stack((val_steps, vals), axis=2)
-    logger.tandem_lines(label, plot, palette)
+    if len(vals.shape) > 1:
+        vals = jnp.transpose(vals, (1, 0))
+    logger.write(label, x=steps, y=vals)
 
 def log_steps(logger, steps, learn_rate, metrics):
     make_line_plot(logger, 'learn_rate', steps, learn_rate)
     for key, metric in metrics.items():
-        if metric.ndim == 1:
-            make_line_plot(logger, key, steps, metric, 'RdYlGn8')
-        else:
-            make_tandem_plot(logger, key, steps, metric, 'Viridis256')
-    # make_line_plot(logger, 'cond_perplexity', steps, jnp.power(2.0, entropies), 'RdYlGn8')
+        make_line_plot(logger, key, steps, metric)
 
 def make_tandem_plot(logger, key, steps, values, palette):
     """
@@ -218,9 +209,6 @@ def setup_train(hps, rng_key):
     # Set up orbax to save/restore custom optax types
     utils.register_handlers()
 
-    # data.set_config(data_dir=hps.data_dir)
-    tok_map = data.load_token_info(hps.token_info_file)
-
     options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
     checkpointer = PyTreeCheckpointer()
     mngr = CheckpointManager(hps.ckpt_dir, checkpointer, options)
@@ -229,9 +217,9 @@ def setup_train(hps, rng_key):
     tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
             eps=hps.adam_eps)
 
-    mod = model.make_train_model(hps, tok_map)
-    objective = model.Objective(tok_map['histo'], tok_map['bos'],
-            hps.label_smooth_eps, hps.attn_loss_weight)
+    mod = model.make_model(hps, True)
+    objective = model.Objective(hps.bos_id, hps.n_vocab, hps.label_smooth_eps,
+            hps.attn_loss_weight)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx)
@@ -240,9 +228,9 @@ def setup_train(hps, rng_key):
 
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
     token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
-    token_ds = data.add_special_tokens(token_ds, tok_map['bos'], tok_map['eos']) 
+    token_ds = data.add_special_tokens(token_ds, hps.bos_id, hps.eos_id) 
     token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
-    pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, -1) 
+    pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, hps.pad_id) 
     dataset = pack_ds.rebatch(hps.batch_dim0)
 
     # Initialize state de-novo
@@ -355,9 +343,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
            data_dir
               path to dataset prepared using python -m aiayn.data script
     :param streamvis_run_name: name for scoping the run for visualization
-    :param pubsub_project: the GCP project with Cloud Pub/Sub API enabled
-    :param pubsub_topic: the GCP topic associated with pubsub_project
-    :param streamvis_log_file: path to streamvis log file (optional) 
+    :param streamvis_path: locator for a logger file
+    :param streamvis_buffer_items:  total number of data points to buffer
 
     :param batch_dim0 : SGD batch size dimension 0, the number of sentences in batch
     :param accum_steps: accumulate the gradient over accum_steps steps.
@@ -392,14 +379,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     rng_key = jax.random.PRNGKey(42)
 
     if hps.streamvis_run_name is not None:
-        import streamvis
-        logger = streamvis.logger.DataLogger(hps.streamvis_run_name)
-        if hps.pubsub_project is not None:
-            logger.init_pubsub(hps.pubsub_project, hps.pubsub_topic)
-            print(f'Init logger with {hps.pubsub_project} and {hps.pubsub_topic}')
-        if hps.streamvis_log_file is not None:
-            logger.init_write_log(hps.streamvis_log_file)
-            print(f'Init logger write log {hps.streamvis_log_file}')
+        from streamvis.logger import DataLogger
+        logger = DataLogger(hps.streamvis_run_name)
+        logger.init(hps.streamvis_path, hps.streamvis_buffer_items)
     else:
         logger = None
 
