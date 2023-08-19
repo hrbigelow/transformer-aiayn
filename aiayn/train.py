@@ -1,4 +1,5 @@
 import tensorflow as tf
+from tokenizers import Tokenizer
 import functools
 import psutil
 import jax
@@ -217,9 +218,14 @@ def setup_train(hps, rng_key):
     tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
             eps=hps.adam_eps)
 
-    mod = model.make_model(hps, True)
-    objective = model.Objective(hps.bos_id, hps.n_vocab, hps.label_smooth_eps,
-            hps.attn_loss_weight)
+    tokenizer = Tokenizer.from_str(tf.io.gfile.GFile(hps.tokenizer_file).read())
+    n_vocab = tokenizer.get_vocab_size() + 2 # add BOS and EOS
+    bos_id = tokenizer.token_to_id('[BOS]')
+    eos_id = tokenizer.token_to_id('[EOS]')
+    pad_id = tokenizer.token_to_id('[PAD]')
+
+    mod = model.make_model(hps, bos_id, eos_id, n_vocab, True)
+    objective = model.Objective(bos_id, n_vocab, hps.label_smooth_eps, hps.attn_loss_weight)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx)
@@ -228,9 +234,9 @@ def setup_train(hps, rng_key):
 
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
     token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
-    token_ds = data.add_special_tokens(token_ds, hps.bos_id, hps.eos_id) 
+    token_ds = data.add_special_tokens(token_ds, bos_id, eos_id) 
     token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
-    pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, hps.pad_id) 
+    pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, pad_id) 
     dataset = pack_ds.rebatch(hps.batch_dim0)
 
     # Initialize state de-novo

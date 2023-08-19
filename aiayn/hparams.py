@@ -92,15 +92,11 @@ data = Hyperparams(
     data_dir = None, # directory containing token_info_file, dataset, tokenizer
     data_name = None,
     dataset_glob = None, # either filesystem or gs:// locator glob pattern
-    token_info_file = None,
+    tokenizer_file = None,
     shuffle_size = 1000, 
     swap_source_target = True,
     max_source_len = 80,
-    max_target_len = 128,
-    bos_id = None,
-    eos_id = None,
-    pad_id = None,
-    n_vocab = None
+    max_target_len = 128
     )
 
 sample = Hyperparams(

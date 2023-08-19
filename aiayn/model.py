@@ -871,10 +871,10 @@ def _wrap_haiku(mod_cls, *args):
         return mod(*call_args)
     return wrapped_fn
 
-def make_model(hps, is_train):
+def make_model(hps, bos_id, eos_id, n_vocab, is_train):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = (hps.dropout_rate, hps.pos_encoding_factor, arch, is_train, hps.bos_id,
-            hps.eos_id, hps.n_vocab)
+    args = (hps.dropout_rate, hps.pos_encoding_factor, arch, is_train, bos_id,
+            eos_id, n_vocab)
     def wrap_fn(*call_args):
         mod = Model(*args)
         if is_train:

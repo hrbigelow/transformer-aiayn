@@ -9,7 +9,7 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import BpeTrainer
 
-def train_tokenizer(dataset_name, split, data_dir, vocab_size, out_file):
+def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
     builder = tfds.builder(dataset_name, data_dir=data_dir)
     builder.download_and_prepare()
     ds = builder.as_dataset(split=split, shuffle_files=False)
@@ -30,12 +30,12 @@ def train_tokenizer(dataset_name, split, data_dir, vocab_size, out_file):
 
     tokenizer = Tokenizer(BPE(unk_token='[UNK]'))
 
-    trainer = BpeTrainer(
-            vocab_size=vocab_size,
-            special_tokens=['[UNK]', '[PAD]', '[EOS]', '[BOS]'])
+    special_tokens = ['[UNK]', '[PAD]', '[EOS]', '[BOS]']
+    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
 
     tokenizer.pre_tokenizer = Whitespace()
     tokenizer.train_from_iterator(convert(ds), trainer, num_elems)
+    tokenizer.add_special_tokens(special_tokens)
     tokenizer.save(out_file)
 
 
@@ -114,7 +114,6 @@ def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards,
     """
     Write a tfrecord dataset to out_template (must contain '{}') 
     """
-    # tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
     print('Preparing dataset')
     data_gen, num_elem = token_dataset(download_dir, dataset_name, split,
             tokenizer_file, nproc)
@@ -122,6 +121,6 @@ def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards,
     write_records(data_gen, num_elem, out_template, num_shards, shards) 
 
 if __name__ == '__main__':
-    cmds=dict(make=main)
+    cmds=dict(make=main, train_tokenizer=train_tokenizer)
     fire.Fire(cmds)
 
