@@ -61,7 +61,10 @@ def token_dataset(download_dir, dataset_name, split, tokenizer_file, nproc):
             one, two = item.values()
             one = tokenizer.encode_batch(unicode_decode(one))
             two = tokenizer.encode_batch(unicode_decode(two))
-            yield from [(a.ids, b.ids) for a, b in zip(one, two)]
+            yield from [(
+                np.array(a.ids, dtype=np.uint16), 
+                np.array(b.ids, dtype=np.uint16)) 
+                for a, b in zip(one, two)]
     return gen(ds), num_elem
 
 def write_records(data_gen, num_elem, path_template, num_shards, shards=None):
@@ -119,6 +122,6 @@ def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards,
     write_records(data_gen, num_elem, out_template, num_shards, shards) 
 
 if __name__ == '__main__':
-    cmds=dict(make=main, encoder_stats=encoder_stats)
+    cmds=dict(make=main)
     fire.Fire(cmds)
 
