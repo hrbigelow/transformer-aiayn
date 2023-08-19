@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Implementation of the Transformer from the paper 'Attention is All You Need'"
 authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
-  "transformers",
+  # "transformers",
+  "tokenizers",
   "flax",
   "jax",
   "optax",
