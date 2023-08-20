@@ -1,7 +1,7 @@
 from collections import namedtuple
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from tokenizers import Tokenizer
+from tokenizers import Tokenizer, decoders
 import os
 import sys
 import fire
@@ -171,7 +171,11 @@ def get_tokenizer(tokenizer_path):
     except Exception as ex:
         raise RuntimeError(
             f'Couldn\'t load tokenizer JSON file from {tokenizer_path}')
-    return Tokenizer.from_str(content)
+    tz = Tokenizer.from_str(content)
+    # tz.decoder = decoders.BPEDecoder(suffix=tz.model.end_of_word_suffix)
+    tz.decoder = decoders.ByteLevel()
+    return tz
+
 
 def get_special_tokens(tokenizer_path):
     import json

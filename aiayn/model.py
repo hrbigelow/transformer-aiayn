@@ -386,7 +386,6 @@ class Encoder(hk.Module):
             out = mod(out, position_mask, qt_mask)
         return out
 
-
 class DecoderLayer(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
@@ -464,12 +463,15 @@ class DecoderLayer(hk.Module):
         return dec_kvcache, xattn, out
 
 class Decoder(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, n_vocab, embed_mat=None):
+    def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, bos_id, eos_id,
+            n_vocab, embed_mat=None):
         super().__init__(name='dec')
         self.is_train = is_train
         self.L = arch['L']
         self.H = arch['H']
         self.K = arch['K']
+        self.bos_id = bos_id
+        self.eos_id = eos_id
         self.n_vocab = n_vocab
         self.xnorm = hk.LayerNorm((2,), True, True, name='lnormx')
 
@@ -694,8 +696,8 @@ class Model(hk.Module):
         self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
         self.encoder = Encoder(dropout_rate, arch, is_train, pos_enc_factor,
                 self.embed_mat)
-        self.decoder = Decoder(dropout_rate, arch, is_train, pos_enc_factor, n_vocab,
-                self.embed_mat)
+        self.decoder = Decoder(dropout_rate, arch, is_train, pos_enc_factor, bos_id,
+                eos_id, n_vocab, self.embed_mat)
 
     def batch(self, inputs, targets):
         """

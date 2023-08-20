@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import orbax.checkpoint as orbax
 from aiayn import model, data, hparams
+from tokenizers import decoders
 import pdb
 
 
@@ -35,7 +36,8 @@ def predict_interactive(mod, params, tokenizer, special_toks, hps):
                     hps.beam_search_beta, hps.beam_size, hps.max_target_len)
             pred_scores0 = pred_scores[0].tolist()
             # print('Inference for batch element 0:')
-            pred_sentences = data.de_tokenize(tokenizer, pred_toks[0], special_toks.eos_id)
+            pred_sentences = tokenizer.decode_batch(pred_toks[0])
+            pdb.set_trace()
             for score, sentence in zip(pred_scores0, pred_sentences):
                 print(f'{score:0.2f} {sentence}')
             print('\n')
@@ -105,6 +107,8 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file = None,
     special_toks = data.get_special_tokens(tokenizer_file) 
     tokenizer = data.get_tokenizer(tokenizer_file)
     tokenizer.enable_padding(pad_id=special_toks.pad_id, pad_token='[PAD]')
+    # tokenizer.decoder = decoders.BPEDecoder(suffix=tokenizer.model.end_of_word_suffix)
+    tokenizer.decoder = decoders.BPEDecoder()
     n_vocab = tokenizer.get_vocab_size() + 2 # 
     mod, params = load_model(hps, special_toks.bos_id, special_toks.eos_id, n_vocab)
     if batch_file is None:

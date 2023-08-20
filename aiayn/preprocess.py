@@ -6,8 +6,10 @@ import tensorflow_datasets as tfds
 import numpy as np
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
-from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.normalizers import BertNormalizer
+from tokenizers import pre_tokenizers
 from tokenizers.trainers import BpeTrainer
+from aiayn import data 
 
 def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
     builder = tfds.builder(dataset_name, data_dir=data_dir)
@@ -31,9 +33,14 @@ def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
     tokenizer = Tokenizer(BPE(unk_token='[UNK]'))
 
     special_tokens = ['[UNK]', '[PAD]', '[EOS]', '[BOS]']
+    # trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens,
+     #        end_of_word_suffix='</w>')
     trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
 
-    tokenizer.pre_tokenizer = Whitespace()
+    # tokenizer.normalizer = BertNormalizer()
+    # tokenizer.pre_tokenizer = BertPreTokenizer()
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    # tokenizer.pre_tokenizer = Sequence([Whitespace(), Punctuation()])
     tokenizer.train_from_iterator(convert(ds), trainer, num_elems)
     tokenizer.add_special_tokens(special_tokens)
     tokenizer.save(out_file)
@@ -42,7 +49,7 @@ def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
 def token_dataset(download_dir, dataset_name, split, tokenizer_file, nproc):
     """
     """
-    tokenizer = Tokenizer.from_file(tokenizer_file)
+    tokenizer = data.get_tokenizer(tokenizer_file)
     builder = tfds.builder(dataset_name, data_dir=download_dir)
     # the download_dir argument of download_and_prepare seems to be ignored in favor
     # of tfds.builder(data_dir=...)
