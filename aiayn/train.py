@@ -82,7 +82,30 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
     l, e, g = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g))
     return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
 
-def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics, tx):
+def maybe_crash(crash_dir, grads, state, inputs, targets):
+    """
+    If any NaNs are detected in `grad`, save state, inputs, and targets to a file
+    and abort
+    """
+    nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grads)
+    got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
+    jax.debug.print('got_nan: {}', got_nan)
+
+    def save_state_fn(state, grads, inputs, targets):
+        mngr = CheckpointManager(crash_dir, PyTreeCheckpointer())
+        state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), state)
+        # payload = dict(state=state, inputs=inputs, targets=targets, grads=grads)
+        payload = dict(state=state, grads=grads)
+        mngr.save(9999999, payload, save_kwargs={'save_args': state_save_args})
+        return False
+
+    def no_op_fn(state, grads, inputs, targets):
+        return True 
+    
+    return jax.lax.cond(got_nan, save_state_fn, no_op_fn, state, grads, inputs, targets)
+
+def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics, tx,
+        crash_dir):
     step_size = repl_batch_size // accum_steps
 
     def update_fn(state, inputs, targets):
@@ -117,9 +140,20 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         # averages l and g across replicas, then broadcasts the average
         loss, metrics, grad = jax.lax.pmean((l, metrics, g), axis_name='batch')
 
+        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grad)
+        got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
+
         # tx.update takes ~6 seconds / 10 steps
-        updates, opt_state = tx.update(grad, opt_state)
-        params = optax.apply_updates(params, updates)
+        def apply_updates_fn(grad, opt_state, params):
+            updates, opt_state = tx.update(grad, opt_state)
+            params = optax.apply_updates(params, updates)
+            return grad, opt_state, params
+
+        def no_op_fn(grad, opt_state, params):
+            return grad, opt_state, params
+
+        grad, opt_state, params = jax.lax.cond(got_nan, apply_updates_fn, no_op_fn,
+                grad, opt_state, params)
 
         def tensor_norm(*xs):
             names = ('grad', 'param', 'update')
@@ -127,11 +161,13 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
         if with_metrics:
             norms = jax.tree_map(tensor_norm, grad, params, updates)
-            state = dict(params=params, opt_state=opt_state, rng=new_rng_key)
+            state = dict(params=params, opt_state=opt_state, rng=new_rng_key,
+                    got_nan=got_nan)
             metrics = {'loss': loss, 'norms': norms, **metrics}
             return state, metrics
         else:
-            state = dict(params=params, opt_state=opt_state, rng=new_rng_key)
+            state = dict(params=params, opt_state=opt_state, rng=new_rng_key,
+                    got_nan=got_nan)
             metrics = {'loss': loss, **metrics} 
             return state, metrics
             
@@ -228,7 +264,7 @@ def setup_train(hps, rng_key):
     objective = model.Objective(bos_id, n_vocab, hps.label_smooth_eps, hps.attn_loss_weight)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
-            hps.with_metrics, tx)
+            hps.with_metrics, tx, hps.ckpt_dir)
 
     initial_step = int(hps.resume_ckpt or 0)
 
@@ -307,6 +343,12 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
         num_toks = inputs['counts'].sum() + targets['counts'].sum()
         state_m, metrics_m = update_fn_m(state_m, inputs, targets) 
         metrics = flax.jax_utils.unreplicate(metrics_m)
+        got_nan = flax.jax_utils.unreplicate(state_m['got_nan'])
+        if got_nan:
+            dump = dict(state=state, item=item)
+            state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), dump)
+            mngr.save(step, dump, save_kwargs={'save_args': state_save_args})
+            raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
         report_idx = step % hps.report_every
         steps[report_idx] = step
@@ -340,31 +382,6 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
         step += 1
 
 def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
-    """
-    :param resume_ckpt:
-        Full path to a checkpoint file.  Use `None` (without quotes) for absent.
-        A second line of documentation
-        A third line
-    :param hps_overrides: Can be any of the following:
-           data_dir
-              path to dataset prepared using python -m aiayn.data script
-    :param streamvis_run_name: name for scoping the run for visualization
-    :param streamvis_path: locator for a logger file
-    :param streamvis_buffer_items:  total number of data points to buffer
-
-    :param batch_dim0 : SGD batch size dimension 0, the number of sentences in batch
-    :param accum_steps: accumulate the gradient over accum_steps steps.
-           saves memory for large batch_dim0
-           batch_dim0 % accum_steps must be 0
-    :param ckpt_dir: directory to save checkpoints
-    :param report_every:
-           every number of steps to issue progress message to stdout
-    :param ckpt_every:
-           create a checkpoint every `ckpt_every` steps
-    :param with_metrics:
-           if True, compute and log additional metrics besides loss
-    """
-
     """
     param_patterns = dict(
         decoder_masked_attention = r'decoder.body.(\d+).mask_att..*',
