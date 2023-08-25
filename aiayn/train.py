@@ -152,7 +152,7 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         def no_op_fn(grad, opt_state, params):
             return grad, opt_state, params
 
-        grad, opt_state, params = jax.lax.cond(got_nan, apply_updates_fn, no_op_fn,
+        grad, opt_state, params = jax.lax.cond(got_nan, no_op_fn, apply_updates_fn,
                 grad, opt_state, params)
 
         def tensor_norm(*xs):
