@@ -82,28 +82,6 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
     l, e, g = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g))
     return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
 
-def maybe_crash(crash_dir, grads, state, inputs, targets):
-    """
-    If any NaNs are detected in `grad`, save state, inputs, and targets to a file
-    and abort
-    """
-    nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grads)
-    got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
-    jax.debug.print('got_nan: {}', got_nan)
-
-    def save_state_fn(state, grads, inputs, targets):
-        mngr = CheckpointManager(crash_dir, PyTreeCheckpointer())
-        state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), state)
-        # payload = dict(state=state, inputs=inputs, targets=targets, grads=grads)
-        payload = dict(state=state, grads=grads)
-        mngr.save(9999999, payload, save_kwargs={'save_args': state_save_args})
-        return False
-
-    def no_op_fn(state, grads, inputs, targets):
-        return True 
-    
-    return jax.lax.cond(got_nan, save_state_fn, no_op_fn, state, grads, inputs, targets)
-
 def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics, tx,
         crash_dir):
     step_size = repl_batch_size // accum_steps

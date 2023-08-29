@@ -37,7 +37,7 @@ def predict_interactive(mod, params, tokenizer, special_toks, hps):
             pred_scores0 = pred_scores[0].tolist()
             # print('Inference for batch element 0:')
             pred_sentences = tokenizer.decode_batch(pred_toks[0])
-            pdb.set_trace()
+            # pdb.set_trace()
             for score, sentence in zip(pred_scores0, pred_sentences):
                 print(f'{score:0.2f} {sentence}')
             print('\n')
@@ -77,7 +77,7 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, hps):
         # pairs = [ (a.strip(), b.strip()) for _, a, b in lines ]
         # first = [ f for f,_ in pairs ]
         # second = [ s for _,s in pairs ]
-        inputs = tokenizer.encode(lines, special_toks.pad_value)
+        inputs = tokenizer.encode(lines)
         # pdb.set_trace()
 
         pred_toks, pred_scores = mod.apply(params, rng_key, inputs,
@@ -108,7 +108,8 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file = None,
     tokenizer = data.get_tokenizer(tokenizer_file)
     tokenizer.enable_padding(pad_id=special_toks.pad_id, pad_token='[PAD]')
     # tokenizer.decoder = decoders.BPEDecoder(suffix=tokenizer.model.end_of_word_suffix)
-    tokenizer.decoder = decoders.BPEDecoder()
+    # tokenizer.decoder = decoders.BPEDecoder()
+    tokenizer.decoder = decoders.ByteLevel()
     n_vocab = tokenizer.get_vocab_size() + 2 # 
     mod, params = load_model(hps, special_toks.bos_id, special_toks.eos_id, n_vocab)
     if batch_file is None:

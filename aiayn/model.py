@@ -216,48 +216,6 @@ class PositionwiseFF(hk.Module):
         # jax.debug.print('ff_out: {}', out)
         return out
 
-class DropoutAddAndNorm(hk.Module):
-    def __init__(self, dropout_rate, is_train, layer_num):
-        super().__init__(name='res')
-        self.layer_num = layer_num
-        self.is_train = is_train
-        self.rate = dropout_rate
-
-        # TODO: What is the meaning of the 'axis' argument here?
-        # If I choose 1, then the grad_tests for decoder_layer fails, causing
-        # leakage across autoregressive positions
-        # Tim says: only apply across embedding axis, not batch axis
-        self.layer_norm = hk.LayerNorm(axis=(2,), create_scale=True, create_offset=True,
-                name='lnorm')
-
-    def __call__(self, residual, proximal, qmask=None):
-        """
-        residual: bdm
-        proximal: bdm
-        qmask: bd
-        output: bdm
-        """
-        if qmask is None:
-            B,D,_ = residual.shape
-            qmask = jnp.zeros((B,D))
-
-        assert residual.ndim == 3, f'{residual.ndim=}'
-        assert proximal.ndim == 3, f'{proximal.ndim=}'
-        assert qmask.ndim == 2
-
-        if self.is_train:
-            proximal = hk.dropout(hk.next_rng_key(), self.rate, proximal)
-        add = (residual + proximal) * (1.0 - qmask[:,:,None])
-        jax.debug.print('{} residual norm:\n{}',
-                self.module_name,
-                jnp.sqrt(jnp.power(residual, 2).sum(axis=2)))
-        jax.debug.print('{} proximal norm:\n{}',
-                self.module_name,
-                jnp.sqrt(jnp.power(proximal, 2).sum(axis=2)))
-
-        # return add
-        return self.layer_norm(add)
-
 class EmbedMatrix(hk.Module):
     def __init__(self, V, M):
         super().__init__(name='embed_matrix')
