@@ -31,23 +31,17 @@ def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
             yield decode(two)
 
     tokenizer = Tokenizer(BPE(unk_token='[UNK]'))
-
     special_tokens = ['[UNK]', '[PAD]', '[EOS]', '[BOS]']
-    # trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens,
-     #        end_of_word_suffix='</w>')
     trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
-
-    # tokenizer.normalizer = BertNormalizer()
-    # tokenizer.pre_tokenizer = BertPreTokenizer()
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    # tokenizer.pre_tokenizer = Sequence([Whitespace(), Punctuation()])
     tokenizer.train_from_iterator(convert(ds), trainer, num_elems)
     tokenizer.add_special_tokens(special_tokens)
     tokenizer.save(out_file)
 
-
 def token_dataset(download_dir, dataset_name, split, tokenizer_file, nproc):
     """
+    Create a tokenized tf.Dataset from `dataset_name` and `split`
+    Use `tokenizer_file` to initialize a tokenizer
     """
     tokenizer = data.get_tokenizer(tokenizer_file)
     builder = tfds.builder(dataset_name, data_dir=download_dir)

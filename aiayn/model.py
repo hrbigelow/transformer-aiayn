@@ -542,7 +542,7 @@ class Decoder(hk.Module):
         Compute log P(dec|enc_out)
         """
         B,T,_ = enc_out.shape
-        _,Q = dec.shape
+        _,Q = dec_seqs.shape
         dec_seqids = jnp.zeros((B,Q), dtype=jnp.int32)
         dec_tokids = jnp.repeat(jnp.arange(Q)[:,None], B, axis=0)
         dec_out, _ = self(enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids)

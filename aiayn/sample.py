@@ -1,3 +1,4 @@
+import tensorflow as tf
 import fire
 import sys
 import numpy as np
@@ -68,7 +69,7 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, hps):
     rng_key = jax.random.PRNGKey(hps.random_seed)
     n_vocab = tokenizer.get_vocab_size() + 2
 
-    fh = open(batch_file, 'r')
+    fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
     for lines in bit:
         lines = [ l.strip() for l in lines ]
@@ -77,17 +78,18 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, hps):
         # pairs = [ (a.strip(), b.strip()) for _, a, b in lines ]
         # first = [ f for f,_ in pairs ]
         # second = [ s for _,s in pairs ]
-        inputs = tokenizer.encode(lines)
+        inputs = tokenizer.encode_batch(lines)
+        inputs = jnp.array([item.ids for item in inputs])
         # pdb.set_trace()
 
         pred_toks, pred_scores = mod.apply(params, rng_key, inputs,
-                pad_value, hps.beam_search_alpha, hps.beam_search_beta,
+                special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
                 hps.beam_size, hps.max_target_len)
         # print(pred_toks.shape)
         top_toks = pred_toks[:,0]
         # pdb.set_trace()
         top_scores = pred_scores[:,0].tolist()
-        top_seqs = data.de_tokenize(tokenizer, top_toks, special_toks.eos_id)
+        top_seqs = tokenizer.decode_batch(top_toks)
         for i in range(len(top_seqs)):
             # _id = ids[i]
             seq = top_seqs[i]
