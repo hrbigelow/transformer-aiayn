@@ -59,7 +59,7 @@ def batch_gen(it, batch_size):
                 yield batch
     return gen()
 
-def predict_batch(mod, params, tokenizer, special_toks, batch_file, hps):
+def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps):
     """
     Generate translations for each input sentence in batch_file.
     tokenizer:  must have pad_token_id and eos_token_id set
@@ -69,8 +69,10 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, hps):
     rng_key = jax.random.PRNGKey(hps.random_seed)
     n_vocab = tokenizer.get_vocab_size() + 2
 
+    out_fh = tf.io.gfile.GFile(out_file, 'w')
     fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
+
     for lines in bit:
         lines = [ l.strip() for l in lines ]
         # lines = [ l.split('\t') for l in lines if l is not None ]
@@ -94,11 +96,12 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, hps):
             # _id = ids[i]
             seq = top_seqs[i]
             score = top_scores[i]
-            print(seq)
+            out_fh.write(f'{seq}\n')
             # print(f'{_id}\t{score:2.3f}\t{seq}')
     fh.close()
+    out_fh.close()
 
-def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file = None,
+def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
         hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
     hps = hparams.setup_hparams(hps_keys,
             dict(
@@ -116,7 +119,7 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file = None,
     mod, params = load_model(hps, special_toks.bos_id, special_toks.eos_id, n_vocab)
     if batch_file is None:
         return predict_interactive(mod, params, tokenizer, special_toks, hps)
-    return predict_batch(mod, params, tokenizer, special_toks, batch_file, hps)
+    return predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps)
 
 if __name__ == '__main__':
     fire.Fire(main)
