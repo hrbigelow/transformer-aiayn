@@ -73,7 +73,7 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
     fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
 
-    for lines in bit:
+    for chunk, lines in enumerate(bit):
         lines = [ l.strip() for l in lines ]
         # lines = [ l.split('\t') for l in lines if l is not None ]
         # ids = [ int(item) for item, _, _ in lines ]
@@ -98,6 +98,10 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
             score = top_scores[i]
             out_fh.write(f'{seq}\n')
             # print(f'{_id}\t{score:2.3f}\t{seq}')
+        if chunk % 10 == 0:
+            out_fh.flush()
+            print(f'Finished {chunk * hps.batch_dim0} sentences')
+
     fh.close()
     out_fh.close()
 
@@ -112,11 +116,10 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
     special_toks = data.get_special_tokens(tokenizer_file) 
     tokenizer = data.get_tokenizer(tokenizer_file)
     tokenizer.enable_padding(pad_id=special_toks.pad_id, pad_token='[PAD]')
-    # tokenizer.decoder = decoders.BPEDecoder(suffix=tokenizer.model.end_of_word_suffix)
-    # tokenizer.decoder = decoders.BPEDecoder()
     tokenizer.decoder = decoders.ByteLevel()
     n_vocab = tokenizer.get_vocab_size() + 2 # 
     mod, params = load_model(hps, special_toks.bos_id, special_toks.eos_id, n_vocab)
+    print(f'Loaded model from {ckpt_dir}/{resume_ckpt}')
     if batch_file is None:
         return predict_interactive(mod, params, tokenizer, special_toks, hps)
     return predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps)
