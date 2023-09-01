@@ -6,8 +6,9 @@ import jax
 import jax.numpy as jnp
 import flax
 import orbax.checkpoint
-from orbax.checkpoint import (CheckpointManager, CheckpointManagerOptions, 
-        SaveArgs, PyTreeCheckpointer)
+from orbax.checkpoint import (AsyncCheckpointer, CheckpointManager,
+        CheckpointManagerOptions, SaveArgs, PyTreeCheckpointer,
+        PyTreeCheckpointHandler)
 import optax
 import haiku as hk
 import os
@@ -224,8 +225,9 @@ def setup_train(hps, rng_key):
     # Set up orbax to save/restore custom optax types
     utils.register_handlers()
 
-    options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=10)
-    checkpointer = PyTreeCheckpointer()
+    options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=20)
+    checkpointer = AsyncCheckpointer(PyTreeCheckpointHandler(), timeout_secs=100)
+    # checkpointer = PyTreeCheckpointer()
     mngr = CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
@@ -326,6 +328,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
             dump = dict(state=state, item=item)
             state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), dump)
             mngr.save(step, dump, save_kwargs={'save_args': state_save_args})
+            mngr.wait_until_finished()
             raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
         report_idx = step % hps.report_every
