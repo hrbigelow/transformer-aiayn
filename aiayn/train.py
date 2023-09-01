@@ -327,7 +327,8 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
         if got_nan:
             dump = dict(state=state, item=item)
             state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), dump)
-            mngr.save(step, dump, save_kwargs={'save_args': state_save_args})
+            mngr.save(step, dump, save_kwargs={'save_args': state_save_args},
+                    force=True)
             mngr.wait_until_finished()
             raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
@@ -375,6 +376,10 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         )
     """
     jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
+    import socket
+    host_addr = socket.gethostbyname(socket.gethostname())
+    jax.distributed.initialize(f'{host_addr}:1234', num_processes=1, process_id=0)
+
     hps = hparams.setup_hparams(hps_keys, hps_overrides)
     print('Now running with parameters:')
     print(hps)
