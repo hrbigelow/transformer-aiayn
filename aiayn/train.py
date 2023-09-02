@@ -68,7 +68,7 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
         # jax.debug.print('got nan: {}', got_nan)
         # flattened, _ = jax.tree_util.tree_flatten_with_path(nan_grads)
         # flattened = [(jax.tree_util.keystr(k), v) for k, v in flattened]
-        jax.debug.print('nan_grads:\n{}', nan_grads)
+        # jax.debug.print('nan_grads:\n{}', nan_grads)
         # for path, val in flattened:
             # jax.debug.print('{path}: {}', val, path=jax.tree_util.keystr(path))
         l, e, g = tup
@@ -268,7 +268,6 @@ def setup_train(hps, rng_key):
         state = mngr.restore(hps.resume_ckpt, items=init_state, restore_kwargs=
                 {'restore_args': restore_args})
         initial_step = hps.resume_ckpt
-        print('restored state: ', state.keys())
 
     return update_fn, dataset, state, initial_step, mngr, lr_fn
 
@@ -317,7 +316,6 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step
     print('Replicated state across devices')
 
     step = initial_step 
-    print('state keys: ', state.keys())
     last_batch = state.get('last_batch', None)
     if last_batch is not None:
         dit = [last_batch]
