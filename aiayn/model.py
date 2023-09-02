@@ -555,7 +555,7 @@ class Decoder(hk.Module):
         terms = jax.lax.gather(dec_probs, inds, gd, (1,1))
         return terms.sum(axis=1)
 
-    def logits_step(self, enc_kvcache, step, dec_kvcache, xattn, new_toks):
+    def logits_step(self, step, enc_kvcache, dec_kvcache, xattn, new_toks):
         """
         step: token position of new_toks
         enc_kvcache: lbhstd  (encoder cache precomputed from some input)
@@ -593,13 +593,14 @@ class Decoder(hk.Module):
         O, E = beam_size, 2 * beam_size
         S = 2 # channels for key and value
         Q = max_length
+        dtype = enc_out.dtype
 
         enc_out = self.xnorm(enc_out)
-        enc_kvcache = self.enc_kvcache(enc_out)
+        enc_kvcache = hk.get_state('enc_kvcache', [L,B,H,S,C,K], dtype, jnp.zeros)
+        dec_kvcache = hk.get_state('dec_kvcache', [L,B,E,H,S,Q,K], dtype, jnp.zeros)
+        # hk.set_state('enc_kvcache', self.enc_kvcache(enc_out))
+        enc_kvcache = enc_kvcache.at[:].set(self.enc_kvcache(enc_out))
         enc_kvcache = jnp.repeat(enc_kvcache, E, 1)
-        beam_step_fn = functools.partial(funcs.beam_search_step, self.eos_id,
-                alpha, beta, beam_size)
-        logits_fn = functools.partial(self.logits_step, enc_kvcache)
 
         def bsearch_loop_fn(step, args):
             """
@@ -615,17 +616,19 @@ class Decoder(hk.Module):
 
             # populates xattn and dec_kvcache at position step
             # produces logits for position step+1 
-            dec_kvcache, xattn, logits = logits_fn(step, dec_kvcache, xattn, new_toks)
+            dec_kvcache, xattn, logits = self.logits_step(step, enc_kvcache,
+                    dec_kvcache, xattn, new_toks)
 
             dec_kvcache = dec_kvcache.reshape(L,B,E,H,S,Q,K)
             xattn = xattn.reshape(B,E,C)
             logits = logits.reshape(B,E,V)
 
-            # produces  
-            return beam_step_fn(step+1, logits, dec_kvcache, xattn, live_seqs, *rest)
+            beam_step_pars = self.eos_id, alpha, beta, beam_size
+            beam_step_data = step+1, logits, dec_kvcache, xattn, live_seqs, *rest
+            return funcs.beam_search_step(*beam_step_pars, *beam_step_data)
 
         # these two are local to the decoding step so have a flattened B*O batch dim
-        dec_kvcache = jnp.empty((L,B,E,H,S,Q,K), dtype=jnp.float32)
+        # dec_kvcache = jnp.empty((L,B,E,H,S,Q,K), dtype=jnp.float32)
         xattn = jnp.zeros((B,E,C), dtype=jnp.float32)
 
         live_seqs = jnp.zeros((B,E,Q), dtype=jnp.int32)
@@ -638,7 +641,7 @@ class Decoder(hk.Module):
         outs = jax.lax.fori_loop(0, max_length, bsearch_loop_fn, inits)
         _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
         # jax.debug.print('Final: fin_seqs:\n{}', fin_seqs)
-        return fin_seqs, fin_scores, enc_kvcache, dec_kvcache
+        return fin_seqs, fin_scores 
 
 
 class Model(hk.Module):
@@ -835,13 +838,16 @@ def make_model(hps, bos_id, eos_id, n_vocab, is_train):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
     args = (hps.dropout_rate, hps.pos_encoding_factor, arch, is_train, bos_id,
             eos_id, n_vocab)
-    def wrap_fn(*call_args):
-        mod = Model(*args)
-        if is_train:
+    if is_train:
+        def wrap_fn(*call_args):
+            mod = Model(*args)
             return mod.batch(*call_args)
-        else:
+        return hk.transform(wrap_fn)
+    else:
+        def wrap_fn(*call_args):
+            mod = Model(*args)
             return mod.beam_search(*call_args)
-    return hk.transform(wrap_fn)
+        return hk.transform_with_state(wrap_fn)
 
 def make_score_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))

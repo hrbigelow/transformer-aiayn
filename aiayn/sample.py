@@ -11,7 +11,8 @@ import pdb
 
 
 def load_model(hps, bos_id, eos_id, n_vocab):
-    mod = model.make_model(hps, bos_id, eos_id, n_vocab, False) 
+    is_train = False
+    mod = model.make_model(hps, bos_id, eos_id, n_vocab, is_train) 
     mngr = orbax.CheckpointManager(
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()))
     state = mngr.restore(hps.resume_ckpt)
@@ -73,20 +74,18 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
     fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
 
+    cache = None
+
     for chunk, lines in enumerate(bit):
         lines = [ l.strip() for l in lines ]
-        # lines = [ l.split('\t') for l in lines if l is not None ]
-        # ids = [ int(item) for item, _, _ in lines ]
-        # pairs = [ (a.strip(), b.strip()) for _, a, b in lines ]
-        # first = [ f for f,_ in pairs ]
-        # second = [ s for _,s in pairs ]
         inputs = tokenizer.encode_batch(lines)
         inputs = jnp.array([item.ids for item in inputs])
         # pdb.set_trace()
+        args = (special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
+                hps.beam_size, hps.max_target_len)
+        _, cache = mod.init(rng_key, inputs, *args) 
 
-        pred_toks, pred_scores, enc_kvcache, dec_kvcache = mod.apply(
-                params, rng_key, inputs, special_toks.pad_id, hps.beam_search_alpha,
-                hps.beam_search_beta, hps.beam_size, hps.max_target_len)
+        (pred_toks, pred_scores), cache = mod.apply(params, cache, rng_key, inputs, *args)
         # print(pred_toks.shape)
         top_toks = pred_toks[:,0]
         # pdb.set_trace()
@@ -122,7 +121,9 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
     print(f'Loaded model from {ckpt_dir}/{resume_ckpt}')
     if batch_file is None:
         return predict_interactive(mod, params, tokenizer, special_toks, hps)
-    return predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps)
+    else:
+        return predict_batch(mod, params, tokenizer, special_toks, batch_file,
+                out_file, hps)
 
 if __name__ == '__main__':
     fire.Fire(main)
