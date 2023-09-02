@@ -7,6 +7,7 @@ from etils import epath
 from typing import Optional, Any, NamedTuple, List
 import tensorflow as tf
 
+"""
 class NamedTupleHandler(type_handlers.TypeHandler):
   def __init__(self, cls):
     self.cls = cls
@@ -35,13 +36,13 @@ def register_handlers():
     type_handlers.register_type_handler(optax.ScaleByScheduleState,
             NamedTupleHandler(optax.ScaleByScheduleState), override=True)
 
+"""
 
 def construct_restore_args(target, sharding_tree, set_global_shape=True):
     """
     Shim from orbax.checkpoint.checkpoint_utils since that relies on
     jax.sharding.Mesh, which is not present in jax 0.3.25
     """
-
     def _restore_args(value: Any, sharding: jax.sharding.Sharding):
         restore_type = type(value)
         dtype = None

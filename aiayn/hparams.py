@@ -94,7 +94,8 @@ data = Hyperparams(
     shuffle_size = 1000, 
     swap_source_target = True,
     max_source_len = 80,
-    max_target_len = 128
+    max_target_len = 128,
+    ckpt_has_last_batch = False
     )
 
 sample = Hyperparams(

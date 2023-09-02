@@ -5,10 +5,7 @@ import psutil
 import jax
 import jax.numpy as jnp
 import flax
-import orbax.checkpoint
-from orbax.checkpoint import (AsyncCheckpointer, CheckpointManager,
-        CheckpointManagerOptions, SaveArgs, PyTreeCheckpointer,
-        PyTreeCheckpointHandler)
+import orbax.checkpoint as ocp
 import optax
 import haiku as hk
 import os
@@ -66,12 +63,12 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
         input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
         target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
         (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices)
-        # nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
-        # got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
+        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
+        got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
         # jax.debug.print('got nan: {}', got_nan)
         # flattened, _ = jax.tree_util.tree_flatten_with_path(nan_grads)
         # flattened = [(jax.tree_util.keystr(k), v) for k, v in flattened]
-        # jax.debug.print('nan_grads:\n{}', nan_grads)
+        jax.debug.print('nan_grads:\n{}', nan_grads)
         # for path, val in flattened:
             # jax.debug.print('{path}: {}', val, path=jax.tree_util.keystr(path))
         l, e, g = tup
@@ -223,12 +220,11 @@ def setup_train(hps, rng_key):
         raise RuntimeError(f'{repl_batch_size=} not divisible by {hps.accum_steps=}')
 
     # Set up orbax to save/restore custom optax types
-    utils.register_handlers()
+    # utils.register_handlers()
 
-    options = CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=20)
-    checkpointer = AsyncCheckpointer(PyTreeCheckpointHandler(), timeout_secs=100)
-    # checkpointer = PyTreeCheckpointer()
-    mngr = CheckpointManager(hps.ckpt_dir, checkpointer, options)
+    options = ocp.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=20)
+    checkpointer = ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler(), timeout_secs=100)
+    mngr = ocp.CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
     tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
@@ -257,27 +253,36 @@ def setup_train(hps, rng_key):
 
     # Initialize state de-novo
     item = next(dataset.as_numpy_iterator())
-    item = jax.tree_map(lambda ten: ten[:1], item)
-    params = mod.init(rng_key, item['inputs'], item['targets'])
+    init_item = jax.tree_map(lambda ten: ten[:1], item)
+    params = mod.init(rng_key, init_item['inputs'], init_item['targets'])
     opt_state = tx.init(params)
     initial_step = 0
     
-    if hps.resume_ckpt:
+    if hps.resume_ckpt is not None:
         init_state = dict(params=params, opt_state=opt_state)
+        if hps.ckpt_has_last_batch:
+            jnp_item = jax.tree_map(jnp.array, item)
+            init_state.update(last_batch=jnp_item)
         shardings = jax.tree_map(lambda x: x.sharding, init_state)
         restore_args = utils.construct_restore_args(init_state, shardings)
         state = mngr.restore(hps.resume_ckpt, items=init_state, restore_kwargs=
                 {'restore_args': restore_args})
-        print(f'Restored from checkpoint {hps.resume_ckpt}')
-        params = state['params']
-        opt_state = state['opt_state']
-        # print('restore: ', jax.tree_util.tree_structure(opt_state))
         initial_step = hps.resume_ckpt
+        print('restored state: ', state.keys())
 
-    return update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn
+    return update_fn, dataset, state, initial_step, mngr, lr_fn
 
-def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
-        initial_step, rng_key, logger):
+def shard_batch(batch):
+    nr = jax.local_device_count()
+    fn = lambda x: jnp.reshape(x, (nr, x.shape[0] // nr, *x.shape[1:]))
+    return jax.tree_map(fn, batch)
+
+def unshard_batch(batch):
+    fn = lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1], *x.shape[2:]))
+    return jax.tree_map(fn, batch)
+
+def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step, rng_key,
+        logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
@@ -302,33 +307,37 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
     if hps.with_metrics: 
         names = ('grad', 'param', 'update')
         fn = lambda x: { l: np.empty(hps.report_every) for l in names } 
-        norms = jax.tree_map(fn, params)
+        norms = jax.tree_map(fn, state['params'])
 
     # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
     update_fn_m = jax.pmap(update_fn, axis_name='batch')
     print('Compiled model')
-    state = dict(params=params, opt_state=opt_state, rng=rng_key)
+    state.update(rng=rng_key)
     state_m = flax.jax_utils.replicate(state)
-    print('Replicated params across devices')
+    print('Replicated state across devices')
 
     step = initial_step 
-    dit = dataset.as_numpy_iterator()
-    def reshape_fn(ten):
-        return jnp.reshape(ten, shape)
+    print('state keys: ', state.keys())
+    last_batch = state.get('last_batch', None)
+    if last_batch is not None:
+        dit = [last_batch]
+    else:
+        dit = dataset.as_numpy_iterator()
 
     for item in dit:
-        item = jax.tree_map(reshape_fn, item)
+        item = shard_batch(item)
         inputs = item['inputs']
         targets = item['targets']
         num_toks = inputs['counts'].sum() + targets['counts'].sum()
         state_m, metrics_m = update_fn_m(state_m, inputs, targets) 
         metrics = flax.jax_utils.unreplicate(metrics_m)
         got_nan = flax.jax_utils.unreplicate(state_m['got_nan'])
+
         if got_nan:
-            dump = dict(state=state, item=item)
-            state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), dump)
-            mngr.save(step, dump, save_kwargs={'save_args': state_save_args},
-                    force=True)
+            item = unshard_batch(item)
+            state.update(last_batch=item)
+            save_args = jax.tree_map(lambda _: ocp.SaveArgs(aggregate=True), state)
+            mngr.save(step, state, save_kwargs={'save_args': save_args}, force=True)
             mngr.wait_until_finished()
             raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
@@ -357,7 +366,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, params, opt_state, mngr,
 
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
             state = flax.jax_utils.unreplicate(state_m)
-            state_save_args = jax.tree_map(lambda _: SaveArgs(aggregate=True), state)
+            state_save_args = jax.tree_map(lambda _: ocp.SaveArgs(aggregate=True), state)
             mngr.save(step, state, save_kwargs={'save_args': state_save_args})
             # mngr.save(step, state)
             print(f'Saved checkpoint {step=}')
@@ -397,9 +406,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print(f'Prepared dataset from {hps.dataset_glob}')
 
     # move the save/restore logic here
-    update_fn, dataset, params, opt_state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
-    train_loop(hps, update_fn, lr_fn, dataset, params, opt_state, mngr, initial_step,
-            rng_key, logger)
+    update_fn, dataset, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
+    train_loop(hps, update_fn, lr_fn, dataset, state, mngr, initial_step, rng_key,
+            logger)
 
 if __name__ == '__main__':
     fire.Fire(main)
