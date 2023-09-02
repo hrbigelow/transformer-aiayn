@@ -638,7 +638,7 @@ class Decoder(hk.Module):
         outs = jax.lax.fori_loop(0, max_length, bsearch_loop_fn, inits)
         _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
         # jax.debug.print('Final: fin_seqs:\n{}', fin_seqs)
-        return fin_seqs, fin_scores
+        return fin_seqs, fin_scores, enc_kvcache, dec_kvcache
 
 
 class Model(hk.Module):

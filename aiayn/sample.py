@@ -32,7 +32,7 @@ def predict_interactive(mod, params, tokenizer, special_toks, hps):
             queries = [query] * hps.batch_dim0
             encodings = tokenizer.encode_batch(queries)
             query_toks = np.array([e.ids for e in encodings])
-            pred_toks, pred_scores = mod.apply(params, rng_key, query_toks,
+            pred_toks, pred_scores, _, _ = mod.apply(params, rng_key, query_toks,
                     special_toks.pad_id, hps.beam_search_alpha,
                     hps.beam_search_beta, hps.beam_size, hps.max_target_len)
             pred_scores0 = pred_scores[0].tolist()
@@ -84,9 +84,9 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
         inputs = jnp.array([item.ids for item in inputs])
         # pdb.set_trace()
 
-        pred_toks, pred_scores = mod.apply(params, rng_key, inputs,
-                special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
-                hps.beam_size, hps.max_target_len)
+        pred_toks, pred_scores, enc_kvcache, dec_kvcache = mod.apply(
+                params, rng_key, inputs, special_toks.pad_id, hps.beam_search_alpha,
+                hps.beam_search_beta, hps.beam_size, hps.max_target_len)
         # print(pred_toks.shape)
         top_toks = pred_toks[:,0]
         # pdb.set_trace()
