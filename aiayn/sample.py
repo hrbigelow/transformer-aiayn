@@ -34,8 +34,8 @@ def predict_interactive(mod, params, tokenizer, special_toks, hps):
             encodings = tokenizer.encode_batch(queries)
             query_toks = np.array([e.ids for e in encodings])
             pred_toks, pred_scores, _, _ = mod.apply(params, rng_key, query_toks,
-                    special_toks.pad_id, hps.beam_search_alpha,
-                    hps.beam_search_beta, hps.beam_size, hps.max_target_len)
+                    special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
+                    hps.beam_size, hps.max_source_len, hps.max_target_len)
             pred_scores0 = pred_scores[0].tolist()
             # print('Inference for batch element 0:')
             pred_sentences = tokenizer.decode_batch(pred_toks[0])
@@ -82,8 +82,9 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
         inputs = jnp.array([item.ids for item in inputs])
         # pdb.set_trace()
         args = (special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
-                hps.beam_size, hps.max_target_len)
-        _, cache = mod.init(rng_key, inputs, *args) 
+                hps.beam_size, hps.max_source_len, hps.max_target_len)
+        if cache is None:
+            _, cache = mod.init(rng_key, inputs, *args) 
 
         (pred_toks, pred_scores), cache = mod.apply(params, cache, rng_key, inputs, *args)
         # print(pred_toks.shape)

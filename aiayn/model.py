@@ -558,14 +558,14 @@ class Decoder(hk.Module):
     def logits_step(self, step, enc_kvcache, dec_kvcache, xattn, new_toks):
         """
         step: token position of new_toks
-        enc_kvcache: lbhstd  (encoder cache precomputed from some input)
-        dec_kvcache: lbhsqd  (decoder cache populated up to q=step-1)
-        xattn: bt
+        enc_kvcache: lbehstd  (encoder cache precomputed from some input)
+        dec_kvcache: lbehsqd  (decoder cache populated up to q=step-1)
+        xattn: bet
         new_toks: b  (batch of token ids at position step)
 
         returns:
         dec_kvcache, xattn updated with information at position step
-        logits:  for choosing tokens at position step+1
+        logits:  bev  for choosing tokens at position step+1
         """
         # print(f'Decoder::logits_step: '
                 # f'{enc_kvcache.shape=} {dec_kvcache.shape=} {xattn.shape=} '
@@ -573,15 +573,46 @@ class Decoder(hk.Module):
         tok_ids = jnp.full_like(new_toks[:,None], step)
         new_embed = self.embed_layer(new_toks[:,None], tok_ids)
 
+        dsh = dec_kvcache.shape
+        esh = enc_kvcache.shape
+        xsh = xattn.shape
+
+        dec_kvcache_flat = jnp.reshape(dec_kvcache, (dsh[0], dsh[1] * dsh[2], *dsh[3:]))
+        enc_kvcache_flat = jnp.reshape(enc_kvcache, (esh[0], esh[1] * esh[2], *esh[3:]))
+        xattn_flat = jnp.reshape(xattn, (xsh[0] * xsh[1], xsh[2]))
+
         for layer, mod in enumerate(self.layers):
-            dec_kvcache, xattn, new_embed = mod.incremental(layer, step,
-                    enc_kvcache, dec_kvcache, xattn, new_embed) 
+            dec_kvcache_flat, xattn_flat, new_embed = mod.incremental(layer, step,
+                    enc_kvcache, dec_kvcache_flat, xattn_flat, new_embed) 
+        dec_kvcache = jnp.reshape(dec_kvcache_flat, dsh)
+        xattn = jnp.reshape(xattn_flat, xsh)
+         #enc_kvcache = jnp.reshape(enc_kvcache_flat, esh)
 
         scaled_emb_mat = self.embed_mat() * self.scale_factor
         logits = jnp.einsum('bcm,vm -> bcv', new_embed, scaled_emb_mat)
+        logits = jnp.reshape(logits, (*xsh[:2], logits.shape[2]))
         return dec_kvcache, xattn, logits 
 
-    def beam_search(self, enc_out, alpha, beta, beam_size, max_length):
+    def bsearch_loop_fn(self, beam_search_pars, step, enc_kvcache, dec_kvcache,
+            xattn, live_seqs, *rest):
+        """
+        all loop variables are populated in [:step]
+        live_seqs, live_scores are populated in [:step+1]
+        Returns: updated version of args
+        """
+        new_toks = jax.lax.dynamic_slice_in_dim(live_seqs, step, 1, 2).ravel()
+        # fills in next step info for dec_kvcache and xattn, and computes logits
+        # populates xattn and dec_kvcache at position step
+        # produces logits for position step+1 
+        dec_kvcache, xattn, logits = self.logits_step(step, enc_kvcache, dec_kvcache,
+                xattn, new_toks)
+
+        beam_step_data = step+1, logits, dec_kvcache, xattn, live_seqs, *rest
+        return_vals = funcs.beam_search_step(*beam_search_pars, *beam_step_data)
+        return (enc_kvcache, *return_vals)
+
+    def beam_search(self, enc_out, alpha, beta, beam_size, max_source_len,
+            max_target_len):
         """
         Inputs:
         enc_out: btm  (output embedding from encoder)  
@@ -592,44 +623,22 @@ class Decoder(hk.Module):
         L, H, K, V = self.L, self.H, self.K, self.n_vocab
         O, E = beam_size, 2 * beam_size
         S = 2 # channels for key and value
-        Q = max_length
+        Q = max_target_len # target sentence (in the decoder)
+        T = max_source_len # source sentence (in the encoder)
         dtype = enc_out.dtype
 
         enc_out = self.xnorm(enc_out)
-        enc_kvcache = hk.get_state('enc_kvcache', [L,B,H,S,C,K], dtype, jnp.zeros)
+        enc_kvcache = hk.get_state('enc_kvcache', [L,B,H,S,T,K], dtype, jnp.zeros)
         dec_kvcache = hk.get_state('dec_kvcache', [L,B,E,H,S,Q,K], dtype, jnp.zeros)
         # hk.set_state('enc_kvcache', self.enc_kvcache(enc_out))
-        enc_kvcache = enc_kvcache.at[:].set(self.enc_kvcache(enc_out))
+        enc_vals = self.enc_kvcache(enc_out)
+        t = enc_vals.shape[4]
+        enc_kvcache = enc_kvcache.at[:,:,:,:,0:t,:].set(enc_vals)
         enc_kvcache = jnp.repeat(enc_kvcache, E, 1)
-
-        def bsearch_loop_fn(step, args):
-            """
-            all loop variables are populated in [:step]
-            live_seqs, live_scores are populated in [:step+1]
-            Returns: updated version of args
-            """
-            dec_kvcache, xattn, live_seqs, *rest = args
-            new_toks = jax.lax.dynamic_slice_in_dim(live_seqs, step, 1, 2).ravel()
-            # fills in next step info for dec_kvcache and xattn, and computes logits
-            dec_kvcache = dec_kvcache.reshape(L,B*E,H,S,Q,K)
-            xattn = xattn.reshape(B*E,C)
-
-            # populates xattn and dec_kvcache at position step
-            # produces logits for position step+1 
-            dec_kvcache, xattn, logits = self.logits_step(step, enc_kvcache,
-                    dec_kvcache, xattn, new_toks)
-
-            dec_kvcache = dec_kvcache.reshape(L,B,E,H,S,Q,K)
-            xattn = xattn.reshape(B,E,C)
-            logits = logits.reshape(B,E,V)
-
-            beam_step_pars = self.eos_id, alpha, beta, beam_size
-            beam_step_data = step+1, logits, dec_kvcache, xattn, live_seqs, *rest
-            return funcs.beam_search_step(*beam_step_pars, *beam_step_data)
 
         # these two are local to the decoding step so have a flattened B*O batch dim
         # dec_kvcache = jnp.empty((L,B,E,H,S,Q,K), dtype=jnp.float32)
-        xattn = jnp.zeros((B,E,C), dtype=jnp.float32)
+        xattn = jnp.zeros((B,E,T), dtype=jnp.float32)
 
         live_seqs = jnp.zeros((B,E,Q), dtype=jnp.int32)
         live_seqs = live_seqs.at[:,0,0].set(self.bos_id)
@@ -637,9 +646,13 @@ class Decoder(hk.Module):
         live_scores = live_scores.at[:,0].set(0.0)
         fin_seqs = jnp.zeros((B,O,Q), dtype=jnp.int32)
         fin_scores = jnp.full((B,O), -jnp.inf)
-        inits = dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores 
-        outs = jax.lax.fori_loop(0, max_length, bsearch_loop_fn, inits)
-        _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
+        inits = (enc_kvcache, dec_kvcache, xattn, live_seqs, live_scores, fin_seqs,
+                fin_scores)
+
+        bsearch_pars = self.eos_id, alpha, beta, beam_size
+        loop_fn = lambda step, vals: self.bsearch_loop_fn(bsearch_pars, step, *vals)
+        outs = jax.lax.fori_loop(0, max_target_len, loop_fn, inits)
+        _, _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
         # jax.debug.print('Final: fin_seqs:\n{}', fin_seqs)
         return fin_seqs, fin_scores 
 
@@ -722,7 +735,8 @@ class Model(hk.Module):
      sufficiently good hypothesis has been found, so the search will end quickly
 
     """
-    def beam_search(self, enc_tokens, pad_value, alpha, beta, beam_size, max_gen_length):
+    def beam_search(self, enc_tokens, pad_value, alpha, beta, beam_size,
+            max_source_len, max_target_len):
         """
         enc_tokens: bt (tokens, padded with pad_value
         alpha, beta, beam_size, max_gen_length: parameters for beam search
@@ -735,7 +749,8 @@ class Model(hk.Module):
         enc_out, _ = self.encoder(enc_tokens, enc_seqids, enc_tokids)
         # jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[:,0:2,0:2]\n{}', 
                 # enc_out.shape, enc_out[:,0:2,0:2])
-        return self.decoder.beam_search(enc_out, alpha, beta, beam_size, max_gen_length)
+        return self.decoder.beam_search(enc_out, alpha, beta, beam_size,
+                max_source_len, max_target_len)
 
     def total_params(self):
         # get total number of parameters
