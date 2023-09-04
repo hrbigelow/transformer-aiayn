@@ -23,7 +23,7 @@ class MultiHeadAttention(hk.Module):
         self.V = V # number of components in the value
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
-        self.scale_factor = np.sqrt(self.K)
+        self.kscale = np.sqrt(self.K) ** -1
         self.self_attn = is_self_attn
         self.with_attn_entropy = with_attn_entropy
 
@@ -50,9 +50,6 @@ class MultiHeadAttention(hk.Module):
         qmask = qmask[:,:,None]
         tmask = tmask[:,None,:]
         logits_mask = jnp.maximum(tmask, qtmask)
-        # jax.debug.print('tmask[0]:\n{}', tmask[0])
-        # jax.debug.print('qtmask[0]:\n{}', qtmask[0])
-        # jax.debug.print('logits_mask[0]:\n{}', logits_mask[0])
 
         kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
@@ -71,10 +68,9 @@ class MultiHeadAttention(hk.Module):
         # alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
         alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key)
         active = jnp.broadcast_to(1 - logits_mask[:,None,:,:], alogit.shape)
-        # att2 = jax.nn.softmax(alogit * self.scale_factor ** -1, axis=3, where=active,
+        # att2 = jax.nn.softmax(alogit * self.kscale, axis=3, where=active,
                 # initial=0.0)
-        att = funcs.softmax(alogit * self.scale_factor ** -1, axis=3, where=active,
-                initial=0.0)
+        att = funcs.softmax(alogit * self.kscale, axis=3, where=active, initial=0.0)
 
         """
         Computes the 
@@ -127,16 +123,19 @@ class MultiHeadAttention(hk.Module):
 
         return jnp.einsum('hmsd,btm->bhstd', wkv, kvinput)
 
-    def incremental(self, layer, step, kvcache, new_toks):
+    def incremental(self, layer, step, kvcache, new_toks, tmask):
         """
         kvcache: lbhstd (s=0 means key, s=1 means val) (from encoder or decoder)
         new_toks: b1m
+        tmask: bt
         i: index into kcache and vcache where new_toks resides
 
         returns a tuple of:
         kvcache (updated at position i)
         out: b1m 
         """
+        _,B,_,_,T,_ = kvcache.shape
+
         assert isinstance(layer, int), f'{layer=}'
         assert kvcache.ndim == 6, f'{kvcache.shape=}'
         assert new_toks.ndim == 3, f'{new_toks.shape=}'
@@ -152,30 +151,43 @@ class MultiHeadAttention(hk.Module):
         wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
         query = jnp.einsum('hmd,bm->bhd', wq, new_toks)
-        wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
-        kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, new_toks)
 
         if self.self_attn:
+            wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
+            kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, new_toks)
             kv_next_unsq = kv_next[None,:,:,:,None,:]
             kvcache = jax.lax.dynamic_update_slice(kvcache, kv_next_unsq, (layer,0,0,0,step,0))
-            C = kvcache.shape[4]
-            mask = jnp.greater(jnp.arange(C), step).astype(jnp.int32)
 
         kcache_layer = kvcache[layer,:,:,0,:,:]
-        attn_logit = jnp.einsum('bhd,bhtd->bht', query, kcache_layer)
+        alogit = jnp.einsum('bhd,bhtd->bht', query, kcache_layer)
+        logits_mask = tmask[:,None,:]
+        active = jnp.broadcast_to(1 - logits_mask, alogit.shape)
+        # if not self.self_attn and step == 5:
+            # jax.debug.print('step:\n{}\nactive:\n{}\n', step, active)
+
+        # if self.self_attn:
+            # jax.debug.print('step {}\nself: active incremental:\n{}\n', step,
+                    # active[0,0,:])
+        att = funcs.softmax(alogit * self.kscale, axis=2, where=active, initial=0.0)
+        att_nomask = funcs.softmax(alogit * self.kscale, axis=2)
+
         # if not self.self_attn:
-            # jax.debug.print('layer: {}, kcache[0,0,:,0:5]: {}', layer,
-                    # kcache_layer[0,0,:,0:5])
+            # jax.debug.print('step: {}\nlayer: {}\natt[0,:,:]\n{}\natt_nomask[0,:,:]\n{}\n',
+                    # step, layer, att[0,:,:], att_nomask[0,:,:])
 
-        if self.self_attn:
-            attn_logit = attn_logit + mask * -1e6
-            # jax.debug.print('step {}, logit: {}', step, logit[0])
+        # if not self.self_attn and layer == 1:
+            # jax.debug.print('step: {}\nquery:\n{}\natt[0,0,:]:\n{}\nactive[0,0,:]:\n{}\n', 
+                    # step, query[0,0,0:10], att[0,0,:], active[0,0,:])
 
-        attn_coeff = jax.nn.softmax(attn_logit * self.scale_factor ** -1, axis=2)
-        pre = jnp.einsum('bht,bhtd->bhd', attn_coeff, kvcache[layer,:,:,1])
+        # att = jax.nn.softmax(attn_logit * self.kscale, axis=2)
+        pre = jnp.einsum('bht,bhtd->bhd', att, kvcache[layer,:,:,1])
         out = jnp.einsum('hdm,bhd->bm', wo, pre)
 
-        coeff_summary = attn_coeff.sum(axis=1) # sum over heads
+        coeff_summary = att.sum(axis=1) # sum over heads
+
+        # if not self.self_attn:
+            # jax.debug.print('step: {}\nlayer: {}\ncoeff_summary[0,:]: {}\n',
+                    # step, layer, coeff_summary[0,:])
 
         if self.self_attn: 
             return kvcache, out[:,None,:]
@@ -398,20 +410,38 @@ class DecoderLayer(hk.Module):
         """
         return self.cross_att.get_keys_values(enc_out)
 
-    def incremental(self, layer, step, enc_kvcache, dec_kvcache, xattn, next_embed):
+    def incremental(self, layer, step, enc_mask, enc_kvcache, dec_kvcache, xattn,
+            next_embed):
         """
+        enc_mask: bt
         enc_kvcache: lbhstd 
         dec_kvcache: lbhsqd
         xattn:  bt  (cumulative attention on encoder embeddings)
         next_embed: b1m
         """
+        B = dec_kvcache.shape[1]
+        Q = dec_kvcache.shape[4]
         norm1 = self.norm1(next_embed)
-        dec_kvcache, att1 = self.self_att.incremental(layer, step, dec_kvcache, norm1)
+        assert next_embed.shape[0] == enc_kvcache.shape[1]
+        # print(f'{next_embed.shape=}')
+
+        step_mask = jnp.greater(jnp.arange(Q), step).astype(jnp.int32)
+        step_mask = jnp.repeat(step_mask[None,:], B, axis=0)
+        # jax.debug.print('layer: {}\nstep: {}\n_mask:\n{}\n', layer, step, step_mask)
+        dec_kvcache, att1 = self.self_att.incremental(layer, step, dec_kvcache,
+            norm1, step_mask)
         # norm1 = self.norm1(next_embed, att1)
         post_add1 = next_embed + att1
         norm2 = self.norm2(post_add1)
-        coeff, att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm2)
+        # jax.debug.print('layer: {}\nstep: {}\nenc_mask:\n{}\n', layer, step, enc_mask)
+
+        # enc_mask = jnp.zeros(enc_mask.shape)
+        # enc_mask = enc_mask.at[:,40:].set(1)
+        coeff, att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm2, enc_mask)
         xattn = xattn + coeff
+
+        # if step == 5:
+            # jax.debug.print('layer: {}\nstep: {}\natt2:\n{}\n', layer, step, att2)
 
         post_add2 = post_add1 + att2
         norm3 = self.norm3(post_add2)
@@ -440,7 +470,7 @@ class Decoder(hk.Module):
 
         self.embed_layer = InputEmbedding(self.embed_mat, pos_enc_factor) 
         self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
-        self.scale_factor = np.sqrt(arch['M']) ** -1
+        self.mscale = np.sqrt(arch['M']) ** -1
 
     def __call__(self, enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids):
         """
@@ -470,14 +500,14 @@ class Decoder(hk.Module):
         attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
         # attn_entropy_all = jnp.zeros_like(attn_entropy_all)
 
-        scaled_emb_mat = self.embed_mat() * self.scale_factor
+        scaled_emb_mat = self.embed_mat() * self.mscale
         out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
         # jax.debug.print('decoder_out: {}', out[0,0:5,0:20])
         return out, attn_entropy_all
 
     def enc_kvcache(self, enc_out):
         """
-        Computes the
+        Computes the kvcache for the cross-attention modules 
         return kvcache: lbhstd (s=0 means key, s=1 means val)
         """
         kvcache = []
@@ -510,7 +540,7 @@ class Decoder(hk.Module):
 
         enc_kvcache = self.enc_kvcache(enc_out)
         dec_kvcache = jnp.empty((L,B,H,S,Q,K), dtype=jnp.float32)
-        scaled_emb_mat = self.embed_mat() * self.scale_factor
+        scaled_emb_mat = self.embed_mat() * self.mscale
 
         dec_pred = jnp.empty((B, Q), dtype=jnp.int32)
         dec_pred = dec_pred.at[:,0].set(self.bos_id)
@@ -520,7 +550,7 @@ class Decoder(hk.Module):
         def step_fn(step, val):
             dec_kvcache, dec_pred, next_embed = val
             for layer, mod in enumerate(self.layers):
-                dec_kvcache, next_embed = mod.incremental(layer, step, enc_kvcache,
+                dec_kvcache, next_embed = mod.incremental(layer, step, enc_mask, enc_kvcache,
                         dec_kvcache, next_embed) 
             logits = jnp.einsum('bcm,vm -> bcv', next_embed, scaled_emb_mat)
             sample = jax.random.categorical(hk.next_rng_key(), logits, axis=2)
@@ -555,9 +585,10 @@ class Decoder(hk.Module):
         terms = jax.lax.gather(dec_probs, inds, gd, (1,1))
         return terms.sum(axis=1)
 
-    def logits_step(self, step, enc_kvcache, dec_kvcache, xattn, new_toks):
+    def logits_step(self, step, enc_mask, enc_kvcache, dec_kvcache, xattn, new_toks):
         """
         step: token position of new_toks
+        enc_mask: bet
         enc_kvcache: lbehstd  (encoder cache precomputed from some input)
         dec_kvcache: lbehsqd  (decoder cache populated up to q=step-1)
         xattn: bet
@@ -571,50 +602,58 @@ class Decoder(hk.Module):
                 # f'{enc_kvcache.shape=} {dec_kvcache.shape=} {xattn.shape=} '
                 # f'{new_toks.shape=}')
         tok_ids = jnp.full_like(new_toks[:,None], step)
-        new_embed = self.embed_layer(new_toks[:,None], tok_ids)
+        new_embed = self.embed_layer(new_toks[:,None], tok_ids) # b1m
 
         dsh = dec_kvcache.shape
         esh = enc_kvcache.shape
         xsh = xattn.shape
+        msh = enc_mask.shape
 
+        enc_mask_flat = jnp.reshape(enc_mask, (msh[0] * msh[1], msh[2]))
         dec_kvcache_flat = jnp.reshape(dec_kvcache, (dsh[0], dsh[1] * dsh[2], *dsh[3:]))
         enc_kvcache_flat = jnp.reshape(enc_kvcache, (esh[0], esh[1] * esh[2], *esh[3:]))
         xattn_flat = jnp.reshape(xattn, (xsh[0] * xsh[1], xsh[2]))
 
         for layer, mod in enumerate(self.layers):
             dec_kvcache_flat, xattn_flat, new_embed = mod.incremental(layer, step,
-                    enc_kvcache, dec_kvcache_flat, xattn_flat, new_embed) 
+                    enc_mask_flat, enc_kvcache_flat, dec_kvcache_flat, xattn_flat, new_embed) 
         dec_kvcache = jnp.reshape(dec_kvcache_flat, dsh)
         xattn = jnp.reshape(xattn_flat, xsh)
          #enc_kvcache = jnp.reshape(enc_kvcache_flat, esh)
 
-        scaled_emb_mat = self.embed_mat() * self.scale_factor
-        logits = jnp.einsum('bcm,vm -> bcv', new_embed, scaled_emb_mat)
-        logits = jnp.reshape(logits, (*xsh[:2], logits.shape[2]))
+        scaled_emb_mat = self.embed_mat() * self.mscale
+        logits = jnp.einsum('bm,vm -> bv', new_embed[:,0,:], scaled_emb_mat)
+        # print(f'Before: {logits.shape=}')
+        logits = jnp.reshape(logits, (*xsh[:2], logits.shape[1]))
+        # print(f'After: {logits.shape=}')
         return dec_kvcache, xattn, logits 
 
-    def bsearch_loop_fn(self, beam_search_pars, step, enc_kvcache, dec_kvcache,
+    def bsearch_loop_fn(self, beam_search_pars, enc_mask, enc_kvcache, step, dec_kvcache,
             xattn, live_seqs, *rest):
         """
+        enc_mask: bet
         all loop variables are populated in [:step]
         live_seqs, live_scores are populated in [:step+1]
         Returns: updated version of args
         """
-        new_toks = jax.lax.dynamic_slice_in_dim(live_seqs, step, 1, 2).ravel()
+        new_toks = jax.lax.dynamic_slice_in_dim(live_seqs, step, 1, axis=2).ravel()
         # fills in next step info for dec_kvcache and xattn, and computes logits
         # populates xattn and dec_kvcache at position step
         # produces logits for position step+1 
-        dec_kvcache, xattn, logits = self.logits_step(step, enc_kvcache, dec_kvcache,
-                xattn, new_toks)
+        dec_kvcache, xattn, logits = self.logits_step(step, enc_mask, enc_kvcache,
+                dec_kvcache, xattn, new_toks)
+        # jax.debug.print('step {}\nlogits\n{}\n', step, logits[0,0,:10])
+        # jax.debug.print('step {}\nxattn:\n{}\n', step, xattn)
+        # print('shapes: ', enc_mask.shape, xattn.shape)
 
-        beam_step_data = step+1, logits, dec_kvcache, xattn, live_seqs, *rest
-        return_vals = funcs.beam_search_step(*beam_search_pars, *beam_step_data)
-        return (enc_kvcache, *return_vals)
+        beam_step_data = step+1, enc_mask, logits, dec_kvcache, xattn, live_seqs, *rest
+        return funcs.beam_search_step(*beam_search_pars, *beam_step_data)
 
-    def beam_search(self, enc_out, alpha, beta, beam_size, max_source_len,
+    def beam_search(self, enc_mask, enc_out, alpha, beta, beam_size, max_source_len,
             max_target_len):
         """
         Inputs:
+        enc_mask: bt
         enc_out: btm  (output embedding from encoder)  
 
         See funcs.beam_search_step for details
@@ -628,16 +667,16 @@ class Decoder(hk.Module):
         dtype = enc_out.dtype
 
         enc_out = self.xnorm(enc_out)
-        enc_kvcache = hk.get_state('enc_kvcache', [L,B,H,S,T,K], dtype, jnp.zeros)
-        dec_kvcache = hk.get_state('dec_kvcache', [L,B,E,H,S,Q,K], dtype, jnp.zeros)
-        # hk.set_state('enc_kvcache', self.enc_kvcache(enc_out))
-        enc_vals = self.enc_kvcache(enc_out)
-        t = enc_vals.shape[4]
-        enc_kvcache = enc_kvcache.at[:,:,:,:,0:t,:].set(enc_vals)
-        enc_kvcache = jnp.repeat(enc_kvcache, E, 1)
+        enc_kvcache = self.enc_kvcache(enc_out)
+        # dec_kvcache = hk.get_state('dec_kvcache', [L,B,E,H,S,Q,K], dtype, jnp.zeros)
+        enc_kvcache = jnp.repeat(enc_kvcache[:,:,None], E, 2)
+        # jax.debug.print('enc_kvcache:\n{}\n', enc_kvcache[0,0,0,0,:,:10,:10])
+        enc_mask = jnp.repeat(enc_mask[:,None,:], E, 1)
+        # jax.debug.print('beam_search: enc_out:\n{}\n', enc_out)
+        # jax.debug.print('beam_search: enc_mask:\n{}\n', enc_mask)
 
         # these two are local to the decoding step so have a flattened B*O batch dim
-        # dec_kvcache = jnp.empty((L,B,E,H,S,Q,K), dtype=jnp.float32)
+        dec_kvcache = jnp.empty((L,B,E,H,S,Q,K), dtype=jnp.float32)
         xattn = jnp.zeros((B,E,T), dtype=jnp.float32)
 
         live_seqs = jnp.zeros((B,E,Q), dtype=jnp.int32)
@@ -646,13 +685,13 @@ class Decoder(hk.Module):
         live_scores = live_scores.at[:,0].set(0.0)
         fin_seqs = jnp.zeros((B,O,Q), dtype=jnp.int32)
         fin_scores = jnp.full((B,O), -jnp.inf)
-        inits = (enc_kvcache, dec_kvcache, xattn, live_seqs, live_scores, fin_seqs,
-                fin_scores)
+        inits = (dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores)
 
         bsearch_pars = self.eos_id, alpha, beta, beam_size
-        loop_fn = lambda step, vals: self.bsearch_loop_fn(bsearch_pars, step, *vals)
+        loop_fn = lambda step, vals: self.bsearch_loop_fn(bsearch_pars, enc_mask,
+                enc_kvcache, step, *vals)
         outs = jax.lax.fori_loop(0, max_target_len, loop_fn, inits)
-        _, _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
+        _, _, live_seqs, live_scores, fin_seqs, fin_scores = outs
         # jax.debug.print('Final: fin_seqs:\n{}', fin_seqs)
         return fin_seqs, fin_scores 
 
@@ -742,14 +781,14 @@ class Model(hk.Module):
         alpha, beta, beam_size, max_gen_length: parameters for beam search
         """
         B,T = enc_tokens.shape
-        enc_tokids = jnp.reshape(jnp.tile(jnp.arange(T), B), (B,T)) 
+        enc_tokids = jnp.repeat(jnp.arange(T)[None,:], B, axis=0)
         enc_tokids = jnp.where(enc_tokens == pad_value, -1, enc_tokids)
+        enc_mask = jnp.where(enc_tokens == pad_value, 1, 0)
         # jax.debug.print('enc_tokids:\n{}', enc_tokids)
         enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
         enc_out, _ = self.encoder(enc_tokens, enc_seqids, enc_tokids)
-        # jax.debug.print('Model: beam_search: enc_out.shape: {}, enc_out[:,0:2,0:2]\n{}', 
-                # enc_out.shape, enc_out[:,0:2,0:2])
-        return self.decoder.beam_search(enc_out, alpha, beta, beam_size,
+        # jax.debug.print('Model: beam_search: enc_out[0,0:10,0:4]\n{}', enc_out[0,0:10,0:4])
+        return self.decoder.beam_search(enc_mask, enc_out, alpha, beta, beam_size,
                 max_source_len, max_target_len)
 
     def total_params(self):
@@ -862,7 +901,7 @@ def make_model(hps, bos_id, eos_id, n_vocab, is_train):
         def wrap_fn(*call_args):
             mod = Model(*args)
             return mod.beam_search(*call_args)
-        return hk.transform_with_state(wrap_fn)
+        return hk.transform(wrap_fn)
 
 def make_score_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))

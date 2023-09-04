@@ -138,12 +138,13 @@ for step in 1..max_steps:
     L = { l for l in L if l[-1] != EOS }
 """
 
-def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
+def beam_search_step(eos_id, alpha, beta, beam_size, step, enc_mask, logits, dec_kvcache,
         xattn, live_seqs, live_scores, fin_seqs, fin_scores):
     """
     Consumes the next prediction logits
     logits:      bev   (logits for generating tokens at position step+1)
-    Consumes and returns these:
+
+    Returns
     dec_kvcache: lbehsqd  (populated in [:step]
     xattn:  bet   sum of cross-attention coefficients
     live_seqs:   beq,  the set L (live sequences) 
@@ -151,8 +152,7 @@ def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
     fin_seqs:    boq,  the set F (finished sequences)
     fin_scores:  bo,   scores (complete) for fin_seqs (-inf for non-existent)
     """
-    jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
-    score_fn = functools.partial(beam_search_score, alpha, beta)
+    score_fn = functools.partial(beam_search_score, alpha, beta, enc_mask)
     # jax.debug.print('step {}, xattn: {}', step, xattn)
 
     V = logits.shape[2]
@@ -192,7 +192,7 @@ def beam_search_step(eos_id, alpha, beta, beam_size, step, logits, dec_kvcache,
     args = dec_kvcache, xattn, live_seqs, live_scores, fin_seqs, fin_scores
     return jax.lax.cond(any_finished, update_fn, passthru_fn, args)
 
-def beam_search_score(alpha, beta, out_len, scores, xattn):
+def beam_search_score(alpha, beta, enc_mask, out_len, scores, xattn):
     """
     Inputs:
     alpha:    float parameter
@@ -200,6 +200,7 @@ def beam_search_score(alpha, beta, out_len, scores, xattn):
     out_len:  integer parameter
     scores:   bo  log(P(output|input))
     xattn:  bot  (this is sum_j { p_{ij} } in eq 14, where i := t
+    enc_mask: bt  positions in target space to ignore
 
     Scoring function used by beam search, see eq 14 from
     https://arxiv.org/pdf/1609.08144.pdf, as referenced by original AIAYN paper.
@@ -211,7 +212,10 @@ def beam_search_score(alpha, beta, out_len, scores, xattn):
     numer = (5.0 + out_len) ** alpha
     denom = 6.0 ** alpha
     lp = numer / denom
-    sum_log_attn = jnp.log(jnp.minimum(xattn, 1.0)).sum(axis=2)
+    # TODO: use mask here
+    active = 1 - enc_mask
+    sum_log_attn = jnp.sum(jnp.log(jnp.minimum(xattn, 1.0)), axis=2, initial=0.0, where=active)
+    # sum_log_attn = jnp.log(jnp.minimum(xattn, 1.0)).sum(axis=2)
     # jax.debug.print('sum_log_attn:\n{}', sum_log_attn)
     cp = beta * sum_log_attn 
     return scores / lp + cp

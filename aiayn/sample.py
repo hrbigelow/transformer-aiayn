@@ -9,6 +9,7 @@ from aiayn import model, data, hparams
 from tokenizers import decoders
 import pdb
 
+jnp.set_printoptions(precision=3, threshold=100000, edgeitems=100, linewidth=180)
 
 def load_model(hps, bos_id, eos_id, n_vocab):
     is_train = False
@@ -67,26 +68,25 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
     batch_file has lines of the form:
     sentence
     """
-    rng_key = jax.random.PRNGKey(hps.random_seed)
+    tokenizer.enable_padding(length=hps.max_source_len, pad_id=special_toks.pad_id,
+            pad_token='[PAD]')
     n_vocab = tokenizer.get_vocab_size() + 2
 
     out_fh = tf.io.gfile.GFile(out_file, 'w')
     fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
-
-    cache = None
+    rng_key = jax.random.PRNGKey(hps.random_seed)
 
     for chunk, lines in enumerate(bit):
         lines = [ l.strip() for l in lines ]
         inputs = tokenizer.encode_batch(lines)
         inputs = jnp.array([item.ids for item in inputs])
+        # print('inputs: ', inputs)
         # pdb.set_trace()
         args = (special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
                 hps.beam_size, hps.max_source_len, hps.max_target_len)
-        if cache is None:
-            _, cache = mod.init(rng_key, inputs, *args) 
 
-        (pred_toks, pred_scores), cache = mod.apply(params, cache, rng_key, inputs, *args)
+        pred_toks, pred_scores = mod.apply(params, rng_key, inputs, *args)
         # print(pred_toks.shape)
         top_toks = pred_toks[:,0]
         # pdb.set_trace()
@@ -96,6 +96,7 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
             # _id = ids[i]
             seq = top_seqs[i]
             score = top_scores[i]
+            # out_fh.write(f'{score}\t{seq}\n')
             out_fh.write(f'{seq}\n')
             # print(f'{_id}\t{score:2.3f}\t{seq}')
         if chunk % 10 == 0:
