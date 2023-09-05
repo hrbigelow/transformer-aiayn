@@ -240,11 +240,12 @@ class EmbedMatrix(hk.Module):
         return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
 
 class InputEmbedding(hk.Module):
-    def __init__(self, embed_mat, matrix_scale_factor, pos_factor):
+    def __init__(self, embed_mat, matrix_scale_factor, pos_factor, dropout_rate):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
         self.mat_factor = matrix_scale_factor
         self.pos_factor = pos_factor 
+        self.dropout_rate = dropout_rate
 
     def positional_embedding(self, tokids):
         # tokids: bc
@@ -271,8 +272,8 @@ class InputEmbedding(hk.Module):
         
         # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
         # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
-        return embed * self.mat_factor + pos_embed * self.pos_factor
-
+        full_embed = embed * self.mat_factor + pos_embed * self.pos_factor
+        return hk.dropout(hk.next_rng_key(), self.dropout_rate, full_embed)
 
 class EncoderLayer(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, layer_num):
@@ -318,7 +319,8 @@ class EncoderLayer(hk.Module):
 class Encoder(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, embed_mat):
         super().__init__(name='enc')
-        self.embed_layer = InputEmbedding(embed_mat, jnp.sqrt(arch['M']), pos_enc_factor) 
+        self.embed_layer = InputEmbedding(embed_mat, jnp.sqrt(arch['M']),
+                pos_enc_factor, dropout_rate) 
         self.layers = [EncoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
 
     def __call__(self, seqs, seqids, tokids):
@@ -468,7 +470,8 @@ class Decoder(hk.Module):
         else:
             self.embed_mat = embed_mat
 
-        self.embed_layer = InputEmbedding(self.embed_mat, jnp.sqrt(arch['M']), pos_enc_factor) 
+        self.embed_layer = InputEmbedding(self.embed_mat, jnp.sqrt(arch['M']),
+                pos_enc_factor, dropout_rate) 
         self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
         self.mscale = np.sqrt(arch['M']) ** -1
 
