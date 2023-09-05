@@ -235,13 +235,15 @@ class EmbedMatrix(hk.Module):
         self.M = M
 
     def __call__(self):
-        init = hk.initializers.RandomNormal(1.0, 0.0)
+        scale = jnp.sqrt(self.V) ** -1
+        init = hk.initializers.RandomNormal(scale, 0.0)
         return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
 
 class InputEmbedding(hk.Module):
-    def __init__(self, embed_mat, pos_factor):
+    def __init__(self, embed_mat, matrix_scale_factor, pos_factor):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
+        self.mat_factor = matrix_scale_factor
         self.pos_factor = pos_factor 
 
     def positional_embedding(self, tokids):
@@ -269,7 +271,7 @@ class InputEmbedding(hk.Module):
         
         # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
         # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
-        return embed + pos_embed * self.pos_factor
+        return embed * self.mat_factor + pos_embed * self.pos_factor
 
 
 class EncoderLayer(hk.Module):
@@ -316,7 +318,7 @@ class EncoderLayer(hk.Module):
 class Encoder(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, embed_mat):
         super().__init__(name='enc')
-        self.embed_layer = InputEmbedding(embed_mat, pos_enc_factor) 
+        self.embed_layer = InputEmbedding(embed_mat, jnp.sqrt(arch['M']), pos_enc_factor) 
         self.layers = [EncoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
 
     def __call__(self, seqs, seqids, tokids):
@@ -466,7 +468,7 @@ class Decoder(hk.Module):
         else:
             self.embed_mat = embed_mat
 
-        self.embed_layer = InputEmbedding(self.embed_mat, pos_enc_factor) 
+        self.embed_layer = InputEmbedding(self.embed_mat, jnp.sqrt(arch['M']), pos_enc_factor) 
         self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
         self.mscale = np.sqrt(arch['M']) ** -1
 
@@ -498,8 +500,7 @@ class Decoder(hk.Module):
         attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
         # attn_entropy_all = jnp.zeros_like(attn_entropy_all)
 
-        scaled_emb_mat = self.embed_mat() * self.mscale
-        out = jnp.einsum('bcm,tm -> bct', out, scaled_emb_mat)
+        out = jnp.einsum('bcm,tm -> bct', out, self.embed_mat())
         # jax.debug.print('decoder_out: {}', out[0,0:5,0:20])
         return out, attn_entropy_all
 
@@ -538,7 +539,6 @@ class Decoder(hk.Module):
 
         enc_kvcache = self.enc_kvcache(enc_out)
         dec_kvcache = jnp.empty((L,B,H,S,Q,K), dtype=jnp.float32)
-        scaled_emb_mat = self.embed_mat() * self.mscale
 
         dec_pred = jnp.empty((B, Q), dtype=jnp.int32)
         dec_pred = dec_pred.at[:,0].set(self.bos_id)
@@ -550,7 +550,7 @@ class Decoder(hk.Module):
             for layer, mod in enumerate(self.layers):
                 dec_kvcache, next_embed = mod.incremental(layer, step, enc_mask, enc_kvcache,
                         dec_kvcache, next_embed) 
-            logits = jnp.einsum('bcm,vm -> bcv', next_embed, scaled_emb_mat)
+            logits = jnp.einsum('bcm,vm -> bcv', next_embed, self.embed_mat())
             sample = jax.random.categorical(hk.next_rng_key(), logits, axis=2)
             tok_ids = jax.lax.dynamic_slice_in_dim(dec_tokids, step+1, 1, 1)
             next_embed = self.embed_layer(sample, tok_ids) 
@@ -621,8 +621,7 @@ class Decoder(hk.Module):
         xattn = jnp.reshape(xattn, msh)
          #enc_kvcache = jnp.reshape(enc_kvcache_flat, esh)
 
-        scaled_emb_mat = self.embed_mat() * self.mscale
-        logits = jnp.einsum('bm,vm -> bv', new_embed[:,0,:], scaled_emb_mat)
+        logits = jnp.einsum('bm,vm -> bv', new_embed[:,0,:], self.embed_mat())
         # print(f'Before: {logits.shape=}')
         logits = jnp.reshape(logits, (*msh[:2], logits.shape[1]))
         # print(f'After: {logits.shape=}')

@@ -256,16 +256,16 @@ def setup_train(hps, rng_key):
     init_item = jax.tree_map(lambda ten: ten[:1], item)
     params = mod.init(rng_key, init_item['inputs'], init_item['targets'])
     opt_state = tx.init(params)
+    state = dict(params=params, opt_state=opt_state)
     initial_step = 0
     
     if hps.resume_ckpt is not None:
-        init_state = dict(params=params, opt_state=opt_state)
         if hps.ckpt_has_last_batch:
             jnp_item = jax.tree_map(jnp.array, item)
-            init_state.update(last_batch=jnp_item)
-        shardings = jax.tree_map(lambda x: x.sharding, init_state)
-        restore_args = utils.construct_restore_args(init_state, shardings)
-        state = mngr.restore(hps.resume_ckpt, items=init_state, restore_kwargs=
+            state.update(last_batch=jnp_item)
+        shardings = jax.tree_map(lambda x: x.sharding, state)
+        restore_args = utils.construct_restore_args(state, shardings)
+        state = mngr.restore(hps.resume_ckpt, items=state, restore_kwargs=
                 {'restore_args': restore_args})
         initial_step = hps.resume_ckpt
 
