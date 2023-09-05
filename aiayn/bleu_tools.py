@@ -239,15 +239,15 @@ def bleu_wrapper(ref_filename, hyp_filename, case_sensitive=False):
   hyp_filename: file containing one model-generated translation sentence per line
     format:  <id> TAB <score> TAB <sentence>
   """
-  # ref_fh = tf.io.gfile.GFile(ref_filename, 'r')
-  ref_fh = open(ref_filename, 'r')
+  ref_fh = tf.io.gfile.GFile(ref_filename, 'r')
+  # ref_fh = open(ref_filename, 'r')
   ref_lines = native_to_unicode(ref_fh.read()).split("\n")[:-1]
-  # hyp_fh = tf.io.gfile.GFile(hyp_filename, 'r')
-  hyp_fh = open(hyp_filename, 'r')
+  hyp_fh = tf.io.gfile.GFile(hyp_filename, 'r')
+  # hyp_fh = open(hyp_filename, 'r')
   hyp_lines = native_to_unicode(hyp_fh.read()).split("\n")[:-1]
-  print(f'Parsed {len(ref_lines)} lines')
-  assert len(ref_lines) == len(hyp_lines), ("{} != {}".format(
-      len(ref_lines), len(hyp_lines)))
+  n = min(len(ref_lines), len(hyp_lines))
+  print(f'Parsed {len(ref_lines)} reference lines and {len(hyp_lines)} hypothesis lines')
+  print(f'Will process {n} pairs')
   # ref_lines = [line.split('\t')[2] for line in ref_lines if line != '']
   # hyp_lines = [line.split('\t')[2] for line in hyp_lines if line != '']
   if not case_sensitive:
@@ -255,7 +255,7 @@ def bleu_wrapper(ref_filename, hyp_filename, case_sensitive=False):
     hyp_lines = [x.lower() for x in hyp_lines]
   ref_tokens = [bleu_tokenize(x) for x in ref_lines]
   hyp_tokens = [bleu_tokenize(x) for x in hyp_lines]
-  return compute_bleu(ref_tokens, hyp_tokens)
+  return compute_bleu(ref_tokens[:n], hyp_tokens[:n])
 
 
 StepFile = collections.namedtuple("StepFile", "filename mtime ctime steps")

@@ -169,7 +169,7 @@ class MultiHeadAttention(hk.Module):
             # jax.debug.print('step {}\nself: active incremental:\n{}\n', step,
                     # active[0,0,:])
         att = funcs.softmax(alogit * self.kscale, axis=2, where=active, initial=0.0)
-        att_nomask = funcs.softmax(alogit * self.kscale, axis=2)
+        # att_nomask = funcs.softmax(alogit * self.kscale, axis=2)
 
         # if not self.self_attn:
             # jax.debug.print('step: {}\nlayer: {}\natt[0,:,:]\n{}\natt_nomask[0,:,:]\n{}\n',
@@ -183,7 +183,7 @@ class MultiHeadAttention(hk.Module):
         pre = jnp.einsum('bht,bhtd->bhd', att, kvcache[layer,:,:,1])
         out = jnp.einsum('hdm,bhd->bm', wo, pre)
 
-        coeff_summary = att.sum(axis=1) # sum over heads
+        coeff_summary = att.mean(axis=1) # mean over heads 
 
         # if not self.self_attn:
             # jax.debug.print('step: {}\nlayer: {}\ncoeff_summary[0,:]: {}\n',
@@ -410,8 +410,7 @@ class DecoderLayer(hk.Module):
         """
         return self.cross_att.get_keys_values(enc_out)
 
-    def incremental(self, layer, step, enc_mask, enc_kvcache, dec_kvcache, xattn,
-            next_embed):
+    def incremental(self, layer, step, enc_mask, enc_kvcache, dec_kvcache, next_embed):
         """
         enc_mask: bt
         enc_kvcache: lbhstd 
@@ -438,7 +437,6 @@ class DecoderLayer(hk.Module):
         # enc_mask = jnp.zeros(enc_mask.shape)
         # enc_mask = enc_mask.at[:,40:].set(1)
         coeff, att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm2, enc_mask)
-        xattn = xattn + coeff
 
         # if step == 5:
             # jax.debug.print('layer: {}\nstep: {}\natt2:\n{}\n', layer, step, att2)
@@ -448,7 +446,7 @@ class DecoderLayer(hk.Module):
         ff = self.ff(norm3)
         out = post_add2 + ff
         # out = self.norm3(norm2, ff)
-        return dec_kvcache, xattn, out
+        return dec_kvcache, coeff, out
 
 class Decoder(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, bos_id, eos_id,
@@ -585,18 +583,18 @@ class Decoder(hk.Module):
         terms = jax.lax.gather(dec_probs, inds, gd, (1,1))
         return terms.sum(axis=1)
 
-    def logits_step(self, step, enc_mask, enc_kvcache, dec_kvcache, xattn, new_toks):
+    def logits_step(self, step, enc_mask, enc_kvcache, dec_kvcache, new_toks):
         """
         step: token position of new_toks
         enc_mask: bet
         enc_kvcache: lbehstd  (encoder cache precomputed from some input)
         dec_kvcache: lbehsqd  (decoder cache populated up to q=step-1)
-        xattn: bet
         new_toks: b  (batch of token ids at position step)
 
         returns:
         dec_kvcache, xattn updated with information at position step
         logits:  bev  for choosing tokens at position step+1
+        xattn: bet  cumulative normalized attention
         """
         # print(f'Decoder::logits_step: '
                 # f'{enc_kvcache.shape=} {dec_kvcache.shape=} {xattn.shape=} '
@@ -606,47 +604,51 @@ class Decoder(hk.Module):
 
         dsh = dec_kvcache.shape
         esh = enc_kvcache.shape
-        xsh = xattn.shape
         msh = enc_mask.shape
 
         enc_mask_flat = jnp.reshape(enc_mask, (msh[0] * msh[1], msh[2]))
         dec_kvcache_flat = jnp.reshape(dec_kvcache, (dsh[0], dsh[1] * dsh[2], *dsh[3:]))
         enc_kvcache_flat = jnp.reshape(enc_kvcache, (esh[0], esh[1] * esh[2], *esh[3:]))
-        xattn_flat = jnp.reshape(xattn, (xsh[0] * xsh[1], xsh[2]))
 
+        xattn = jnp.zeros_like(enc_mask_flat)
         for layer, mod in enumerate(self.layers):
-            dec_kvcache_flat, xattn_flat, new_embed = mod.incremental(layer, step,
-                    enc_mask_flat, enc_kvcache_flat, dec_kvcache_flat, xattn_flat, new_embed) 
+            dec_kvcache_flat, xattn_layer, new_embed = mod.incremental(layer, step,
+                    enc_mask_flat, enc_kvcache_flat, dec_kvcache_flat, new_embed) 
+            xattn = xattn + xattn_layer
         dec_kvcache = jnp.reshape(dec_kvcache_flat, dsh)
-        xattn = jnp.reshape(xattn_flat, xsh)
+        xattn = xattn / self.L
+
+        xattn = jnp.reshape(xattn, msh)
          #enc_kvcache = jnp.reshape(enc_kvcache_flat, esh)
 
         scaled_emb_mat = self.embed_mat() * self.mscale
         logits = jnp.einsum('bm,vm -> bv', new_embed[:,0,:], scaled_emb_mat)
         # print(f'Before: {logits.shape=}')
-        logits = jnp.reshape(logits, (*xsh[:2], logits.shape[1]))
+        logits = jnp.reshape(logits, (*msh[:2], logits.shape[1]))
         # print(f'After: {logits.shape=}')
         return dec_kvcache, xattn, logits 
 
     def bsearch_loop_fn(self, beam_search_pars, enc_mask, enc_kvcache, step, dec_kvcache,
-            xattn, live_seqs, *rest):
+            xattn_cumul, live_seqs, *rest):
         """
         enc_mask: bet
         all loop variables are populated in [:step]
         live_seqs, live_scores are populated in [:step+1]
+        xattn_cumul:  bet  (cumulative xattn from step 0 until now)
         Returns: updated version of args
         """
         new_toks = jax.lax.dynamic_slice_in_dim(live_seqs, step, 1, axis=2).ravel()
         # fills in next step info for dec_kvcache and xattn, and computes logits
         # populates xattn and dec_kvcache at position step
         # produces logits for position step+1 
-        dec_kvcache, xattn, logits = self.logits_step(step, enc_mask, enc_kvcache,
-                dec_kvcache, xattn, new_toks)
+        dec_kvcache, xattn_step, logits = self.logits_step(step, enc_mask, enc_kvcache,
+                dec_kvcache, new_toks)
         # jax.debug.print('step {}\nlogits\n{}\n', step, logits[0,0,:10])
-        # jax.debug.print('step {}\nxattn:\n{}\n', step, xattn)
         # print('shapes: ', enc_mask.shape, xattn.shape)
+        xattn_cumul = xattn_cumul + xattn_step
+        # jax.debug.print('step {}\nxattn_cumul:\n{}\n', step, xattn_cumul)
 
-        beam_step_data = step+1, enc_mask, logits, dec_kvcache, xattn, live_seqs, *rest
+        beam_step_data = step+1, enc_mask, logits, dec_kvcache, xattn_cumul, live_seqs, *rest
         return funcs.beam_search_step(*beam_search_pars, *beam_step_data)
 
     def beam_search(self, enc_mask, enc_out, alpha, beta, beam_size, max_source_len,

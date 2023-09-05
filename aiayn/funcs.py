@@ -212,7 +212,6 @@ def beam_search_score(alpha, beta, enc_mask, out_len, scores, xattn):
     numer = (5.0 + out_len) ** alpha
     denom = 6.0 ** alpha
     lp = numer / denom
-    # TODO: use mask here
     active = 1 - enc_mask
     sum_log_attn = jnp.sum(jnp.log(jnp.minimum(xattn, 1.0)), axis=2, initial=0.0, where=active)
     # sum_log_attn = jnp.log(jnp.minimum(xattn, 1.0)).sum(axis=2)
