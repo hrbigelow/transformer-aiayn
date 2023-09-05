@@ -235,7 +235,7 @@ class EmbedMatrix(hk.Module):
         self.M = M
 
     def __call__(self):
-        scale = jnp.sqrt(self.V) ** -1
+        scale = self.M ** -0.5
         init = hk.initializers.RandomNormal(scale, 0.0)
         return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
 
@@ -737,7 +737,8 @@ class Model(hk.Module):
         returns: bct
         """
         if not self.is_train:
-            raise RuntimeError(f'Model.__call__ is only for training')
+            raise RuntimeError(f'Model.batch is only for training')
+        jax.debug.print('emb_mat.std: {}\n', jnp.std(self.embed_mat()))
 
         enc_output, enc_attn_entropy = self.encoder(inputs['seqs'], inputs['seqids'],
                 inputs['tokids'])
