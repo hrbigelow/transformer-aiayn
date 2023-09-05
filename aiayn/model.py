@@ -240,12 +240,14 @@ class EmbedMatrix(hk.Module):
         return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
 
 class InputEmbedding(hk.Module):
-    def __init__(self, embed_mat, matrix_scale_factor, pos_factor, dropout_rate):
+    def __init__(self, embed_mat, matrix_scale_factor, pos_factor, dropout_rate,
+            is_train):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
         self.mat_factor = matrix_scale_factor
         self.pos_factor = pos_factor 
         self.dropout_rate = dropout_rate
+        self.is_train = is_train
 
     def positional_embedding(self, tokids):
         # tokids: bc
@@ -271,9 +273,16 @@ class InputEmbedding(hk.Module):
         embed = jnp.where(jnp.equal(tokids, -1)[:,:,None], 0, embed)
         
         # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
-        # jax.debug.print('embed: {}\npos_embed: {}\n', embed, pos_embed)
-        full_embed = embed * self.mat_factor + pos_embed * self.pos_factor
-        return hk.dropout(hk.next_rng_key(), self.dropout_rate, full_embed)
+        scaled_embed = embed * self.mat_factor
+        # mean_embed_norm = jnp.sqrt((scaled_embed ** 2).sum(axis=2)).mean()
+        # mean_pos_norm = jnp.sqrt((pos_embed ** 2).sum(axis=2)).mean()
+        # jax.debug.print('mean_embed_norm: {}\nmean_pos_norm: {}\n',
+                # mean_embed_norm, mean_pos_norm)
+        # full_embed = scaled_embed + pos_embed
+        full_embed = scaled_embed + pos_embed * self.pos_factor
+        if self.is_train:
+            full_embed = hk.dropout(hk.next_rng_key(), self.dropout_rate, full_embed)
+        return full_embed
 
 class EncoderLayer(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, layer_num):
@@ -320,7 +329,7 @@ class Encoder(hk.Module):
     def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, embed_mat):
         super().__init__(name='enc')
         self.embed_layer = InputEmbedding(embed_mat, jnp.sqrt(arch['M']),
-                pos_enc_factor, dropout_rate) 
+                pos_enc_factor, dropout_rate, is_train) 
         self.layers = [EncoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
 
     def __call__(self, seqs, seqids, tokids):
@@ -471,7 +480,7 @@ class Decoder(hk.Module):
             self.embed_mat = embed_mat
 
         self.embed_layer = InputEmbedding(self.embed_mat, jnp.sqrt(arch['M']),
-                pos_enc_factor, dropout_rate) 
+                pos_enc_factor, dropout_rate, is_train) 
         self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
         self.mscale = np.sqrt(arch['M']) ** -1
 
