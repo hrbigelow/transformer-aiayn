@@ -483,6 +483,7 @@ class Decoder(hk.Module):
                 pos_enc_factor, dropout_rate, is_train) 
         self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
         self.mscale = np.sqrt(arch['M']) ** -1
+        self.norm = hk.LayerNorm((2,), True, True, name='lnorm')
 
     def __call__(self, enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids):
         """
@@ -511,6 +512,11 @@ class Decoder(hk.Module):
             attn_entropies.append(attn_entropy)
         attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
         # attn_entropy_all = jnp.zeros_like(attn_entropy_all)
+
+        # As shown in: 
+        # https://arxiv.org/pdf/1904.10509.pdf
+        # There is one final layer norm
+        out = self.norm(out)
 
         out = jnp.einsum('bcm,tm -> bct', out, self.embed_mat())
         # jax.debug.print('decoder_out: {}', out[0,0:5,0:20])
