@@ -637,7 +637,10 @@ class Decoder(hk.Module):
         xattn = xattn / self.L
 
         xattn = jnp.reshape(xattn, msh)
-         #enc_kvcache = jnp.reshape(enc_kvcache_flat, esh)
+        #enc_kvcache = jnp.reshape(enc_kvcache_flat, esh)
+
+        # See https://arxiv.org/pdf/1904.10509.pdf
+        new_embed = self.norm(new_embed)
 
         logits = jnp.einsum('bm,vm -> bv', new_embed[:,0,:], self.embed_mat())
         # print(f'Before: {logits.shape=}')
