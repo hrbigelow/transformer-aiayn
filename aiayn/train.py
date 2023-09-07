@@ -223,7 +223,8 @@ def setup_train(hps, rng_key):
     # utils.register_handlers()
 
     options = ocp.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=20)
-    checkpointer = ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler(), timeout_secs=100)
+    # checkpointer = ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler(), timeout_secs=100)
+    checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
     mngr = ocp.CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
     lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
@@ -336,7 +337,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step
             state.update(last_batch=item)
             save_args = jax.tree_map(lambda _: ocp.SaveArgs(aggregate=True), state)
             mngr.save(step, state, save_kwargs={'save_args': save_args}, force=True)
-            mngr.wait_until_finished()
+            # mngr.wait_until_finished()
             raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
         report_idx = step % hps.report_every
@@ -383,9 +384,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
         )
     """
     jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
-    import socket
-    host_addr = socket.gethostbyname(socket.gethostname())
-    jax.distributed.initialize(f'{host_addr}:1234', num_processes=1, process_id=0)
+    # import socket
+    # host_addr = socket.gethostbyname(socket.gethostname())
+    # jax.distributed.initialize(f'{host_addr}:1234', num_processes=1, process_id=0)
 
     hps = hparams.setup_hparams(hps_keys, hps_overrides)
     print('Now running with parameters:')
