@@ -82,6 +82,7 @@ train = Hyperparams(
 
 logging = Hyperparams(
     report_every = 100,
+    eval_every = 1000,
     with_metrics = False,
     streamvis_run_name = None,
     streamvis_path = None,
@@ -90,6 +91,7 @@ logging = Hyperparams(
 
 data = Hyperparams(
     dataset_glob = None, # either filesystem or gs:// locator glob pattern
+    val_dataset_glob = None,
     tokenizer_file = None,
     shuffle_size = 1000, 
     swap_source_target = True,

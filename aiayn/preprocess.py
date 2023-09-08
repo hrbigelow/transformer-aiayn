@@ -11,13 +11,20 @@ from tokenizers import pre_tokenizers
 from tokenizers.trainers import BpeTrainer
 from aiayn import data 
 
-def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
-    builder = tfds.builder(dataset_name, data_dir=data_dir)
+def get_dataset(data_dir, name, split, feature='translation', input_name='en',
+        output_name='de'):
+    builder = tfds.builder(name, data_dir=data_dir)
     builder.download_and_prepare()
     ds = builder.as_dataset(split=split, shuffle_files=False)
-    num_elems = len(ds) * 2
-    # ds = ds.map(map_fn)
     ds = ds.batch(1000)
+    def unpack(item):
+        feat = item[feature]
+        return (feat[input_name], feat[output_name])
+    return ds.map(unpack).unbatch(), builder.info.splits[split].num_examples
+
+def train_tokenizer(ds, vocab_size, out_file):
+    # num_elems = len(ds) * 2
+    ds = ds.rebatch(1000)
 
     def convert(ds):
         it = ds.as_numpy_iterator()
@@ -34,22 +41,16 @@ def train_tokenizer(data_dir, dataset_name, split, vocab_size, out_file):
     special_tokens = ['[UNK]', '[PAD]', '[EOS]', '[BOS]']
     trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer.train_from_iterator(convert(ds), trainer, num_elems)
+    tokenizer.train_from_iterator(convert(ds), trainer)
     tokenizer.add_special_tokens(special_tokens)
     tokenizer.save(out_file)
 
-def token_dataset(download_dir, dataset_name, split, tokenizer_file, nproc):
+def token_dataset(ds, tokenizer_file, nproc):
     """
     Create a tokenized tf.Dataset from `dataset_name` and `split`
     Use `tokenizer_file` to initialize a tokenizer
     """
     tokenizer = data.get_tokenizer(tokenizer_file)
-    builder = tfds.builder(dataset_name, data_dir=download_dir)
-    # the download_dir argument of download_and_prepare seems to be ignored in favor
-    # of tfds.builder(data_dir=...)
-    builder.download_and_prepare()
-    ds = builder.as_dataset(split=split, shuffle_files=True)
-    num_elem = len(ds)
     ds = ds.batch(1000)
 
     def gen(ds):
@@ -59,14 +60,14 @@ def token_dataset(download_dir, dataset_name, split, tokenizer_file, nproc):
             item = next(it, None)
             if item is None:
                 return
-            one, two = item.values()
+            one, two = item
             one = tokenizer.encode_batch(unicode_decode(one))
             two = tokenizer.encode_batch(unicode_decode(two))
             yield from [(
                 tf.constant(a.ids, dtype=np.uint16), 
                 tf.constant(b.ids, dtype=np.uint16)) 
                 for a, b in zip(one, two)]
-    return gen(ds), num_elem
+    return gen(ds)
 
 def write_records(data_gen, num_elem, path_template, num_shards, shards=None):
     """
@@ -116,8 +117,8 @@ def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards,
     Write a tfrecord dataset to out_template (must contain '{}') 
     """
     print('Preparing dataset')
-    data_gen, num_elem = token_dataset(download_dir, dataset_name, split,
-            tokenizer_file, nproc)
+    ds, num_elem = get_dataset(download_dir, dataset_name, split) 
+    data_gen = token_dataset(ds, tokenizer_file, nproc)
     print('Writing tfrecords')
     write_records(data_gen, num_elem, out_template, num_shards, shards) 
 

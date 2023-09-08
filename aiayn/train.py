@@ -34,7 +34,8 @@ def make_learning_rate_fn(warmup_steps, M):
         return new_lr
     return lr_fn
 
-def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs, targets):
+def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs,
+        targets, rng):
     """
     Inspired by https://github.com/google-research/vision_transformer/blob/
          62a446f1b3bb9e470db5689bfd7407a8d91bae8a/vit_jax/utils.py#L99
@@ -57,12 +58,14 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
     
     input_slices = jax.tree_map(functools.partial(get_slice, 0), inputs)
     target_slices = jax.tree_map(functools.partial(get_slice, 0), targets)
-    (l, e), g = loss_and_grad_fn(params, input_slices, target_slices)
+    (l, e), g = loss_and_grad_fn(params, input_slices, target_slices, rng)
 
     def acc_loss_and_grad(i, tup):
+        l, e, g, rng_key = tup
         input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
         target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
-        (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices)
+        (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices, rng_key)
+        rng_key, = jax.random.split(rng_key, 1)
         nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
         got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
         # jax.debug.print('got nan: {}', got_nan)
@@ -71,18 +74,31 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
         # jax.debug.print('nan_grads:\n{}', nan_grads)
         # for path, val in flattened:
             # jax.debug.print('{path}: {}', val, path=jax.tree_util.keystr(path))
-        l, e, g = tup
-        return (l + li, map_add(e, ei), map_add(g, gi))
+        return (l + li, map_add(e, ei), map_add(g, gi), rng_key)
 
     # 1 accum:  6 sec / 10 steps
     # 5 accum: 9 sec / 10 steps
     # 9 accum: 14 sec / 10 steps 
-    l, e, g = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g))
+    l, e, g, _ = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g, rng))
     return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
+
+def make_loss_fn(model, objective):
+    def loss_fn(params, inputs, targets, rng):
+        dec_input = targets['seqs']
+        dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, inputs, targets)
+        # print_range('dec_output', dec_output)
+        metrics = objective.metrics(dec_input, dec_output, enc_attn_ent, dec_attn_ent)
+        # jax.debug.print('bla-metrics:{}', metrics)
+        loss = objective.loss(metrics['kldiv'], metrics['attn_loss'])
+        loss, metrics = jax.lax.pmean((loss, metrics), axis_name='batch')
+        return loss, metrics 
+    return loss_fn
 
 def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics, tx,
         crash_dir):
     step_size = repl_batch_size // accum_steps
+
+    loss_fn = make_loss_fn(model, objective)
 
     def update_fn(state, inputs, targets):
         """
@@ -95,24 +111,14 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         each with multiple accelerators).
         """
         params, opt_state, rng_key = state['params'], state['opt_state'], state['rng'] 
-        _, new_rng_key = jax.random.split(rng_key)
+        new_rng_key, = jax.random.split(rng_key, 1)
         dropout_rng = jax.random.fold_in(rng_key, jax.lax.axis_index('batch'))
-
-        def loss_fn(params, inputs, targets):
-            dec_input = targets['seqs']
-            dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, dropout_rng,
-                    inputs, targets)
-            # print_range('dec_output', dec_output)
-            metrics = objective.metrics(dec_input, dec_output, enc_attn_ent, dec_attn_ent)
-            # jax.debug.print('bla-metrics:{}', metrics)
-            loss = objective.loss(metrics['kldiv'], metrics['attn_loss'])
-            return loss, metrics 
 
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
         # setting accum_steps to 1 results in 
         l, metrics, g = accumulate_gradient(lg_fn, step_size, accum_steps, params,
-                inputs, targets)
+                inputs, targets, dropout_rng)
         # averages l and g across replicas, then broadcasts the average
         loss, metrics, grad = jax.lax.pmean((l, metrics, g), axis_name='batch')
 
@@ -243,17 +249,24 @@ def setup_train(hps, rng_key):
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx, hps.ckpt_dir)
 
+    loss_fn = make_loss_fn(mod, objective)
+
     initial_step = int(hps.resume_ckpt or 0)
 
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
-    token_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
-    token_ds = data.add_special_tokens(token_ds, bos_id, eos_id) 
-    token_ds = token_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
-    pack_ds = pack.pack_dataset(token_ds, feature_lengths, 1000, 10, pad_id) 
-    dataset = pack_ds.rebatch(hps.batch_dim0)
+    train_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
+    train_ds = data.add_special_tokens(train_ds, bos_id, eos_id) 
+    train_ds = train_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
+    train_ds = pack.pack_dataset(train_ds, feature_lengths, 1000, 10, pad_id) 
+    train_ds = train_ds.rebatch(hps.batch_dim0)
+
+    val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
+    val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
+    val_ds = pack.pack_dataset(val_ds, feature_lengths, 1000, 10, pad_id)
+    val_ds = val_ds.rebatch(hps.batch_dim0)
 
     # Initialize state de-novo
-    item = next(dataset.as_numpy_iterator())
+    item = next(train_ds.as_numpy_iterator())
     init_item = jax.tree_map(lambda ten: ten[:1], item)
     params = mod.init(rng_key, init_item['inputs'], init_item['targets'])
     opt_state = tx.init(params)
@@ -270,7 +283,7 @@ def setup_train(hps, rng_key):
                 {'restore_args': restore_args})
         initial_step = hps.resume_ckpt
 
-    return update_fn, dataset, state, initial_step, mngr, lr_fn
+    return update_fn, loss_fn, train_ds, val_ds, state, initial_step, mngr, lr_fn
 
 def shard_batch(batch):
     nr = jax.local_device_count()
@@ -281,8 +294,8 @@ def unshard_batch(batch):
     fn = lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1], *x.shape[2:]))
     return jax.tree_map(fn, batch)
 
-def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step, rng_key,
-        logger):
+def train_loop(hps, update_fn, loss_fn, learn_rate_fn, train_ds, val_ds, state, mngr,
+        initial_step, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
@@ -311,6 +324,8 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step
 
     # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
     update_fn_m = jax.pmap(update_fn, axis_name='batch')
+    loss_fn_m = jax.pmap(loss_fn, axis_name='batch')
+
     print('Compiled model')
     state.update(rng=rng_key)
     state_m = flax.jax_utils.replicate(state)
@@ -321,7 +336,7 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step
     if last_batch is not None:
         dit = [last_batch]
     else:
-        dit = dataset.as_numpy_iterator()
+        dit = train_ds.as_numpy_iterator()
 
     for item in dit:
         item = shard_batch(item)
@@ -363,6 +378,25 @@ def train_loop(hps, update_fn, learn_rate_fn, dataset, state, mngr, initial_step
             if hps.with_metrics:
                 log_metrics(logger, steps, norms)
 
+        if logger and step > 0 and report_idx == hps.eval_every - 1:
+            vit = val_ds.as_numpy_iterator()
+            total_batches = len(vit)
+            cross_ent_sum = 0.0
+            for item in vit:
+                item = shard_batch(item)
+                inputs = item['inputs']
+                targets = item['targets']
+                num_toks = inputs['counts'].sum() + targets['counts'].sum()
+                vals_m = loss_fn_m(state_m, inputs, targets, rng_key)
+                loss, metrics = flax.jax_utils.unreplicate(vals_m)
+                cross_ent = metrics['cross_entropy']
+                jax.debug.print('cross_ent: {}', cross_ent)
+                cross_ent_sum += cross_ent
+            logger.write('validation', x=step, y=metrics['cross_entropy']) 
+            cross_ent = cross_ent_sum / total_batches
+            print(f'step {step}, val_cross_ent={cross_ent:3.2f}')
+            
+
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
             state = flax.jax_utils.unreplicate(state_m)
             state_save_args = jax.tree_map(lambda _: ocp.SaveArgs(aggregate=True), state)
@@ -393,7 +427,7 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print(hps)
 
     # This needs to be placed before 
-    rng_key = jax.random.PRNGKey(42)
+    rng_key = jax.random.PRNGKey(hps.random_seed)
 
     if hps.streamvis_run_name is not None:
         from streamvis.logger import DataLogger
@@ -405,9 +439,9 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print(f'Prepared dataset from {hps.dataset_glob}')
 
     # move the save/restore logic here
-    update_fn, dataset, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
-    train_loop(hps, update_fn, lr_fn, dataset, state, mngr, initial_step, rng_key,
-            logger)
+    update_fn, loss_fn, train_ds, val_ds, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
+    train_loop(hps, update_fn, loss_fn, lr_fn, train_ds, val_ds, state, mngr,
+            initial_step, rng_key, logger)
 
 if __name__ == '__main__':
     fire.Fire(main)
