@@ -427,7 +427,7 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             if hps.with_metrics:
                 log_metrics(logger, steps, norms)
 
-        if step > 0 and report_idx == hps.eval_every - 1:
+        if step > 0 and step % hps.eval_every == 0:
             rng_key_s = jax.random.split(rng_key, num_replicas)
             metrics_m = val_fn_m(state_m, val_data, rng_key_s)
             metrics = flax.jax_utils.unreplicate(metrics_m)
