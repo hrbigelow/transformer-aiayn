@@ -306,18 +306,19 @@ def setup_train(hps, rng_key):
     val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
     val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
     pad_ds = pack.pad_and_filter(val_ds, feature_lengths, -1)
-    total_val_items = sum(1 for _ in pad_ds.as_numpy_iterator())
-    # Compute the next nearest shardable size
-    remainder = - (total_val_items % - (hps.val_loop_elem * num_replicas))
-    print(f'{total_val_items=}, {remainder=}')
-    total_items = total_val_items + remainder
-    assert total_items % (hps.val_loop_elem * num_replicas) == 0
 
     num_tries = 10
-    val_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
+    pack_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
+    total_packed = sum(1 for _ in pack_ds.as_numpy_iterator())
+    remainder = - (total_packed % - (hps.val_loop_elem * num_replicas))
+    total_items = total_packed + remainder
+
+    pack_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
     fill_ds = pack.filler_dataset(feature_lengths, remainder, num_tries, pad_id)
-    val_ds = val_ds.concatenate(fill_ds)
-    val_data = next(val_ds.batch(total_items).as_numpy_iterator())
+
+    pack_ds = pack_ds.concatenate(fill_ds)
+    val_data = next(pack_ds.batch(total_items).as_numpy_iterator())
+    print(val_data['inputs']['seqs'].shape)
 
     # Initialize state de-novo
     item = next(train_ds.as_numpy_iterator())
