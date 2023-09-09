@@ -88,12 +88,41 @@ def make_loss_fn(model, objective):
     def loss_fn(params, inputs, targets, rng):
         dec_input = targets['seqs']
         dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, inputs, targets)
-        # print_range('dec_output', dec_output)
         metrics = objective.metrics(dec_input, dec_output)
+
+        # TODO: properly normalize each entropy measure by batch size
         metrics.update(enc_attn_entropy=enc_attn_ent, dec_attn_entropy=dec_attn_ent)
+
+        # The loss must be returned in order to use this function to generate
+        # gradients.  However, the gradients should be re-normalized, since batch
+        # size varies
         loss = objective.loss(metrics)
         return loss, metrics 
     return loss_fn
+
+def make_validate_fn(model, objective, shard_size):
+    loss_fn = make_loss_fn(model, objective)
+
+    def reshape_fn(x):
+        return jnp.reshape(x, (x.shape[0] // shard_size, shard_size, *x.shape[1:]))
+
+    def val_fn(state, data, rng_key):
+        # compute metrics from state and data
+        data = jax.tree_map(reshape_fn, data)
+        params = state['params']
+        def loop_fn(carry, item):
+            rng = carry
+            inputs = item['inputs']
+            targets = item['targets']
+            _, metrics = loss_fn(params, inputs, targets, rng)
+            rng, = jax.random.split(rng, 1)
+            return rng, metrics
+        _, metrics = jax.lax.scan(loop_fn, rng_key, data)
+        metrics = jax.tree_map(lambda *x: jnp.concatenate(x).sum(), metrics)
+        metrics = jax.lax.psum(metrics, axis_name='batch')
+        metrics = objective.reduce_metrics(metrics)
+        return metrics
+    return val_fn
 
 def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics, tx,
         crash_dir):
@@ -257,14 +286,13 @@ def setup_train(hps, rng_key):
     eos_id = tokenizer.token_to_id('[EOS]')
     pad_id = tokenizer.token_to_id('[PAD]')
 
-    mod = model.make_model(hps, bos_id, eos_id, n_vocab, True)
+    mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=True)
+    val_mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=False)
     objective = model.Objective(bos_id, n_vocab, hps.label_smooth_eps, hps.attn_loss_weight)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx, hps.ckpt_dir)
 
-    loss_fn = make_loss_fn(mod, objective)
-    loss_fn_m = jax.pmap(loss_fn, axis_name='batch')
 
     initial_step = int(hps.resume_ckpt or 0)
 
@@ -307,28 +335,9 @@ def setup_train(hps, rng_key):
                 {'restore_args': restore_args})
         initial_step = hps.resume_ckpt
 
-    def val_fn(state, data, rng_key):
-        # compute metrics from state and data
-        def reshape_fn(x, shard_size):
-            return jnp.reshape(x, (x.shape[0] // shard_size, shard_size, *x.shape[1:]))
-        data = jax.tree_map(lambda x: reshape_fn(x, hps.val_loop_elem), data)
-        params = state['params']
-        def loop_fn(carry, item):
-            rng = carry
-            inputs = item['inputs']
-            targets = item['targets']
-            _, metrics = loss_fn(params, inputs, targets, rng)
-            rng, = jax.random.split(rng, 1)
-            return rng, metrics
-        _, metrics = jax.lax.scan(loop_fn, rng_key, data)
-        metrics = jax.tree_map(lambda *x: jnp.concatenate(x).sum(), metrics)
-        metrics = jax.lax.psum(metrics, axis_name='batch')
-        metrics = objective.reduce_metrics(metrics)
-        return metrics
+    return mod, val_mod, objective, update_fn, val_data, train_ds, state, initial_step, mngr, lr_fn
 
-    return update_fn, val_fn, val_data, train_ds, state, initial_step, mngr, lr_fn
-
-def train_loop(hps, update_fn, val_fn, val_data, learn_rate_fn, train_ds, state, mngr,
+def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn, train_ds, state, mngr,
         initial_step, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
@@ -358,7 +367,12 @@ def train_loop(hps, update_fn, val_fn, val_data, learn_rate_fn, train_ds, state,
 
     # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
     update_fn_m = jax.pmap(update_fn, axis_name='batch')
+
+    val_fn = make_validate_fn(mod, objective, hps.val_loop_elem)
     val_fn_m = jax.pmap(val_fn, axis_name='batch')
+
+    val_nd_fn = make_validate_fn(val_mod, objective, hps.val_loop_elem)
+    val_nd_fn_m = jax.pmap(val_nd_fn, axis_name='batch')
     val_data = shard_batch(val_data)
 
     print('Compiled model')
@@ -417,10 +431,14 @@ def train_loop(hps, update_fn, val_fn, val_data, learn_rate_fn, train_ds, state,
             rng_key_s = jax.random.split(rng_key, num_replicas)
             metrics_m = val_fn_m(state_m, val_data, rng_key_s)
             metrics = flax.jax_utils.unreplicate(metrics_m)
-            cross_ent = metrics['cross_entropy']
-            print(f'step {step}, val_cross_ent={cross_ent:3.2f}')
+            nd_metrics_m = val_nd_fn_m(state_m, val_data, rng_key_s)
+            nd_metrics = flax.jax_utils.unreplicate(nd_metrics_m)
+            ce = metrics['cross_entropy']
+            ce_nd = nd_metrics['cross_entropy']
+            print(f'step {step}, ce_val={ce:3.2f}, ce_val_nd={ce_nd:3.2f}')
             if logger:
-                logger.write('validation', x=step, y=cross_ent) 
+                logger.write('cross_entropy_val', x=step, y=metrics['cross_entropy']) 
+                logger.write('cross_entropy_val_nd', x=step, y=nd_metrics['cross_entropy'])
             
 
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
@@ -465,8 +483,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print(f'Prepared dataset from {hps.dataset_glob}')
 
     # move the save/restore logic here
-    update_fn, val_fn, val_data, train_ds, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
-    train_loop(hps, update_fn, val_fn, val_data, lr_fn, train_ds, state, mngr,
+    mod, val_mod, objective, update_fn, val_data, train_ds, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
+    train_loop(hps, mod, val_mod, objective, update_fn, val_data, lr_fn, train_ds, state, mngr,
             initial_step, rng_key, logger)
 
 if __name__ == '__main__':

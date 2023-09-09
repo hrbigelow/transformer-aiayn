@@ -745,10 +745,6 @@ class Model(hk.Module):
 
         returns: bct
         """
-        if not self.is_train:
-            raise RuntimeError(f'Model.batch is only for training')
-        # jax.debug.print('emb_mat.std: {}\n', jnp.std(self.embed_mat()))
-
         enc_output, enc_attn_entropy = self.encoder(inputs['seqs'], inputs['seqids'],
                 inputs['tokids'])
         dec_output, dec_attn_entropy = self.decoder(enc_output, inputs['seqids'], 
@@ -926,11 +922,11 @@ def _wrap_haiku(mod_cls, *args):
         return mod(*call_args)
     return wrapped_fn
 
-def make_model(hps, bos_id, eos_id, n_vocab, is_train):
+def make_model(hps, bos_id, eos_id, n_vocab, do_batch, do_train):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = (hps.dropout_rate, hps.pos_encoding_factor, arch, is_train, bos_id,
+    args = (hps.dropout_rate, hps.pos_encoding_factor, arch, do_train, bos_id,
             eos_id, n_vocab)
-    if is_train:
+    if do_batch:
         def wrap_fn(*call_args):
             mod = Model(*args)
             return mod.batch(*call_args)

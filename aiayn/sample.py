@@ -12,8 +12,7 @@ import pdb
 jnp.set_printoptions(precision=3, threshold=100000, edgeitems=100, linewidth=180)
 
 def load_model(hps, bos_id, eos_id, n_vocab):
-    is_train = False
-    mod = model.make_model(hps, bos_id, eos_id, n_vocab, is_train) 
+    mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=False, do_train=False) 
     mngr = orbax.CheckpointManager(
         hps.ckpt_dir, orbax.Checkpointer(orbax.PyTreeCheckpointHandler()))
     state = mngr.restore(hps.resume_ckpt)
