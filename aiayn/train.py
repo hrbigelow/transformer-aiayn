@@ -309,12 +309,14 @@ def setup_train(hps, rng_key):
     total_val_items = sum(1 for _ in pad_ds.as_numpy_iterator())
     # Compute the next nearest shardable size
     remainder = - (total_val_items % - (hps.val_loop_elem * num_replicas))
+    print(f'{total_val_items=}, {remainder=}')
+    total_items = total_val_items + remainder
+    assert total_items % (hps.val_loop_elem * num_replicas) == 0
 
     num_tries = 10
     val_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
     fill_ds = pack.filler_dataset(feature_lengths, remainder, num_tries, pad_id)
     val_ds = val_ds.concatenate(fill_ds)
-    total_items = total_val_items + remainder
     val_data = next(val_ds.batch(total_items).as_numpy_iterator())
 
     # Initialize state de-novo
