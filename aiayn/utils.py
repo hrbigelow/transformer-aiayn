@@ -7,37 +7,6 @@ from etils import epath
 from typing import Optional, Any, NamedTuple, List
 import tensorflow as tf
 
-"""
-class NamedTupleHandler(type_handlers.TypeHandler):
-  def __init__(self, cls):
-    self.cls = cls
-
-  async def serialize(
-      self,
-      value: NamedTuple,
-      info: type_handlers.ParamInfo,
-      args: Optional[SaveArgs] = None) -> List[orbax.checkpoint.future.Future]:
-    # A more sophisticated implementation would make this write asynchronous.
-    (info.path / 'data.txt').write_text(value._asdict())
-    print('got here in serialize')
-    return []
-
-  async def deserialize(
-      self,
-      info: type_handlers.ParamInfo,
-      args: Optional[orbax.checkpoint.RestoreArgs] = None):
-    entries = (info.path / 'data.txt').read_text()
-    return self.cls(**entries)
-
-
-def register_handlers():
-    type_handlers.register_type_handler(optax.ScaleByAdamState,
-            NamedTupleHandler(optax.ScaleByAdamState), override=True)
-    type_handlers.register_type_handler(optax.ScaleByScheduleState,
-            NamedTupleHandler(optax.ScaleByScheduleState), override=True)
-
-"""
-
 def construct_restore_args(target, sharding_tree, set_global_shape=True):
     """
     Shim from orbax.checkpoint.checkpoint_utils since that relies on
@@ -59,4 +28,6 @@ def construct_restore_args(target, sharding_tree, set_global_shape=True):
             return type_handlers.RestoreArgs(restore_type=restore_type, dtype=dtype)
 
     return jax.tree_util.tree_map(_restore_args, target, sharding_tree)
+
+
 

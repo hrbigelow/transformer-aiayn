@@ -66,7 +66,8 @@ def make_gen(ds_iter, batch_sz, num_tries, input_len, target_len):
 
     def refill_buffer(buf_sz, buf, more):
         # buf[*inds[b],...] = more[b,...]
-        inds = tf.range(buf_sz, buf_sz + batch_sz)[:,None]
+        this_batch_sz = tf.shape(more)[0]
+        inds = tf.range(buf_sz, buf_sz + this_batch_sz)[:,None]
         return tf.tensor_scatter_nd_update(buf, inds, more)
 
     capacity = dict(
@@ -85,11 +86,13 @@ def make_gen(ds_iter, batch_sz, num_tries, input_len, target_len):
     def gen():
         # the high-water-mark for tok_buf1 and slen_buf1
         buf_sz = tf.constant(0) 
+        more_input = True
         i = 0
         nonlocal seqs_buf
         nonlocal capacity
 
-        while True:
+        # The i != 0 clause guarantees that a full set of tries will be yielded 
+        while buf_sz != 0 or more_input or i != 0:
             if i == 0:
                 pack = dict(
                     inputs=tf.zeros((batch_sz,), tf.int32),
@@ -97,21 +100,27 @@ def make_gen(ds_iter, batch_sz, num_tries, input_len, target_len):
             i = (i + 1) % num_tries
 
             if buf_sz < tf.constant(batch_sz):
-                new_seqs = next(ds_iter)
-                fn = functools.partial(refill_buffer, buf_sz)
-                seqs_buf = tf.nest.map_structure(fn, seqs_buf, new_seqs)
-                buf_sz = tf.add(buf_sz, batch_sz)
-                # buf_sz += batch_sz
+                new_seqs = next(ds_iter, None)
+                if new_seqs is None:
+                    more_input = False
+                else:
+                    new_batch_sz = tf.shape(new_seqs['inputs']['toks'])[0]
+                    fn = functools.partial(refill_buffer, buf_sz)
+                    seqs_buf = tf.nest.map_structure(fn, seqs_buf, new_seqs)
+                    buf_sz = tf.add(buf_sz, new_batch_sz)
             
             # tf.print('buf_sz, batch_sz: ', buf_sz, batch_sz)
             lens = { k: v['lens'] for k, v in seqs_buf.items() }
             fits_fn = lambda pack, buf, cap: tf.less_equal(pack + buf[:batch_sz], cap)
             fits = tf.nest.map_structure(fits_fn, pack, lens, capacity)
-            fits = tf.logical_and(*fits.values())
-            fits_inds = tf.where(fits)
+            fits = tf.logical_and(*fits.values()) # True if both input and target fit
+
+            # exclude sequences that don't exist in the buffer (are beyond buf_sz)
+            fits = tf.logical_and(fits, tf.less(tf.range(batch_sz), buf_sz))
             fits_fn = lambda l: tf.where(fits, l[:batch_sz], tf.constant([0]))
             try_sz = tf.nest.map_structure(fits_fn, lens)
 
+            # We assume buf_sz >= batch_sz
             yield dict(
                     inputs=(seqs_buf['inputs']['toks'][:batch_sz,:], try_sz['inputs']),
                     targets=(seqs_buf['targets']['toks'][:batch_sz,:], try_sz['targets']))
@@ -119,9 +128,12 @@ def make_gen(ds_iter, batch_sz, num_tries, input_len, target_len):
             condense_inds = get_condense_inds(fits)
             condense_fn = functools.partial(condense, condense_inds)
             seqs_buf = tf.nest.map_structure(condense_fn, seqs_buf)
+
+            fits_active = tf.cast(fits, tf.int32)
+            # print(f'{buf_sz=}, {fits=}') 
             buf_sz = tf.subtract(buf_sz, tf.reduce_sum(tf.cast(fits, tf.int32)))
-            assert buf_sz >= 0
             pack = tf.nest.map_structure(tf.add, pack, try_sz)
+            # print(f'{buf_sz=} {more_input=}')
 
     spec = dict(
             inputs=(
@@ -153,7 +165,7 @@ def get_scatter_inds(batch_inds, seqs, lens):
     """
     batch_inds: pbo, a materialized tensor holding value b at index pbo
     seqs: pbo
-    lens: pb 
+    lens: pb
 
     returns: pbo2  last slice is [B,O] coordinates
     """
@@ -184,6 +196,17 @@ def pack_values(scatter_inds, values):
 
 @tf.function
 def pack_sequences(seq_and_len):
+    """
+    seqs: pbo
+    lens: pb 
+
+    output: dict of
+    seqs:   bo
+    seqids: bo
+    tokids: bo
+    counts: bp
+    
+    """
     seqs, lens = seq_and_len
     P = tf.shape(seqs)[0]
     B = tf.shape(seqs)[1]
@@ -196,6 +219,7 @@ def pack_sequences(seq_and_len):
     seqs, seqids, tokids = tf.nest.map_structure(pack_fn, (seqs, seqids, tokids))
     counts = tf.transpose(lens, (1,0))
     return dict(seqs=seqs, seqids=seqids, tokids=tokids, counts=counts)
+
 
 def pack_dataset(toks_ds, feature_lengths, packing_batch=1000, num_tries=10, pad_value=-1):
     """
@@ -211,12 +235,32 @@ def pack_dataset(toks_ds, feature_lengths, packing_batch=1000, num_tries=10, pad
         inputs = pack_sequences(item['inputs']) 
         targets = pack_sequences(item['targets'])
         return dict(inputs=inputs, targets=targets)
+    
+    def filter_fn(item):
+        return tf.not_equal(item['inputs']['tokids'][0], pad_value)
 
-    return sz_ds.map(pack_pair_fn)
+    return sz_ds.map(pack_pair_fn).unbatch().filter(filter_fn)
 
-def unpack_dataset(pack_ds, num_tries, pad_value):
+def empty_pack(length, num_tries, pad_value):
+    z = tf.zeros(length)
+    return dict(
+            seqs=tf.zeros(length, dtype=tf.int32), 
+            seqids=tf.zeros(length, dtype=tf.int32), 
+            tokids=tf.fill(length, pad_value), 
+            counts=tf.zeros(num_tries, dtype=tf.int32)
+            )
+
+def filler_dataset(feature_lengths, dataset_size, num_tries, pad_value=-1):
+    item = { feature: empty_pack(length, num_tries, pad_value) 
+            for feature, length in feature_lengths.items() }
+    return tf.data.Dataset.from_tensors(item).repeat(dataset_size)
+
+
+def unpack_dataset(pack_ds, num_tries, pad_value, process_batch_size=10):
     """
-    pack_ds: a packed dataset (as returned by `pack_dataset`)
+    pack_ds: a packed dataset (as returned by `pack_dataset`) (unbatched)
+    num_tries: the parameter given to pack_dataset
+    pad_value: parameter given to pack_dataset
     returns:  toks_ds (as received by `pack_dataset`)
     
     Performs the operation:
@@ -238,18 +282,22 @@ def unpack_dataset(pack_ds, num_tries, pad_value):
     output: B,P,O
     """
 
-    B = 13
     P = num_tries
 
     def unpack_fn(cell):
+
         seqs = cell['seqs']
         seqids = cell['seqids']
         tokids = cell['tokids']
-        counts = cell['counts']
+        counts = cell['counts'] # B
+        B = tf.shape(seqs)[0]
         O = tf.shape(seqs)[1]
+
+        # Elements in the input which are padding will be scattered to (b,0,O)
+        # and then trimmed out
         gbatch = tf.broadcast_to(tf.range(B)[:,None], (B,O))
-        tokids = tf.where(tf.not_equal(tokids, -1), tokids, O)
-        seqids = tf.where(tf.not_equal(seqids, -1), seqids, 0)
+        tokids = tf.where(tf.not_equal(tokids, pad_value), tokids, O)
+        seqids = tf.where(tf.not_equal(seqids, pad_value), seqids, 0)
         inds = tf.stack([gbatch, seqids, tokids], axis=2)
         dest = tf.fill((B,P,O+1), pad_value)
         unpack = tf.tensor_scatter_nd_update(dest, inds, seqs)[:,:,:O]
@@ -271,10 +319,12 @@ def unpack_dataset(pack_ds, num_tries, pad_value):
                 targets=target_seq[:target_len]
                 )
 
-    return (pack_ds.batch(B)
+    return (
+            pack_ds.batch(process_batch_size, drop_remainder=True)
             .map(unpack_map_fn)
-            .unbatch()
+            .unbatch() 
             .unbatch()
             .filter(filt_fn)
-            .map(trim_map_fn))
+            .map(trim_map_fn)
+            )
 

@@ -15,7 +15,7 @@ import time
 import sys
 import fire
 import numpy as np
-from aiayn import model, data, hparams, report, utils, funcs, pack
+from aiayn import model, data, hparams, report, utils, funcs, pack, jutils
 
 def print_range(pfx, tree):
     def fn(acc, x):
@@ -50,47 +50,48 @@ def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs
     grad: pytree of params gradients
     """
     def get_slice(i, tensor):
-        return jax.lax.dynamic_slice(tensor, (i * step_size, 0),
-                (step_size,) + tensor.shape[1:])
+        return jax.lax.dynamic_slice_in_dim(tensor, i * step_size, step_size, 0)
+    # return jax.lax.dynamic_slice(tensor, (i * step_size, 0),
+                # (step_size,) + tensor.shape[1:])
 
     def map_add(a, b):
         return jax.tree_map(lambda x, y: x + y, a, b)
     
     input_slices = jax.tree_map(functools.partial(get_slice, 0), inputs)
     target_slices = jax.tree_map(functools.partial(get_slice, 0), targets)
-    (l, e), g = loss_and_grad_fn(params, input_slices, target_slices, rng)
+    (_, metrics), grad = loss_and_grad_fn(params, input_slices, target_slices, rng)
 
     def acc_loss_and_grad(i, tup):
-        l, e, g, rng_key = tup
+        metrics_accu, grad_accu, rng_key = tup
+        # loss, metrics = accu
         input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
         target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
-        (li, ei), gi = loss_and_grad_fn(params, input_slices, target_slices, rng_key)
+        ret, grad_item = loss_and_grad_fn(params, input_slices, target_slices, rng_key)
+        _, metrics_item = ret
         rng_key, = jax.random.split(rng_key, 1)
-        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), gi)
+        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grad_item)
         got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
-        # jax.debug.print('got nan: {}', got_nan)
-        # flattened, _ = jax.tree_util.tree_flatten_with_path(nan_grads)
-        # flattened = [(jax.tree_util.keystr(k), v) for k, v in flattened]
-        # jax.debug.print('nan_grads:\n{}', nan_grads)
-        # for path, val in flattened:
-            # jax.debug.print('{path}: {}', val, path=jax.tree_util.keystr(path))
-        return (l + li, map_add(e, ei), map_add(g, gi), rng_key)
+        unscale_fn = lambda x: x * metrics_item['sum_active']
+        grad_unscaled = jax.tree_map(unscale_fn, grad_item)
+        return (map_add(metrics_accu, metrics_item), 
+                map_add(grad_accu, grad_unscaled), 
+                rng_key)
 
     # 1 accum:  6 sec / 10 steps
     # 5 accum: 9 sec / 10 steps
     # 9 accum: 14 sec / 10 steps 
-    l, e, g, _ = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, (l, e, g, rng))
-    return jax.tree_map(lambda x: x / accum_steps, (l, e, g))
+    args = metrics, grad, rng 
+    metrics, grad, _ = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, args)
+    return metrics, grad
 
 def make_loss_fn(model, objective):
     def loss_fn(params, inputs, targets, rng):
         dec_input = targets['seqs']
         dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, inputs, targets)
         # print_range('dec_output', dec_output)
-        metrics = objective.metrics(dec_input, dec_output, enc_attn_ent, dec_attn_ent)
-        # jax.debug.print('bla-metrics:{}', metrics)
-        loss = objective.loss(metrics['kldiv'], metrics['attn_loss'])
-        loss, metrics = jax.lax.pmean((loss, metrics), axis_name='batch')
+        metrics = objective.metrics(dec_input, dec_output)
+        metrics.update(enc_attn_entropy=enc_attn_ent, dec_attn_entropy=dec_attn_ent)
+        loss = objective.loss(metrics)
         return loss, metrics 
     return loss_fn
 
@@ -116,12 +117,16 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
         lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
-        # setting accum_steps to 1 results in 
-        l, metrics, g = accumulate_gradient(lg_fn, step_size, accum_steps, params,
+        metrics, grad = accumulate_gradient(lg_fn, step_size, accum_steps, params,
                 inputs, targets, dropout_rng)
-        # averages l and g across replicas, then broadcasts the average
-        loss, metrics, grad = jax.lax.pmean((l, metrics, g), axis_name='batch')
 
+        metrics, grad = jax.lax.psum((metrics, grad), axis_name='batch')
+        grad = jax.tree_map(lambda x: x / metrics['sum_active'], grad)
+        norm_metrics = {}
+        norm_metrics['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
+        norm_metrics['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
+        norm_metrics['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
+        
         nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grad)
         got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
 
@@ -145,13 +150,12 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
             norms = jax.tree_map(tensor_norm, grad, params, updates)
             state = dict(params=params, opt_state=opt_state, rng=new_rng_key,
                     got_nan=got_nan)
-            metrics = {'loss': loss, 'norms': norms, **metrics}
-            return state, metrics
+            norm_metrics.update(norms=norms)
+            return state, norm_metrics
         else:
             state = dict(params=params, opt_state=opt_state, rng=new_rng_key,
                     got_nan=got_nan)
-            metrics = {'loss': loss, **metrics} 
-            return state, metrics
+            return state, norm_metrics
             
     return update_fn
 
@@ -217,6 +221,16 @@ def log_metrics(logger, steps, norms):
                 plot_name = f'{cat}_{label}_{key}'
                 svlog(pfx, plot_name, key, val)
 
+def shard_batch(batch):
+    nr = jax.local_device_count()
+    fn = lambda x: jnp.reshape(x, (nr, x.shape[0] // nr, *x.shape[1:]))
+    return jax.tree_map(fn, batch)
+
+
+def unshard_batch(batch):
+    fn = lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1], *x.shape[2:]))
+    return jax.tree_map(fn, batch)
+
 def setup_train(hps, rng_key):
     num_replicas = jax.local_device_count()
     if hps.batch_dim0 % num_replicas != 0:
@@ -250,6 +264,7 @@ def setup_train(hps, rng_key):
             hps.with_metrics, tx, hps.ckpt_dir)
 
     loss_fn = make_loss_fn(mod, objective)
+    loss_fn_m = jax.pmap(loss_fn, axis_name='batch')
 
     initial_step = int(hps.resume_ckpt or 0)
 
@@ -258,12 +273,21 @@ def setup_train(hps, rng_key):
     train_ds = data.add_special_tokens(train_ds, bos_id, eos_id) 
     train_ds = train_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
     train_ds = pack.pack_dataset(train_ds, feature_lengths, 1000, 10, pad_id) 
-    train_ds = train_ds.rebatch(hps.batch_dim0)
+    train_ds = train_ds.batch(hps.batch_dim0)
 
     val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
     val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
-    val_ds = pack.pack_dataset(val_ds, feature_lengths, 1000, 10, pad_id)
-    val_ds = val_ds.rebatch(hps.batch_dim0)
+    pad_ds = pack.pad_and_filter(val_ds, feature_lengths, -1)
+    total_val_items = sum(1 for _ in pad_ds.as_numpy_iterator())
+    # Compute the next nearest shardable size
+    remainder = - (total_val_items % - (hps.val_loop_elem * num_replicas))
+
+    num_tries = 10
+    val_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
+    fill_ds = pack.filler_dataset(feature_lengths, remainder, num_tries, pad_id)
+    val_ds = val_ds.concatenate(fill_ds)
+    total_items = total_val_items + remainder
+    val_data = next(val_ds.batch(total_items).as_numpy_iterator())
 
     # Initialize state de-novo
     item = next(train_ds.as_numpy_iterator())
@@ -283,18 +307,28 @@ def setup_train(hps, rng_key):
                 {'restore_args': restore_args})
         initial_step = hps.resume_ckpt
 
-    return update_fn, loss_fn, train_ds, val_ds, state, initial_step, mngr, lr_fn
+    def val_fn(state, data, rng_key):
+        # compute metrics from state and data
+        def reshape_fn(x, shard_size):
+            return jnp.reshape(x, (x.shape[0] // shard_size, shard_size, *x.shape[1:]))
+        data = jax.tree_map(lambda x: reshape_fn(x, hps.val_loop_elem), data)
+        params = state['params']
+        def loop_fn(carry, item):
+            rng = carry
+            inputs = item['inputs']
+            targets = item['targets']
+            _, metrics = loss_fn(params, inputs, targets, rng)
+            rng, = jax.random.split(rng, 1)
+            return rng, metrics
+        _, metrics = jax.lax.scan(loop_fn, rng_key, data)
+        metrics = jax.tree_map(lambda *x: jnp.concatenate(x).sum(), metrics)
+        metrics = jax.lax.psum(metrics, axis_name='batch')
+        metrics = objective.reduce_metrics(metrics)
+        return metrics
 
-def shard_batch(batch):
-    nr = jax.local_device_count()
-    fn = lambda x: jnp.reshape(x, (nr, x.shape[0] // nr, *x.shape[1:]))
-    return jax.tree_map(fn, batch)
+    return update_fn, val_fn, val_data, train_ds, state, initial_step, mngr, lr_fn
 
-def unshard_batch(batch):
-    fn = lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1], *x.shape[2:]))
-    return jax.tree_map(fn, batch)
-
-def train_loop(hps, update_fn, loss_fn, learn_rate_fn, train_ds, val_ds, state, mngr,
+def train_loop(hps, update_fn, val_fn, val_data, learn_rate_fn, train_ds, state, mngr,
         initial_step, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
@@ -312,9 +346,9 @@ def train_loop(hps, update_fn, loss_fn, learn_rate_fn, train_ds, val_ds, state, 
             kldiv=losses,
             label_entropy=label_entropy,
             cross_entropy=cross_entropy,
-            enc_attn_entropy=enc_attn_entropy,
-            dec_attn_entropy=dec_attn_entropy,
-            attn_loss=attn_loss
+            # enc_attn_entropy=enc_attn_entropy,
+            #dec_attn_entropy=dec_attn_entropy,
+            #attn_loss=attn_loss
             )
 
     if hps.with_metrics: 
@@ -324,7 +358,8 @@ def train_loop(hps, update_fn, loss_fn, learn_rate_fn, train_ds, val_ds, state, 
 
     # donate_argnums doesn't seem to make any difference in speed nor memory usage. 
     update_fn_m = jax.pmap(update_fn, axis_name='batch')
-    loss_fn_m = jax.pmap(loss_fn, axis_name='batch')
+    val_fn_m = jax.pmap(val_fn, axis_name='batch')
+    val_data = shard_batch(val_data)
 
     print('Compiled model')
     state.update(rng=rng_key)
@@ -367,10 +402,10 @@ def train_loop(hps, update_fn, loss_fn, learn_rate_fn, train_ds, val_ds, state, 
 
         if step > 0 and report_idx % hps.report_every == 0:
             loss = report_metrics['kldiv'][report_idx]
-            attn_loss = report_metrics['attn_loss'][report_idx]
+            # attn_loss = report_metrics['attn_loss'][report_idx]
             ce = report_metrics['cross_entropy'][report_idx]
-            print(f'step {step}, {num_toks=}, cross_ent={ce:3.2f} loss={loss:3.2f}'
-                    f' attn_loss={attn_loss:2.4f}')
+            print(f'step {step}, {num_toks=}, cross_ent={ce:3.2f} loss={loss:3.2f}')
+                     #f' attn_loss={attn_loss:2.4f}')
 
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, report_metrics) 
@@ -378,23 +413,14 @@ def train_loop(hps, update_fn, loss_fn, learn_rate_fn, train_ds, val_ds, state, 
             if hps.with_metrics:
                 log_metrics(logger, steps, norms)
 
-        if logger and step > 0 and report_idx == hps.eval_every - 1:
-            vit = val_ds.as_numpy_iterator()
-            total_batches = len(vit)
-            cross_ent_sum = 0.0
-            for item in vit:
-                item = shard_batch(item)
-                inputs = item['inputs']
-                targets = item['targets']
-                num_toks = inputs['counts'].sum() + targets['counts'].sum()
-                vals_m = loss_fn_m(state_m, inputs, targets, rng_key)
-                loss, metrics = flax.jax_utils.unreplicate(vals_m)
-                cross_ent = metrics['cross_entropy']
-                jax.debug.print('cross_ent: {}', cross_ent)
-                cross_ent_sum += cross_ent
-            logger.write('validation', x=step, y=metrics['cross_entropy']) 
-            cross_ent = cross_ent_sum / total_batches
+        if step > 0 and report_idx == hps.eval_every - 1:
+            rng_key_s = jax.random.split(rng_key, num_replicas)
+            metrics_m = val_fn_m(state_m, val_data, rng_key_s)
+            metrics = flax.jax_utils.unreplicate(metrics_m)
+            cross_ent = metrics['cross_entropy']
             print(f'step {step}, val_cross_ent={cross_ent:3.2f}')
+            if logger:
+                logger.write('validation', x=step, y=cross_ent) 
             
 
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
@@ -439,8 +465,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print(f'Prepared dataset from {hps.dataset_glob}')
 
     # move the save/restore logic here
-    update_fn, loss_fn, train_ds, val_ds, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
-    train_loop(hps, update_fn, loss_fn, lr_fn, train_ds, val_ds, state, mngr,
+    update_fn, val_fn, val_data, train_ds, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
+    train_loop(hps, update_fn, val_fn, val_data, lr_fn, train_ds, state, mngr,
             initial_step, rng_key, logger)
 
 if __name__ == '__main__':

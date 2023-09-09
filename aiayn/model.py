@@ -854,13 +854,10 @@ class Objective:
         self.eps = smoothing_eps
         self.attn_loss_weight = attn_loss_weight
 
-    def metrics(self, dec_input, dec_output_logits, enc_attn_entropy,
-            dec_attn_entropy):
+    def metrics(self, dec_input, dec_output_logits):
         """
         dec_input: bq
         dec_output_logits: bqv
-        enc_attn_entropy: bl
-        dec_attn_entropy: bl
         """
         # bc
         targets = dec_input[:,1:]
@@ -880,27 +877,45 @@ class Objective:
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
 
-        # dec_pred = jax.nn.softmax(dec_pred_logits, axis=2)
+        total_active_targets = targets_active.sum()
+
         kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
-        mean_kldiv = kldiv.mean(where=targets_active)
-        attn_entropy = jnp.concatenate([enc_attn_entropy, dec_attn_entropy], axis=0) 
-        attn_entropy_loss = jnp.sum((1.0 - attn_entropy) ** 2) 
+
+        sum_kldiv = kldiv.sum(where=targets_active)
 
         where = jnp.broadcast_to(targets_active[:,:,None], targets.shape)
         cross_ent = funcs.cross_entropy(targets, dec_pred_logits, 2, where)
-        mean_cross_ent = cross_ent.mean(where=targets_active)
+        sum_cross_ent = cross_ent.sum(where=targets_active)
         label_ent = funcs.entropy(targets, 2, where)
-        label_ent = label_ent.mean(where=targets_active)
-        return dict(
-                kldiv=mean_kldiv, 
-                label_entropy=label_ent,
-                cross_entropy=mean_cross_ent, 
-                enc_attn_entropy=enc_attn_entropy,
-                dec_attn_entropy=dec_attn_entropy,
-                attn_loss=attn_entropy_loss)
+        sum_label_ent = label_ent.sum(where=targets_active)
 
-    def loss(self, mean_kldiv, attn_entropy_loss):
-        return mean_kldiv + attn_entropy_loss * self.attn_loss_weight
+        return dict(
+                sum_active=total_active_targets,
+                sum_kldiv=sum_kldiv,
+                sum_label_entropy=sum_label_ent,
+                sum_cross_entropy=sum_cross_ent
+                )
+
+    def attention_entropy_loss(self, enc_attn_entropy, dec_attn_entropy):
+        attn_entropy = jnp.concatenate([enc_attn_entropy, dec_attn_entropy], axis=0) 
+        return jnp.sum((1.0 - attn_entropy) ** 2) 
+
+    def reduce_metrics(self, metrics):
+        norms = {}
+        norms['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
+        norms['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
+        norms['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
+        return norms
+
+    def loss(self, metrics):
+        """
+        Called inside the pmapped function to compute gradients
+        """
+        mean_cross_entropy = metrics['sum_cross_entropy'] / metrics['sum_active']
+        attn_loss = self.attention_entropy_loss(
+                metrics['enc_attn_entropy'],
+                metrics['dec_attn_entropy'])
+        return mean_cross_entropy + attn_loss * self.attn_loss_weight
         # return mean_kldiv 
 
 

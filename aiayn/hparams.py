@@ -67,6 +67,7 @@ reg = Hyperparams(
 
 train = Hyperparams(
     batch_dim0 = 64,
+    val_loop_elem = 16,
     accum_steps = 8,
     adam_beta1 = 0.9,
     adam_beta2 = 0.98,
