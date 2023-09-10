@@ -243,6 +243,7 @@ def setup_train(hps, rng_key):
     train_ds = pack.pack_dataset(train_ds, feature_lengths, 1000, num_tries, pad_id) 
     train_ds = train_ds.batch(hps.batch_dim0)
 
+    # Need to load deterministically so 
     val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
     val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
 

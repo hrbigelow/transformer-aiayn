@@ -83,11 +83,13 @@ def load_tfrecord_dataset(tfrecord_glob, swap_inputs_targets):
                 f'Couldn\'t find any files in tfrecord_glob pattern \'{tfrecord_glob}\'')
 
     AUTOTUNE = tf.data.AUTOTUNE
-    ignore_order = tf.data.Options()
-    ignore_order.experimental_deterministic = False
+    options = tf.data.Options()
+    options.deterministic = True
+    # ignore_order = tf.data.Options()
+    # ignore_order.experimental_deterministic = deterministic 
 
     dataset = tf.data.TFRecordDataset(filenames, num_parallel_reads=AUTOTUNE)
-    dataset = dataset.with_options(ignore_order)
+    dataset = dataset.with_options(options)
     fn = functools.partial(parse_example, swap_inputs_targets)
     return dataset.map(fn, num_parallel_calls=AUTOTUNE)
 

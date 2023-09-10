@@ -11,8 +11,16 @@ Usage: Given a dataset token_ds yielding pairs of variable-length token sequence
 
 pack_ds = pack.pack_dataset(token_ds, feature_lengths) 
 with spec:
-    { 'inputs':  (packed_input_seqs, packed_input_ids, total_pack_length),
-      'targets': (packed_input_seqs, packed_input_ids, total_pack_length) }
+    { 'inputs': { 'seqs': ..., 'seqids': ..., 'tokids': ..., 'counts': ... }, 
+      'targets': <same as inputs> }
+
+    seqs: o: concatenated token sequences
+    seqids: o: integer id denoting which source sequence the token belongs
+    tokids: o: integer id denoting the position in the source sequence 
+    counts: p: total length of sequence p in the pack, which is in [0, num_tries)
+
+    for non-existent tokens, seqs will have `pad_value`, while seqids and tokids will
+    have -1.
 
 """
 def pad_and_filter(ds, feature_lengths, pad_value):
@@ -226,10 +234,13 @@ def pack_sequences(seq_and_len, pad_value):
 
 def pack_dataset(toks_ds, feature_lengths, packing_batch=1000, num_tries=10, pad_value=-1):
     """
+    Packs items in toks_ds into blocks given by `feature_lengths`
     toks_ds:  dataset with spec { 'input': input_tokens, 'target': target_tokens }
     feature_lengths: map of { 'input': max_input_len, 'target': max_target_len } 
     packing_batch:  internal size for batching the packing operation
     num_tries:  number of internal iterations for trying to pack a batch
+
+    The final structure of the returned dataset is 
     """
     pad_ds = pad_and_filter(toks_ds, feature_lengths, pad_value)
     sz_ds = masked_sizes(pad_ds, packing_batch, num_tries, feature_lengths)
