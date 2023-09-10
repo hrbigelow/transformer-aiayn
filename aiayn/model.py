@@ -495,7 +495,7 @@ class Decoder(hk.Module):
         returns: bce
         """
         dec_embed = self.embed_layer(dec_seqs, dec_tokids)
-        dec_position_mask = jnp.equal(dec_seqids, -1).astype(jnp.int32)
+        dec_position_mask = jnp.equal(dec_tokids, -1).astype(jnp.int32)
         qt_cross_mask = jnp.not_equal(dec_seqids[:,:,None], enc_seqids[:,None,:]).astype(jnp.int32)
         qt_self_mask = jnp.not_equal(dec_seqids[:,None,:], dec_seqids[:,:,None]).astype(jnp.int32)
 

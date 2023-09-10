@@ -11,15 +11,16 @@ from tokenizers import pre_tokenizers
 from tokenizers.trainers import BpeTrainer
 from aiayn import data 
 
-def get_dataset(data_dir, name, split, feature='translation', input_name='en',
-        output_name='de'):
+def get_dataset(data_dir, name, split, feature='translation', input_lang='en',
+        target_lang='de'):
     builder = tfds.builder(name, data_dir=data_dir)
     builder.download_and_prepare()
     ds = builder.as_dataset(split=split, shuffle_files=False)
     ds = ds.batch(1000)
     def unpack(item):
-        feat = item[feature]
-        return (feat[input_name], feat[output_name])
+        if feature in item:
+            item = item[feature]
+        return (item[input_lang], item[target_lang])
     return ds.map(unpack).unbatch(), builder.info.splits[split].num_examples
 
 def train_tokenizer(ds, vocab_size, out_file):
@@ -111,18 +112,18 @@ def write_records(data_gen, num_elem, path_template, num_shards, shards=None):
         record_bytes = example.SerializeToString()
         file_writer.write(record_bytes)
 
-def main(download_dir, dataset_name, split, tokenizer_file, nproc, num_shards,
-        out_template, shards=None):
+def tokenize_dataset(download_dir, dataset_name, split, tokenizer_file, nproc,
+        num_shards, out_template, input_lang, target_lang, shards=None):
     """
     Write a tfrecord dataset to out_template (must contain '{}') 
     """
     print('Preparing dataset')
-    ds, num_elem = get_dataset(download_dir, dataset_name, split) 
+    ds, num_elem = get_dataset(download_dir, dataset_name, split, 'translation', 'de', 'en')
     data_gen = token_dataset(ds, tokenizer_file, nproc)
     print('Writing tfrecords')
     write_records(data_gen, num_elem, out_template, num_shards, shards) 
 
 if __name__ == '__main__':
-    cmds=dict(make=main, train_tokenizer=train_tokenizer)
+    cmds=dict(tokenize=tokenize_dataset, train=train_tokenizer)
     fire.Fire(cmds)
 

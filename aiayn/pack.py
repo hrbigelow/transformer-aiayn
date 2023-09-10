@@ -242,11 +242,11 @@ def pack_dataset(toks_ds, feature_lengths, packing_batch=1000, num_tries=10, pad
     return sz_ds.map(pack_pair_fn).unbatch().filter(filter_fn)
 
 def empty_pack(length, num_tries, pad_value):
-    z = tf.zeros(length)
+    blank = tf.cast(tf.fill(length, pad_value), tf.int32)
     return dict(
-            seqs=tf.zeros(length, dtype=tf.int32), 
-            seqids=tf.zeros(length, dtype=tf.int32), 
-            tokids=tf.fill(length, pad_value), 
+            seqs=blank,
+            seqids=blank,
+            tokids=blank,
             counts=tf.zeros(num_tries, dtype=tf.int32)
             )
 

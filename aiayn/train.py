@@ -211,11 +211,7 @@ def setup_train(hps, rng_key):
     if repl_batch_size % hps.accum_steps != 0:
         raise RuntimeError(f'{repl_batch_size=} not divisible by {hps.accum_steps=}')
 
-    # Set up orbax to save/restore custom optax types
-    # utils.register_handlers()
-
     options = ocp.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=20)
-    # checkpointer = ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler(), timeout_secs=100)
     checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
     mngr = ocp.CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
@@ -239,19 +235,20 @@ def setup_train(hps, rng_key):
 
     initial_step = int(hps.resume_ckpt or 0)
 
+    num_tries = 10
     feature_lengths = { 'inputs': hps.max_source_len, 'targets': hps.max_target_len }
     train_ds = data.load_tfrecord_dataset(hps.dataset_glob, hps.swap_source_target)
     train_ds = data.add_special_tokens(train_ds, bos_id, eos_id) 
     train_ds = train_ds.repeat().shuffle(hps.shuffle_size, rng_key[0], True)
-    train_ds = pack.pack_dataset(train_ds, feature_lengths, 1000, 10, pad_id) 
+    train_ds = pack.pack_dataset(train_ds, feature_lengths, 1000, num_tries, pad_id) 
     train_ds = train_ds.batch(hps.batch_dim0)
 
     val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
     val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
 
-    num_tries = 10
     pack_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
     total_packed = sum(1 for _ in pack_ds.as_numpy_iterator())
+    # remainder = - ((total_packed + 1000) % - (hps.val_loop_elem * num_replicas))
     remainder = - (total_packed % - (hps.val_loop_elem * num_replicas))
     total_items = total_packed + remainder
 
@@ -395,17 +392,6 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
         step += 1
 
 def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
-    """
-    param_patterns = dict(
-        decoder_masked_attention = r'decoder.body.(\d+).mask_att..*',
-        decoder_attention2 = r'decoder.body.(\d+).att2..*',
-        decoder_feed_forward = r'decoder.body.(\d+).ff..*',
-        enc_attention_wq = r'encoder.body.(\d+).att.wq',
-        enc_attention_wk = r'encoder.body.(\d+).att.wk',
-        enc_attention_wv = r'encoder.body.(\d+).att.wv',
-        enc_feed_forward = r'encoder.body.(\d+).ff..*'
-        )
-    """
     jnp.set_printoptions(precision=2, threshold=100000, edgeitems=100, linewidth=180)
     # import socket
     # host_addr = socket.gethostbyname(socket.gethostname())
