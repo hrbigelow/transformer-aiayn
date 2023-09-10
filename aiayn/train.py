@@ -247,6 +247,9 @@ def setup_train(hps, rng_key):
     val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
     val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
 
+    # This ensures the data will maintain the same order during both packings
+    val_ds = val_ds.take(-1).cache()
+
     pack_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
     total_packed = sum(1 for _ in pack_ds.as_numpy_iterator())
     # remainder = - ((total_packed + 1000) % - (hps.val_loop_elem * num_replicas))
@@ -379,7 +382,8 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             nd_metrics = flax.jax_utils.unreplicate(nd_metrics_m)
             ce = metrics['cross_entropy']
             ce_nd = nd_metrics['cross_entropy']
-            print(f'step {step}, ce_val={ce:3.2f}, ce_val_nd={ce_nd:3.2f}')
+            sum_active = metrics['sum_active']
+            print(f'step {step}, sum_active={sum_active:d}, ce_val={ce:3.2f}, ce_val_nd={ce_nd:3.2f}')
             if logger:
                 logger.write('cross_entropy_val', x=step, y=metrics['cross_entropy']) 
                 logger.write('cross_entropy_val_nd', x=step, y=nd_metrics['cross_entropy'])

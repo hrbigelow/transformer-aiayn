@@ -901,6 +901,7 @@ class Objective:
         norms['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
         norms['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
         norms['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
+        norms['sum_active'] = metrics['sum_active']
         # jax.debug.print('active metrics: {}', metrics['sum_active'])
         return norms
 
