@@ -34,58 +34,10 @@ def make_learning_rate_fn(warmup_steps, M):
         return new_lr
     return lr_fn
 
-def accumulate_gradient(loss_and_grad_fn, step_size, accum_steps, params, inputs,
-        targets, rng):
-    """
-    Inspired by https://github.com/google-research/vision_transformer/blob/
-         62a446f1b3bb9e470db5689bfd7407a8d91bae8a/vit_jax/utils.py#L99
-         accumulate gradients to save on memory
-    loss_and_grad_fn: function transformed with jax.pmap, jax.loss_and_grad
-    r:  replica index
-    enc_input: rbcm
-    dec_input: rbdm
-    Requires: b % accum_steps == 0
-    Returns: tuple of loss, grad
-    loss: rb
-    grad: pytree of params gradients
-    """
-    def get_slice(i, tensor):
-        return jax.lax.dynamic_slice_in_dim(tensor, i * step_size, step_size, 0)
-    # return jax.lax.dynamic_slice(tensor, (i * step_size, 0),
-                # (step_size,) + tensor.shape[1:])
-
-    def map_add(a, b):
-        return jax.tree_map(lambda x, y: x + y, a, b)
-    
-    input_slices = jax.tree_map(functools.partial(get_slice, 0), inputs)
-    target_slices = jax.tree_map(functools.partial(get_slice, 0), targets)
-    (_, metrics), grad = loss_and_grad_fn(params, input_slices, target_slices, rng)
-
-    def acc_loss_and_grad(i, tup):
-        metrics_accu, grad_accu, rng_key = tup
-        # loss, metrics = accu
-        input_slices = jax.tree_map(functools.partial(get_slice, i), inputs)
-        target_slices = jax.tree_map(functools.partial(get_slice, i), targets)
-        ret, grad_item = loss_and_grad_fn(params, input_slices, target_slices, rng_key)
-        _, metrics_item = ret
-        rng_key, = jax.random.split(rng_key, 1)
-        nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grad_item)
-        got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
-        unscale_fn = lambda x: x * metrics_item['sum_active']
-        grad_unscaled = jax.tree_map(unscale_fn, grad_item)
-        return (map_add(metrics_accu, metrics_item), 
-                map_add(grad_accu, grad_unscaled), 
-                rng_key)
-
-    # 1 accum:  6 sec / 10 steps
-    # 5 accum: 9 sec / 10 steps
-    # 9 accum: 14 sec / 10 steps 
-    args = metrics, grad, rng 
-    metrics, grad, _ = jax.lax.fori_loop(1, accum_steps, acc_loss_and_grad, args)
-    return metrics, grad
-
 def make_loss_fn(model, objective):
-    def loss_fn(params, inputs, targets, rng):
+    def loss_fn(params, data, rng):
+        inputs = data['inputs']
+        targets = data['targets']
         dec_input = targets['seqs']
         dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, inputs, targets)
         metrics = objective.metrics(dec_input, dec_output)
@@ -100,6 +52,22 @@ def make_loss_fn(model, objective):
         return loss, metrics 
     return loss_fn
 
+def accumulate_gradient(loss_fn, params, data, chunk_size, rng):
+    """
+    Applies loss_fn (and gradient) to `chunk_size` chunks of leading dim of data
+    and returns the sum
+    """
+    # returns (loss, metrics), grad
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    grad_fn = functools.partial(grad_fn, params)
+
+    def reshape_fn(x):
+        return jnp.reshape(x, (x.shape[0] // chunk_size, chunk_size, *x.shape[1:]))
+    data = jax.tree_map(reshape_fn, data)
+    accu, rng = jutils.map_sum(grad_fn, data, rng)
+    (_, metrics), grad = accu
+    return metrics, grad
+
 def make_validate_fn(model, objective, shard_size):
     loss_fn = make_loss_fn(model, objective)
 
@@ -108,17 +76,10 @@ def make_validate_fn(model, objective, shard_size):
 
     def val_fn(state, data, rng_key):
         # compute metrics from state and data
+        nonlocal loss_fn
         data = jax.tree_map(reshape_fn, data)
-        params = state['params']
-        def loop_fn(carry, item):
-            rng = carry
-            inputs = item['inputs']
-            targets = item['targets']
-            _, metrics = loss_fn(params, inputs, targets, rng)
-            rng, = jax.random.split(rng, 1)
-            return rng, metrics
-        _, metrics = jax.lax.scan(loop_fn, rng_key, data)
-        metrics = jax.tree_map(lambda *x: jnp.concatenate(x).sum(), metrics)
+        loss_fn = functools.partial(loss_fn, state['params'])
+        (_, metrics), rng_key = jutils.map_sum(loss_fn, data, rng_key)
         metrics = jax.lax.psum(metrics, axis_name='batch')
         metrics = objective.reduce_metrics(metrics)
         return metrics
@@ -130,7 +91,7 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
     loss_fn = make_loss_fn(model, objective)
 
-    def update_fn(state, inputs, targets):
+    def update_fn(state, data):
         """
         The function to pass into jax.pmap
         Returns updated state, rng
@@ -144,17 +105,13 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
         new_rng_key, = jax.random.split(rng_key, 1)
         dropout_rng = jax.random.fold_in(rng_key, jax.lax.axis_index('batch'))
 
-        lg_fn = jax.value_and_grad(loss_fn, has_aux=True)
-
-        metrics, grad = accumulate_gradient(lg_fn, step_size, accum_steps, params,
-                inputs, targets, dropout_rng)
+        metrics, grad = accumulate_gradient(loss_fn, params, data, step_size, dropout_rng)
+        # metrics, grad = accumulate_gradient(lg_fn, step_size, accum_steps, params,
+                # inputs, targets, dropout_rng)
 
         metrics, grad = jax.lax.psum((metrics, grad), axis_name='batch')
         grad = jax.tree_map(lambda x: x / metrics['sum_active'], grad)
-        norm_metrics = {}
-        norm_metrics['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
-        norm_metrics['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
-        norm_metrics['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
+        metrics = objective.reduce_metrics(metrics)
         
         nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grad)
         got_nan = jnp.any(jnp.stack(jax.tree_util.tree_leaves(nan_grads)))
@@ -179,12 +136,12 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
             norms = jax.tree_map(tensor_norm, grad, params, updates)
             state = dict(params=params, opt_state=opt_state, rng=new_rng_key,
                     got_nan=got_nan)
-            norm_metrics.update(norms=norms)
-            return state, norm_metrics
+            metrics.update(norms=norms)
+            return state, metrics
         else:
             state = dict(params=params, opt_state=opt_state, rng=new_rng_key,
                     got_nan=got_nan)
-            return state, norm_metrics
+            return state, metrics
             
     return update_fn
 
@@ -202,20 +159,6 @@ def log_steps(logger, steps, learn_rate, metrics):
     make_line_plot(logger, 'learn_rate', steps, learn_rate)
     for key, metric in metrics.items():
         make_line_plot(logger, key, steps, metric)
-
-def make_tandem_plot(logger, key, steps, values, palette):
-    """
-    Create a tandem lines plot with name `key`
-    steps:  b
-    values: bl 
-    b lines, each with l points
-    line i, point p is (steps[i], values[i][p])
-    """
-    steps = jnp.tile(steps[:,None], values.shape[1])
-    plot = jnp.stack((steps, values), axis=2)
-    plot = jnp.transpose(plot, (1,0,2))
-    # jax.debug.print('plot:\n{}', plot) # bl2  
-    logger.tandem_lines(key, plot, palette=palette)
 
 def log_metrics(logger, steps, norms): 
 
@@ -305,7 +248,6 @@ def setup_train(hps, rng_key):
 
     val_ds = data.load_tfrecord_dataset(hps.val_dataset_glob, hps.swap_source_target)
     val_ds = data.add_special_tokens(val_ds, bos_id, eos_id) 
-    pad_ds = pack.pad_and_filter(val_ds, feature_lengths, -1)
 
     num_tries = 10
     pack_ds = pack.pack_dataset(val_ds, feature_lengths, 100, num_tries, pad_id)
@@ -395,7 +337,7 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
         inputs = item['inputs']
         targets = item['targets']
         num_toks = inputs['counts'].sum() + targets['counts'].sum()
-        state_m, metrics_m = update_fn_m(state_m, inputs, targets) 
+        state_m, metrics_m = update_fn_m(state_m, item) 
         metrics = flax.jax_utils.unreplicate(metrics_m)
         got_nan = flax.jax_utils.unreplicate(state_m['got_nan'])
 

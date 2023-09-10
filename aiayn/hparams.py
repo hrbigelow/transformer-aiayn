@@ -62,7 +62,7 @@ reg = Hyperparams(
     dropout_rate = 0.1,
 
     # mixture coefficient for positional encoding
-    pos_encoding_factor = 0.01
+    pos_encoding_factor = 1.0 
 )
 
 train = Hyperparams(
@@ -73,7 +73,7 @@ train = Hyperparams(
     adam_beta2 = 0.98,
     adam_eps = 1e-9,
     label_smooth_eps = 0.1,
-    attn_loss_weight = 0.01,
+    attn_loss_weight = 0.0,
     warmup_steps = 4000,
     random_seed = 982349820,
     ckpt_every = 5000,
@@ -83,7 +83,7 @@ train = Hyperparams(
 
 logging = Hyperparams(
     report_every = 100,
-    eval_every = 1000,
+    eval_every = 100,
     with_metrics = False,
     streamvis_run_name = None,
     streamvis_path = None,

@@ -901,13 +901,16 @@ class Objective:
         norms['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
         norms['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
         norms['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
+        # jax.debug.print('active metrics: {}', metrics['sum_active'])
         return norms
 
     def loss(self, metrics):
         """
         Called inside the pmapped function to compute gradients
         """
-        mean_cross_entropy = metrics['sum_cross_entropy'] / metrics['sum_active']
+        # TODO: include attn_loss
+        return metrics['sum_cross_entropy']
+        # mean_cross_entropy = metrics['sum_cross_entropy'] / metrics['sum_active']
         attn_loss = self.attention_entropy_loss(
                 metrics['enc_attn_entropy'],
                 metrics['dec_attn_entropy'])
