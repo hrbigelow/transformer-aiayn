@@ -850,39 +850,35 @@ class Objective:
         self.eps = smoothing_eps
         self.attn_loss_weight = attn_loss_weight
 
-    def metrics(self, dec_input, dec_output_logits):
+    def metrics(self, targets, dec_output_logits):
         """
+        targets: item['targets'] from packed dataset
         dec_input: bq
         dec_output_logits: bqv
         """
         # bc
-        targets = dec_input[:,1:]
-
-        # -1 is non-sample, bos_id represents the start of a new sample
-        # both of which should not be active as a target
-        targets_active = jnp.logical_and(
-                jnp.not_equal(targets, self.bos_id),
-                jnp.not_equal(targets, -1))
+        targets = jax.tree_map(lambda x: x[:,1:], targets)
+        targets_active = jnp.not_equal(targets['tokids'], -1)
 
         # bqv
-        targets = jax.nn.one_hot(targets, self.V, axis=2)
+        target_seqs = jax.nn.one_hot(targets['seqs'], self.V, axis=2)
 
         # From https://arxiv.org/pdf/1512.00567.pdf "we used the uniform distribution u(k)"
-        targets = (1.0 - self.eps) * targets + self.eps * self.V ** -1 
+        target_seqs = (1.0 - self.eps) * target_seqs + self.eps * self.V ** -1 
 
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
 
         total_active_targets = targets_active.sum()
 
-        kldiv = funcs.fused_kldiv_softmax(targets, dec_pred_logits, 2)
+        kldiv = funcs.fused_kldiv_softmax(target_seqs, dec_pred_logits, 2)
 
         sum_kldiv = kldiv.sum(where=targets_active)
 
-        where = jnp.broadcast_to(targets_active[:,:,None], targets.shape)
-        cross_ent = funcs.cross_entropy(targets, dec_pred_logits, 2, where)
+        where = jnp.broadcast_to(targets_active[:,:,None], target_seqs.shape)
+        cross_ent = funcs.cross_entropy(target_seqs, dec_pred_logits, 2, where)
         sum_cross_ent = cross_ent.sum(where=targets_active)
-        label_ent = funcs.entropy(targets, 2, where)
+        label_ent = funcs.entropy(target_seqs, 2, where)
         sum_label_ent = label_ent.sum(where=targets_active)
 
         return dict(

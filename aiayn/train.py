@@ -38,9 +38,8 @@ def make_loss_fn(model, objective):
     def loss_fn(params, data, rng):
         inputs = data['inputs']
         targets = data['targets']
-        dec_input = targets['seqs']
         dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, inputs, targets)
-        metrics = objective.metrics(dec_input, dec_output)
+        metrics = objective.metrics(targets, dec_output)
 
         # TODO: properly normalize each entropy measure by batch size
         metrics.update(enc_attn_entropy=enc_attn_ent, dec_attn_entropy=dec_attn_ent)
