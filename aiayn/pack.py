@@ -180,7 +180,7 @@ def get_scatter_inds(batch_inds, seqs, lens):
     return tf.stack([batch_inds, inds], axis=3)
 
 @tf.function
-def pack_values(scatter_inds, values):
+def pack_values(scatter_inds, pad_value, values):
     """
     scatter_inds: pbo2
     values: pbo
@@ -191,11 +191,11 @@ def pack_values(scatter_inds, values):
     """
     B = tf.shape(values)[1]
     O = tf.shape(values)[2]
-    dest = tf.fill((B,O+1), -1)
+    dest = tf.fill((B,O+1), pad_value)
     return tf.tensor_scatter_nd_update(dest, scatter_inds, values)[:,:O]
 
 @tf.function
-def pack_sequences(seq_and_len):
+def pack_sequences(seq_and_len, pad_value):
     """
     seqs: pbo
     lens: pb 
@@ -215,8 +215,11 @@ def pack_sequences(seq_and_len):
     gbatch = tf.broadcast_to(tf.range(B)[None,:,None], (P,B,O))
     tokids = tf.broadcast_to(tf.range(O)[None,None,:], (P,B,O))
     scatter_inds = get_scatter_inds(gbatch, seqs, lens)
-    pack_fn = functools.partial(pack_values, scatter_inds)
-    seqs, seqids, tokids = tf.nest.map_structure(pack_fn, (seqs, seqids, tokids))
+
+    pack_seqs_fn = functools.partial(pack_values, scatter_inds, pad_value)
+    pack_ids_fn = functools.partial(pack_values, scatter_inds, -1)
+    seqs = tf.nest.map_structure(pack_seqs_fn, seqs)
+    seqids, tokids = tf.nest.map_structure(pack_ids_fn, (seqids, tokids))
     counts = tf.transpose(lens, (1,0))
     return dict(seqs=seqs, seqids=seqids, tokids=tokids, counts=counts)
 
@@ -232,21 +235,22 @@ def pack_dataset(toks_ds, feature_lengths, packing_batch=1000, num_tries=10, pad
     sz_ds = masked_sizes(pad_ds, packing_batch, num_tries, feature_lengths)
 
     def pack_pair_fn(item):
-        inputs = pack_sequences(item['inputs']) 
-        targets = pack_sequences(item['targets'])
+        inputs = pack_sequences(item['inputs'], pad_value) 
+        targets = pack_sequences(item['targets'], pad_value)
         return dict(inputs=inputs, targets=targets)
     
     def filter_fn(item):
-        return tf.not_equal(item['inputs']['tokids'][0], pad_value)
+        return tf.not_equal(item['inputs']['tokids'][0], -1)
 
     return sz_ds.map(pack_pair_fn).unbatch().filter(filter_fn)
 
 def empty_pack(length, num_tries, pad_value):
-    blank = tf.cast(tf.fill(length, pad_value), tf.int32)
+    pad = tf.cast(tf.fill(length, pad_value), tf.int32)
+    null = tf.cast(tf.fill(length, -1), tf.int32)
     return dict(
-            seqs=blank,
-            seqids=blank,
-            tokids=blank,
+            seqs=pad,
+            seqids=null,
+            tokids=null,
             counts=tf.zeros(num_tries, dtype=tf.int32)
             )
 
@@ -296,8 +300,8 @@ def unpack_dataset(pack_ds, num_tries, pad_value, process_batch_size=10):
         # Elements in the input which are padding will be scattered to (b,0,O)
         # and then trimmed out
         gbatch = tf.broadcast_to(tf.range(B)[:,None], (B,O))
-        tokids = tf.where(tf.not_equal(tokids, pad_value), tokids, O)
-        seqids = tf.where(tf.not_equal(seqids, pad_value), seqids, 0)
+        tokids = tf.where(tf.not_equal(tokids, -1), tokids, O)
+        seqids = tf.where(tf.not_equal(seqids, -1), seqids, 0)
         inds = tf.stack([gbatch, seqids, tokids], axis=2)
         dest = tf.fill((B,P,O+1), pad_value)
         unpack = tf.tensor_scatter_nd_update(dest, inds, seqs)[:,:,:O]
@@ -309,7 +313,12 @@ def unpack_dataset(pack_ds, num_tries, pad_value, process_batch_size=10):
                 targets=unpack_fn(item['targets']))
 
     def filt_fn(item):
-        return tf.not_equal(item['inputs'][1], 0)
+        _, input_len = item['inputs']
+        _, target_len = item['targets']
+        return tf.logical_or(
+                tf.not_equal(input_len, 0),
+                tf.not_equal(target_len, 0)
+                )
 
     def trim_map_fn(item):
         input_seq, input_len = item['inputs']
@@ -320,7 +329,7 @@ def unpack_dataset(pack_ds, num_tries, pad_value, process_batch_size=10):
                 )
 
     return (
-            pack_ds.batch(process_batch_size, drop_remainder=True)
+            pack_ds.batch(process_batch_size)
             .map(unpack_map_fn)
             .unbatch() 
             .unbatch()

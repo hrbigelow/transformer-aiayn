@@ -224,6 +224,7 @@ def setup_train(hps, rng_key):
     bos_id = tokenizer.token_to_id('[BOS]')
     eos_id = tokenizer.token_to_id('[EOS]')
     pad_id = tokenizer.token_to_id('[PAD]')
+    print(f'{pad_id=}')
 
     mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=True)
     val_mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=False)
@@ -231,7 +232,6 @@ def setup_train(hps, rng_key):
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx, hps.ckpt_dir)
-
 
     initial_step = int(hps.resume_ckpt or 0)
 
@@ -258,6 +258,7 @@ def setup_train(hps, rng_key):
     pack_ds = pack_ds.concatenate(fill_ds)
     val_data = next(pack_ds.batch(total_items).as_numpy_iterator())
     print(val_data['inputs']['seqs'].shape)
+    print(f'{total_items=}')
 
     # Initialize state de-novo
     item = next(train_ds.as_numpy_iterator())
