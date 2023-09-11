@@ -23,9 +23,25 @@ def get_dataset(data_dir, name, split, feature='translation', input_lang='en',
         return (item[input_lang], item[target_lang])
     return ds.map(unpack).unbatch(), builder.info.splits[split].num_examples
 
-def train_tokenizer(ds, vocab_size, out_file):
-    # num_elems = len(ds) * 2
-    ds = ds.rebatch(1000)
+def train_tokenizer(download_dir, dataset_name, vocab_size, out_file):
+    """
+    Train a BPE tokenizer on `dataset_name` with `vocab_size` tokens.
+
+    Train a BPE tokenizer on the sentence pairs from the train split of
+    `dataset_name`.  Train it to approximately `vocab_size` tokens, and save the
+    trained tokenizer to `out_file` which should have '.json'.
+
+    :param download_dir: Directory for caching downloaded dataset 
+    :param dataset_name: Name of dataset (as listed by tfds.list_builders())
+    :param vocab_size: Desired vocabulary size
+    :param out_file: '.json' file to save trained tokenizer
+
+    """
+    builder = tfds.builder(dataset_name, data_dir=download_dir)
+    builder.download_and_prepare()
+    ds = builder.as_dataset(split='train', shuffle_files=False)
+    num_examples = builder.info.splits['train'].num_examples
+    ds = ds.batch(1000)
 
     def convert(ds):
         it = ds.as_numpy_iterator()
@@ -34,6 +50,8 @@ def train_tokenizer(ds, vocab_size, out_file):
             item = next(it, None)
             if item is None:
                 return
+            if 'translation' in item:
+                item = item['translation']
             one, two = item.values()
             yield decode(one)
             yield decode(two)
@@ -42,9 +60,10 @@ def train_tokenizer(ds, vocab_size, out_file):
     special_tokens = ['[UNK]', '[PAD]', '[EOS]', '[BOS]']
     trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer.train_from_iterator(convert(ds), trainer)
+    tokenizer.train_from_iterator(convert(ds), trainer, length=num_examples*2)
     tokenizer.add_special_tokens(special_tokens)
     tokenizer.save(out_file)
+    print(f'Saved tokenizer to {out_file}')
 
 def token_dataset(ds, tokenizer_file, nproc):
     """
@@ -86,16 +105,21 @@ def write_records(data_gen, num_elem, path_template, num_shards, shards=None):
             output_buffer_size=10000)
 
     shards = range(num_shards)
-    chunk_size = num_elem // num_shards
-    begs = [chunk_size * i for i in range(num_shards)]
+    shard_size = num_elem // num_shards
+    begs = [shard_size * i for i in range(num_shards)]
+    file_writer = None
 
-    chunk = -1
+    prev_shard = None
     for i, (t1, t2) in enumerate(data_gen):
-        if chunk != i // chunk_size:
-            chunk = i // chunk_size
-            record_path = path_template.format(chunk)
-            print(f'Writing chunk {chunk} to {record_path} of {num_shards} shards')
+        shard = i // shard_size
+        if shard != prev_shard:
+            if file_writer is not None:
+                file_writer.flush()
+                file_writer.close()
+            record_path = path_template.format(shard)
+            print(f'Writing shard {shard} to {record_path} of {num_shards} shards')
             file_writer = tf.io.TFRecordWriter(record_path, options)
+            prev_shard = shard
 
         s1 = tf.io.serialize_tensor(t1)
         s2 = tf.io.serialize_tensor(t2)
@@ -111,9 +135,11 @@ def write_records(data_gen, num_elem, path_template, num_shards, shards=None):
         )
         record_bytes = example.SerializeToString()
         file_writer.write(record_bytes)
+    file_writer.flush()
+    file_writer.close()
 
 def tokenize_dataset(download_dir, dataset_name, split, tokenizer_file, nproc,
-        num_shards, out_template, input_lang, target_lang, shards=None):
+        num_shards, out_template, input_lang, target_lang):
     """
     Write a tfrecord dataset to out_template (must contain '{}') 
     """
@@ -121,9 +147,9 @@ def tokenize_dataset(download_dir, dataset_name, split, tokenizer_file, nproc,
     ds, num_elem = get_dataset(download_dir, dataset_name, split, 'translation', 'de', 'en')
     data_gen = token_dataset(ds, tokenizer_file, nproc)
     print('Writing tfrecords')
-    write_records(data_gen, num_elem, out_template, num_shards, shards) 
+    write_records(data_gen, num_elem, out_template, num_shards) 
 
 if __name__ == '__main__':
-    cmds=dict(tokenize=tokenize_dataset, train=train_tokenizer)
+    cmds=dict(tokenize_dataset=tokenize_dataset, train_tokenizer=train_tokenizer)
     fire.Fire(cmds)
 

@@ -10,8 +10,18 @@ def tree_add(accum, val):
 
 def map_sum(map_fn, data, rng):
     """
-    Map map_fn across the items of data (split by the leading axis)
+    Maps map_fn across the items of data (split by the leading axis)
     Returns: sum of mapped items, new_rng
+
+    Inputs:
+        data: a pytree of tensor leaves.  Each tensor has the same sized axis 0
+        rng:  random seed
+        map_fn:  (data_slice, rng) -> result
+                 where data_slice is a pytree of one slice along axis 0 of each
+                 leaf of `data`
+    Returns:
+        sum of each result returned by map_fn 
+
     """
     initial_data = jax.tree_map(lambda x: x[0], data)
     rest_of_data = jax.tree_map(lambda x: x[1:], data)
