@@ -86,7 +86,9 @@ python aiayn/preprocess.py tokenize_dataset \
 ## Train the model
 
 Train the Encoder-Decoder model (design based on Attention Is All You Need) on the
-data.  The settings below work for a TPU.  Please see Colab file.
+data.  The settings below work for a TPU.  
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hrbigelow/transformer-aiayn/blob/master/notebooks/jax_aiayn.ipynb)
 
 ```bash
 python3 aiayn/train.py \
