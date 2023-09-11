@@ -58,7 +58,8 @@ def train_tokenizer(download_dir, dataset_name, vocab_size, out_file):
 
     tokenizer = Tokenizer(BPE(unk_token='[UNK]'))
     special_tokens = ['[UNK]', '[PAD]', '[EOS]', '[BOS]']
-    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
+    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens,
+            show_progress=True)
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.train_from_iterator(convert(ds), trainer, length=num_examples*2)
     tokenizer.add_special_tokens(special_tokens)

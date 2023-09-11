@@ -10,6 +10,7 @@ authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
   # "transformers",
   "tokenizers",
+  "datasets",
   "flax",
   "jax",
   "optax",
