@@ -105,6 +105,16 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
     fh.close()
     out_fh.close()
 
+def evaluate_bleu(ref_file, hyp_file):
+    """
+    Evaluate the Bleu score for the hypothesis file `hyp_file` against the reference
+    translation file `ref_file`
+    """
+    print(f'Computing Bleu score for hypothesis file {hyp_file} against '
+            f'reference file {ref_file}')
+    bleu = bleu_tools.bleu_wrapper(ref_file, hyp_file)
+    print(f'Bleu Score: {bleu:2.3f}')
+
 def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
         hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
     hps = hparams.setup_hparams(hps_keys,
@@ -127,5 +137,6 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
                 out_file, hps)
 
 if __name__ == '__main__':
-    fire.Fire(main)
+    cmds = dict(sample=main, evaluate=evaluate_bleu)
+    fire.Fire(cmds)
 
