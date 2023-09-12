@@ -98,9 +98,8 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
             # out_fh.write(f'{score}\t{seq}\n')
             out_fh.write(f'{seq}\n')
             # print(f'{_id}\t{score:2.3f}\t{seq}')
-        if chunk % 10 == 0:
-            out_fh.flush()
-            print(f'Finished {chunk * hps.batch_dim0} sentences')
+        out_fh.flush()
+        print(f'Finished {chunk * hps.batch_dim0} sentences')
 
     fh.close()
     out_fh.close()

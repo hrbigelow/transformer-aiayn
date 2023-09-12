@@ -55,6 +55,13 @@ Subsequent times will use the cached data stored there.
 You must choose the desired vocabulary size.  Other datasets can be found with
 `tfds.list_builders()`.
 
+NOTE:  It is ultimately much faster to run this and the next command locally rather
+than using the combination of Colab and Google Cloud Storage.  Once the dataset is
+downloaded locally, training the tokenizer takes about 2 minutes.  Whereas, my
+attempt to train it on Colab using the dataset downloaded to a GCS bucket ran for
+over 40 minutes without finishing.  Also, HuggingFace's progress meter doesn't work
+in Colab, but it works when running locally.
+
 ```bash
 # python aiayn/preprocess.py DOWNLOAD_DIR DATASET_NAME VOCAB_SIZE OUT_FILE
 python aiayn/preprocess.py train_tokenizer \
@@ -82,6 +89,13 @@ python aiayn/preprocess.py tokenize_dataset \
    ~/tensorflow_datasets huggingface:wmt14/de-en train de-en-bpe.36500.json \
    8 ~/de-en-train/{}.tfrecord en de
 ```
+
+Once finished, upload the `.tfrecord` files to Google Cloud Storage using `gcloud
+storage cp` command.  You will need to set things up with Google Cloud.
+
+NOTE:  I have also tried using gdrive for the persistence.  It is possible to mount
+it into a Colab.  However, it is not as reliable or performant and I do not recommend
+it, even though the initial setup with GCS takes some work.
 
 ## Train the model
 

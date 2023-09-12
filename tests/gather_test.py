@@ -6,7 +6,6 @@ import jax.numpy as jnp
 offset_dims – the set of dimensions in the gather output that offset into an array
 sliced from operand. Must be a tuple of integers in ascending order, each
 representing a dimension number of the output.
-
 """
 offset_dims = (0,)
 
@@ -23,15 +22,15 @@ collapsed_slice_dims=(0,).
 
 I believe the phrase 'offset index' here refers to the 'start_indices' argument.
 
-
-
 """
 collapsed_slice_dims = (0,)
 
 """
 start_index_map – for each dimension in start_indices, gives the corresponding
-dimension in operand that is to be sliced. Must be a tuple of integers with size
-equal to start_indices.shape[-1].  
+dimension in operand that is to be sliced. 
+
+*** This is the key ***
+Must be a tuple of integers with size equal to start_indices.shape[-1].  
 """
 start_index_map = (0,)
 

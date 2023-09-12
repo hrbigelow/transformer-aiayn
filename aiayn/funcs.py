@@ -53,6 +53,75 @@ def log_softmax(x, axis, where=None, initial=None):
         return jnp.where(where, result, -jnp.inf)
     return result
 
+def attention_entropy(attn_matrix, attn_mask, query_seqids, query_lengths,
+        target_seqids, target_lengths, output_seqids, output_lengths):
+    """
+    computes a 0-1 scaled discrete entropy of target attention paid to a given
+    sentence.  'target attention' is the attention_matrix summed over heads and
+    queries consistent with the attn_mask, then normalized.
+
+    The entropy of that marginal is taken, then scaled by log(k), where k is the
+    total length of the target region as identified in target_seqids)
+
+    Then, this scaled entropy is weighted by the length of the corresponding region
+    in output_seqids (the sentence output by the decoder corresponding to this
+    sentence).
+
+    This function is called for any type of attention - Encoder self-attention,
+    and Decoder cross-attention being the main use-cases.  
+
+    For now, it seems that Decoder causally masked self-attention isn't a good
+    candidate for this function.
+
+    Finally, the average over multiple target regions is returned
+
+    Inputs:
+    attn_matrix: bhqt (softmax'ed attention - each b,h,q slice is normalized)
+    attn_mask: bqt    (1 means masked, 0 means pass-through)
+    query_seqids: bq  (identifies packed sentences used in attention query)
+    query_lengths: bp  (p is the id dimension, indexed by target_seqids)
+    target_seqids: bt (identifies packed sentences used in attention target) 
+    output_seqids: bo (identifies packed output sentences corresponding to this batch)
+    output_lengths: bp (p is the id dimension, indexed by output_seqids)
+
+    Output: b
+    """
+    # Gather output_counts using target_seqids as index tensor
+    B = target_seqids.shape[0]
+    target_index = jnp.stack(
+            jnp.broadcast_arrays(jnp.arange(B)[None,:], target_seqids), 
+            axis=2)
+    gd = jax.lax.GatherDimensionNumbers((), (0,1), (0,1)) 
+
+    # both of these are shape bt
+    # they give the output sequence length or query sequence length
+    # corresponding to the target token at position bt
+    output_lengths = jax.lax.gather(output_lengths, tindex, gd, (1,1)).astype(jnp.float32)
+    query_lengths = jax.lax.gather(query_lengths, tindex, gd, (1,1)).astype(jnp.float32)
+    target_lengths = jax.lax.gather(target_lengths, tindex, gd, (1,1)).astype(jnp.float32)
+
+    # Compute the masked marginal of the attention matrix
+    active = 1 - attn_mask
+    marg = jnp.sum(attn_matrix, axis=2, where=active, initial=0) # bht
+    marg = jnp.mean(marg, axis=1) # bt
+
+    # Further normalize by query sequence length
+    # TODO: How to avoid NaNs here?
+    have_query = jnp.greater(query_lengths, 0)
+    entropy_coeffs = jnp.divide(
+            jnp.where(have_query, marg, 1.0),
+            jnp.where(have_query, query_lengths, 1.0))
+
+    # Scale each discrete entropy argument so final entropy is in [0, 1]
+    # Finally, weight each entropy by output_lengths.  This represents the number of
+    # loss terms dependent on this entropy term
+    entropy_args = (jnp.log2(entropy_coeffs) 
+            * -jnp.log2(target_lengths) 
+            * output_lengths)
+
+    final = jnp.sum(entropy_coeffs * entropy_args)
+    return final
+
 
 """
 def _softmax(

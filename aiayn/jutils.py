@@ -21,11 +21,10 @@ def map_sum(map_fn, data, rng):
                  leaf of `data`
     Returns:
         sum of each result returned by map_fn 
-
     """
     initial_data = jax.tree_map(lambda x: x[0], data)
-    rest_of_data = jax.tree_map(lambda x: x[1:], data)
-    result = map_fn(initial_data, rng)
+    result_shape = jax.eval_shape(map_fn, initial_data, rng)
+    result = jax.tree_map(lambda dst: jnp.zeros(dst.shape, dst.dtype), result_shape)
     rng, = jax.random.split(rng, 1)
     carry = result, rng
 
@@ -36,6 +35,8 @@ def map_sum(map_fn, data, rng):
         accu = jax.tree_map(lambda x, y: x + y, accu, result)
         carry = accu, rng
         return carry, 0
+
     carry, _ = jax.lax.scan(scan_fn, carry, data) 
     return carry
+
 
