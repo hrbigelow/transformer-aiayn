@@ -208,18 +208,16 @@ class InputEmbedding(hk.Module):
         pos_emb = pos_emb.at[:,1::2].set(jnp.cos(arg[:,1::2]))
         return pos_emb
 
-    def __call__(self, pack):
+    def __call__(self, seqs, tokids):
         """
         pack['seqs']: bc (end-to-end packed tokens from sentences)
         pack['tokids']: bc (ids identifying position of token in a sentence, or -1 if masked)
         output: bcm
         """
-        seq_tokens = pack['seqs']
-        tokids = pack['tokids']
         pos_embed = self.positional_embedding(tokids)
         # jax.debug.print('pos_factor: {}, pos_embed[0]:\n{}', self.pos_factor, pos_embed[0])
         # jax.debug.print('tokids: {}', tokids[0])
-        embed = jnp.take(self.embed_mat(), seq_tokens, axis=0)
+        embed = jnp.take(self.embed_mat(), seqs, axis=0)
         embed = jnp.where(jnp.equal(tokids, -1)[:,:,None], 0, embed)
         
         # embed = funcs.take(self.embed_mat(), input.astype(jnp.float32), axis=0)
@@ -240,7 +238,7 @@ class EncoderLayer(hk.Module):
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
         self.layer_num = layer_num
         self.is_train = is_train
-        self.with_attn_entropy = hps.attn_loss_weight > 0.0
+        self.with_attn_entropy = hps.with_attn_entropy
         self.dropout_rate = hps.dropout_rate
         self.attention = MultiHeadAttention(H, M, K, V)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
@@ -282,7 +280,7 @@ class EncoderLayer(hk.Module):
                     att_coeff, qtmask,
                     query['seqids'], query['counts'],
                     target['seqids'], target['counts'],
-                    output['seqids'], output['counts'])
+                    output['counts'])
         else:
             attn_entropy = jnp.zeros(out.shape[0])
         return out, attn_entropy
@@ -306,7 +304,7 @@ class Encoder(hk.Module):
         qtmask = jnp.logical_or(qtmask, tmask[:,None,:])
         qtmask = jnp.logical_or(qtmask, tmask[:,:,None])
 
-        input_embed = self.embed_layer(inputs) 
+        input_embed = self.embed_layer(inputs['seqs'], inputs['tokids']) 
         # jax.debug.print('input_embed[:,:,0:2]:\n{}', input_embed[:,:,0:2])
         out = input_embed
         # pdb.set_trace()
@@ -316,7 +314,8 @@ class Encoder(hk.Module):
             attn_entropies.append(attn_entropy)
         # jax.debug.print('encoder_out: {}', out)
         # jax.debug.print('attn_entropy {}', attn_entropies[0])
-        attn_entropy_all = jnp.stack(attn_entropies) # b
+        attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
+        # jax.debug.print('attn_entropy_all:\n{}\n', attn_entropy_all)
         return out, attn_entropy_all
 
     def from_embedding(self, embed, seqids):
@@ -340,7 +339,7 @@ class DecoderLayer(hk.Module):
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
         self.dropout_rate = hps.dropout_rate
         self.is_train = is_train
-        self.with_attn_entropy = hps.attn_loss_weight > 0.0
+        self.with_attn_entropy = hps.with_attn_entropy
         self.self_attention = MultiHeadAttention(H, M, K, V)
         self.cross_attention = MultiHeadAttention(H, M, K, V)
         self.ff = PositionwiseFF(M, F)
@@ -381,7 +380,7 @@ class DecoderLayer(hk.Module):
                     cross_att_coeff, cross_qtmask,
                     query['seqids'], query['counts'],
                     target['seqids'], target['counts'],
-                    output['seqids'], output['counts'])
+                    output['counts'])
         else:
             cross_attn_entropy = jnp.zeros(out.shape[0]) 
         return out, cross_attn_entropy
@@ -460,7 +459,7 @@ class Decoder(hk.Module):
         returns: bce
         """
         inputs, targets = pack['inputs'], pack['targets']
-        dec_embed = self.embed_layer(targets)
+        dec_embed = self.embed_layer(targets['seqs'], targets['tokids'])
 
         dec_position_mask = jnp.equal(targets['tokids'], -1)
         cross_qtmask = jnp.not_equal(targets['seqids'][:,:,None], inputs['seqids'][:,None,:])
@@ -480,7 +479,7 @@ class Decoder(hk.Module):
         for mod in self.layers:
             out, attn_entropy = mod(enc_out, out, pack, self_qtmask, cross_qtmask)
             attn_entropies.append(attn_entropy)
-        attn_entropy_all = jnp.stack(attn_entropies) # l
+        attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
 
         # As shown in: 
         # https://arxiv.org/pdf/1904.10509.pdf
@@ -709,11 +708,14 @@ class Model(hk.Module):
             tokids: bc => position of token within each seqid
             counts: bt => lengths of each sequence at each 'try' (see pack)
 
-        returns: bct
+        returns: 
+        decoder output: bct
+        encoder attention entropy: l
+        decoder cross-attention entropy: l
         """
         enc_output, enc_attn_entropy = self.encoder(pack)
         dec_output, dec_attn_entropy = self.decoder(enc_output, pack)
-        return dec_output, enc_attn_entropy.mean(axis=0), dec_attn_entropy.mean(axis=0)
+        return dec_output, enc_attn_entropy.sum(axis=0), dec_attn_entropy.sum(axis=0)
 
     def infer_simple(self, enc_tokens, max_gen_length, temperature=1.0):
         """
@@ -804,15 +806,13 @@ def predict(self, enc_input):
     return seq
 
 class Objective:
-    def __init__(self, bos_id, n_vocab, smoothing_eps=0.1, attn_loss_weight=0):
-        """
-        page 8, Label Smoothing: using eps = 0.1
-        """
+    def __init__(self, hps, bos_id, n_vocab):
         # self.eps = smoothing_eps
         self.bos_id = bos_id
         self.V = n_vocab 
-        self.eps = smoothing_eps
-        self.attn_loss_weight = attn_loss_weight
+        self.eps = hps.label_smooth_eps
+        self.with_attn_entropy = hps.with_attn_entropy 
+        self.attn_loss_weight = hps.attn_loss_weight
 
     def metrics(self, targets, dec_output_logits):
         """
@@ -823,9 +823,7 @@ class Objective:
         # bc
         targets = jax.tree_map(lambda x: x[:,1:], targets)
         targets_active = jnp.not_equal(targets['tokids'], -1)
-
-        # bqv
-        target_seqs = jax.nn.one_hot(targets['seqs'], self.V, axis=2)
+        target_seqs = jax.nn.one_hot(targets['seqs'], self.V, axis=2) # bqv
 
         # From https://arxiv.org/pdf/1512.00567.pdf "we used the uniform distribution u(k)"
         target_seqs = (1.0 - self.eps) * target_seqs + self.eps * self.V ** -1 
@@ -852,34 +850,47 @@ class Objective:
                 sum_cross_entropy=sum_cross_ent
                 )
 
-    def attention_entropy_loss(self, enc_attn_entropy, dec_attn_entropy):
-        attn_entropy = jnp.concatenate([enc_attn_entropy, dec_attn_entropy], axis=0) 
-        return jnp.sum((1.0 - attn_entropy) ** 2) 
-
     def reduce_metrics(self, metrics):
+        """
+        Normalize batch-summed metrics.  These are metrics that are a sum of terms,
+        one per 2D batch item.  2D is (sentence, token-in-sentence)
+        """
         norms = {}
-        norms['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
-        norms['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
-        norms['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
-        norms['enc_attn_entropy'] = metrics['enc_attn_entropy'] / metrics['sum_active']
-        norms['dec_attn_entropy'] = metrics['dec_attn_entropy'] / metrics['sum_active']
+        for key, val in metrics.items():
+            if key == 'sum_active':
+                continue
+            norm_key = key[4:]
+            norms[key[4:]] = val / metrics['sum_active']
         
         norms['sum_active'] = metrics['sum_active']
         # jax.debug.print('active metrics: {}', metrics['sum_active'])
         return norms
 
-    def loss(self, metrics):
+    @staticmethod
+    def renorm_loss(summed_measure, sum_active):
         """
-        Called inside the pmapped function to compute gradients
+        Computes a renormalized loss from a summed measure.
         """
-        # TODO: include attn_loss
-        return metrics['sum_cross_entropy']
-        # mean_cross_entropy = metrics['sum_cross_entropy'] / metrics['sum_active']
-        attn_loss = self.attention_entropy_loss(
-                metrics['enc_attn_entropy'],
-                metrics['dec_attn_entropy'])
-        return mean_cross_entropy + attn_loss * self.attn_loss_weight
-        # return mean_kldiv 
+        per_term = summed_measure / sum_active
+        per_term_loss = jnp.sum((1.0 - per_term) ** 2)
+        return per_term_loss * sum_active
+
+    def summed_loss(self, metrics):
+        """
+        Called inside the pmapped function to compute gradients.
+        This is the sum over individual batch term losses.  Gradients produced from
+        this must be normalized by total batch size.
+
+        Awkwardly, since attention_entropy_loss is an aggregate quantity over
+        batch_dim1 (token context dimension)
+        """
+        sum_xent = metrics['sum_cross_entropy']
+
+        if self.with_attn_entropy:
+            sum_attn_loss = metrics['sum_enc_attn_loss'] + metrics['sum_dec_attn_loss']
+            return sum_xent + sum_attn_loss * self.attn_loss_weight 
+        else:
+            return sum_xent
 
 
 def _wrap_haiku(mod_cls, *args):

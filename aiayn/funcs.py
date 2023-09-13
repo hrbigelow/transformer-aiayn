@@ -54,26 +54,24 @@ def log_softmax(x, axis, where=None, initial=None):
     return result
 
 def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
-        target_seqids, target_counts, output_seqids, output_counts):
+        target_seqids, target_counts, output_counts):
     """
-    computes a 0-1 scaled discrete entropy of target attention paid to a given
-    sentence.  'target attention' is the attention_matrix summed over heads and
+    computes a 0-1 scaled discrete entropy of target attention paid to a given pack
+    of sentences.  'target attention' is the attention_matrix summed over heads and
     queries consistent with the attn_mask, then normalized.
 
     The entropy of that marginal is taken, then scaled by log(k), where k is the
     total length of the target region as identified in target_seqids)
 
-    Then, this scaled entropy is weighted by the length of the corresponding region
-    in output_seqids (the sentence output by the decoder corresponding to this
-    sentence).
+    The final answer is the weighted average of the individual scaled entropies for
+    each sentence in the pack, weighted by output sentence token length.  (The number
+    of terms in the cross-entropy loss)
 
     This function is called for any type of attention - Encoder self-attention,
     and Decoder cross-attention being the main use-cases.  
 
     For now, it seems that Decoder causally masked self-attention isn't a good
     candidate for this function.
-
-    Finally, the average over multiple target regions is returned
 
     Inputs:
     attn_matrix: bhqt (softmax'ed attention - each b,h,q slice is normalized)
@@ -82,8 +80,7 @@ def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
     query_counts: bp  (p is the id dimension, indexed by target_seqids)
     target_seqids: bt (identifies packed sentences used in attention target) 
     target_counts: bp 
-    output_seqids: bo 
-    output_counts: bp 
+    output_counts: bp
 
     Output: b
     """
@@ -96,10 +93,9 @@ def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
         l = jax.lax.gather(x, tindex, gd, (1,1), mode='fill', fill_value=0)
         return l.astype(jnp.float32)
 
-    output_lengths = count_to_length(output_counts) # bt
     query_lengths = count_to_length(query_counts)   # bt
     target_lengths = count_to_length(target_counts) # bt
-
+    output_lengths = count_to_length(output_counts) # bt
 
     # Compute the masked marginal of the attention matrix
     active = jnp.logical_not(attn_mask)
@@ -114,8 +110,6 @@ def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
 
     # ScaledH := H(p) / log2(k) for k >= 2 categories
     # ScaledH for k < 2 == 1 
-    # Finally, weight each entropy by output_lengths.  This represents the number of
-    # loss terms dependent on this entropy term
     entropy_args = jnp.select(
             [jnp.equal(target_lengths, 0), jnp.equal(target_lengths, 1)],
             [0.0, 1.0],
@@ -128,9 +122,10 @@ def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
     # jax.debug.print('entropy_coeffs:\n{}\n', entropy_coeffs[0])
     # jax.debug.print('entropy_args:\n{}\n', entropy_args[0])
     
-    final = jnp.sum(entropy_coeffs * entropy_args) # bt -> ()
+    final = jnp.sum(entropy_coeffs * entropy_args, axis=1) # bt -> b
+    # total_output = jnp.sum(output_counts, axis=1) # bp -> b
+    # return final / total_output
     # jax.debug.print('final:\n{}\n', final)
-    # jax.debug.print('total output_counts:\n{}\n', jnp.sum(output_counts))
     return final
 
 

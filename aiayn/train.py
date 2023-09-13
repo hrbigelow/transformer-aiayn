@@ -38,17 +38,22 @@ def make_loss_fn(model, objective):
     def loss_fn(params, data, rng):
         dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, data)
         metrics = objective.metrics(data['targets'], dec_output)
-        metrics.update(enc_attn_entropy=enc_attn_ent, dec_attn_entropy=dec_attn_ent)
+        sum_active = metrics['sum_active']
+        enc_attn_loss = objective.renorm_loss(enc_attn_ent, metrics['sum_active'])
+        dec_attn_loss = objective.renorm_loss(dec_attn_ent, metrics['sum_active'])
+        metrics.update(sum_enc_attn_loss=enc_attn_loss)
+        metrics.update(sum_dec_attn_loss=dec_attn_loss)
         # The loss must be returned in order to use this function to generate
         # gradients.  However, the gradients should be re-normalized, since batch
         # size varies
-        loss = objective.loss(metrics)
-        return loss, metrics 
+        sum_loss = objective.summed_loss(metrics)
+        metrics.update(sum_loss=sum_loss)
+        return sum_loss, metrics 
     return loss_fn
 
-def accumulate_gradient(loss_fn, params, data, chunk_size, rng):
+def accumulate_gradient(loss_fn, params, data, shard_size, rng):
     """
-    Applies loss_fn (and gradient) to `chunk_size` chunks of leading dim of data
+    Applies loss_fn (and gradient) to `shard_size` chunks of leading dim of data
     and returns the sum
     """
     # returns (loss, metrics), grad
@@ -56,7 +61,7 @@ def accumulate_gradient(loss_fn, params, data, chunk_size, rng):
     grad_fn = functools.partial(grad_fn, params)
 
     def reshape_fn(x):
-        return jnp.reshape(x, (x.shape[0] // chunk_size, chunk_size, *x.shape[1:]))
+        return jnp.reshape(x, (x.shape[0] // shard_size, shard_size, *x.shape[1:]))
     data = jax.tree_map(reshape_fn, data)
     accu, rng = jutils.map_sum(grad_fn, data, rng)
     (_, metrics), grad = accu
@@ -222,7 +227,7 @@ def setup_train(hps, rng_key):
 
     mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=True)
     val_mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=False)
-    objective = model.Objective(bos_id, n_vocab, hps.label_smooth_eps, hps.attn_loss_weight)
+    objective = model.Objective(hps, bos_id, n_vocab)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
             hps.with_metrics, tx, hps.ckpt_dir)
@@ -284,22 +289,24 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
 
+    """
     steps = np.empty(hps.report_every)
     losses = np.empty(hps.report_every)
     label_entropy = np.empty(hps.report_every)
     cross_entropy = np.empty(hps.report_every)
-    enc_attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
-    dec_attn_entropy = np.empty((hps.report_every, hps.num_layers)) # each layer
+    enc_attn_loss = np.empty((hps.report_every, hps.num_layers)) # each layer
+    dec_attn_loss = np.empty((hps.report_every, hps.num_layers)) # each layer
     attn_loss = np.empty(hps.report_every)
     learn_rate = np.empty(hps.report_every)
     report_metrics = dict(
             kldiv=losses,
             label_entropy=label_entropy,
             cross_entropy=cross_entropy,
-            # enc_attn_entropy=enc_attn_entropy,
-            #dec_attn_entropy=dec_attn_entropy,
-            #attn_loss=attn_loss
+            enc_attn_loss=enc_attn_loss,
+            dec_attn_loss=dec_attn_loss,
+            attn_loss=attn_loss
             )
+    """
 
     if hps.with_metrics: 
         names = ('grad', 'param', 'update')
@@ -345,42 +352,51 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             # mngr.wait_until_finished()
             raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
-        report_idx = step % hps.report_every
-        steps[report_idx] = step
-        for key in report_metrics:
-            report_metrics[key][report_idx] = metrics[key]
-        learn_rate[report_idx] = learn_rate_fn(step + 1)
+        # report_idx = step % hps.report_every
+        # steps[report_idx] = step
+        # for key in report_metrics:
+            # report_metrics[key][report_idx] = metrics[key]
+        # learn_rate[report_idx] = learn_rate_fn(step + 1)
 
         if hps.with_metrics:
             fn = lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, report_idx, 0)
             norms = jax.tree_map(fn, norms, metrics['norms'])
 
-        if step > 0 and report_idx % hps.report_every == 0:
-            loss = report_metrics['kldiv'][report_idx]
+        if step > 0 and step % hps.report_every == 0:
+            ce = metrics['cross_entropy']
+            act = metrics['sum_active']
+            loss = metrics['loss']
+            # loss = report_metrics['kldiv'][report_idx]
             # attn_loss = report_metrics['attn_loss'][report_idx]
-            ce = report_metrics['cross_entropy'][report_idx]
-            print(f'step {step}, {num_toks=}, cross_ent={ce:3.2f} loss={loss:3.2f}')
+            # ce = report_metrics['cross_entropy'][report_idx]
+            print(f'step {step}, {act=}, cross_ent={ce:3.2f} loss={loss:3.2f}')
                      #f' attn_loss={attn_loss:2.4f}')
 
+        if logger:
+            for key, val in metrics.items():
+                logger.write(key, step, val)
+
+        """
         if logger and step > 0 and report_idx == hps.report_every - 1:
             log_steps(logger, steps, learn_rate, report_metrics) 
             # jax.debug.print('report:\n{}', report_metrics)
             if hps.with_metrics:
                 log_metrics(logger, steps, norms)
+        """
 
         if step > 0 and step % hps.eval_every == 0:
             rng_key_s = jax.random.split(rng_key, num_replicas)
-            metrics_m = val_fn_m(state_m, val_data, rng_key_s)
-            metrics = flax.jax_utils.unreplicate(metrics_m)
-            nd_metrics_m = val_nd_fn_m(state_m, val_data, rng_key_s)
-            nd_metrics = flax.jax_utils.unreplicate(nd_metrics_m)
-            ce = metrics['cross_entropy']
-            ce_nd = nd_metrics['cross_entropy']
-            sum_active = metrics['sum_active']
-            print(f'step {step}, sum_active={sum_active:d}, ce_val={ce:3.2f}, ce_val_nd={ce_nd:3.2f}')
+            val_metrics_m = val_fn_m(state_m, val_data, rng_key_s)
+            val_metrics = flax.jax_utils.unreplicate(val_metrics_m)
+            val_nd_metrics_m = val_nd_fn_m(state_m, val_data, rng_key_s)
+            val_nd_metrics = flax.jax_utils.unreplicate(val_nd_metrics_m)
+            ce_val = val_metrics['cross_entropy']
+            ce_val_nd = val_nd_metrics['cross_entropy']
+            sum_active = val_metrics['sum_active']
+            print(f'{step=}, {sum_active=:d}, {ce_val=:3.2f}, {ce_val_nd=:3.2f}')
             if logger:
-                logger.write('cross_entropy_val', x=step, y=metrics['cross_entropy']) 
-                logger.write('cross_entropy_val_nd', x=step, y=nd_metrics['cross_entropy'])
+                logger.write('cross_entropy_val', x=step, y=ce_val) 
+                logger.write('cross_entropy_val_nd', x=step, y=ce_val_nd)
             
 
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
