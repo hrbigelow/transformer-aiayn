@@ -374,7 +374,7 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
 
         if logger:
             for key, val in metrics.items():
-                logger.write(key, step, val)
+                logger.write(key, x=step, y=val)
 
         """
         if logger and step > 0 and report_idx == hps.report_every - 1:

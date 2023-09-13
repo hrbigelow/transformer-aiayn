@@ -15,12 +15,13 @@ class MultiHeadAttention(hk.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, H, M, K, V):
+    def __init__(self, H, M, K, V, do_cache=False):
         super().__init__(name='att')
         self.H = H # number of heads
         self.M = M # d_model, or 'embedding dimension'
         self.K = K # number of components in the key
         self.V = V # number of components in the value
+        self.do_cache = do_cache
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
         self.kscale = np.sqrt(self.K) ** -1
@@ -106,7 +107,7 @@ class MultiHeadAttention(hk.Module):
 
         query = jnp.einsum('hmd,bm->bhd', wq, new_toks)
 
-        if self.self_attn:
+        if self.do_cache:
             wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
             kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, new_toks)
             kv_next_unsq = kv_next[None,:,:,:,None,:]
@@ -139,11 +140,7 @@ class MultiHeadAttention(hk.Module):
 
         coeff_summary = att.mean(axis=1) # mean over heads 
 
-        # if not self.self_attn:
-            # jax.debug.print('step: {}\nlayer: {}\ncoeff_summary[0,:]: {}\n',
-                    # step, layer, coeff_summary[0,:])
-
-        if self.self_attn: 
+        if self.do_cache: 
             return kvcache, out[:,None,:]
         else:
             return coeff_summary, out[:,None,:]
@@ -238,14 +235,13 @@ class EncoderLayer(hk.Module):
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
         self.layer_num = layer_num
         self.is_train = is_train
-        self.with_attn_entropy = hps.with_attn_entropy
         self.dropout_rate = hps.dropout_rate
-        self.attention = MultiHeadAttention(H, M, K, V)
+        self.attention = MultiHeadAttention(H, M, K, V, do_cache=True)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
         self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
         self.ff = PositionwiseFF(M, F)
 
-    def __call__(self, input_embed, pack, qtmask):
+    def __call__(self, input_embed, qtmask):
         """
         input_embed: btm
         pack: pack from aiayn.pack
@@ -271,34 +267,22 @@ class EncoderLayer(hk.Module):
         if self.is_train:
             ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add1 + ff 
-        # jax.debug.print('encoder_layer {}: out[0,:,100:110]:\n{}', 
-                # self.layer_num, out[0,:,100:110])
-
-        if self.with_attn_entropy:
-            query, target, output = pack['inputs'], pack['inputs'], pack['targets']
-            attn_entropy = funcs.attention_entropy(
-                    att_coeff, qtmask,
-                    query['seqids'], query['counts'],
-                    target['seqids'], target['counts'],
-                    output['counts'])
-        else:
-            attn_entropy = jnp.zeros(out.shape[0])
-        return out, attn_entropy
+        return out, att_coeff
 
 class Encoder(hk.Module):
     def __init__(self, hps, arch, is_train, embed_mat):
         super().__init__(name='enc')
+        self.is_train = is_train
         self.embed_layer = InputEmbedding(hps, embed_mat, jnp.sqrt(arch['M']), is_train) 
         self.layers = [EncoderLayer(hps, arch, is_train, i) for i in range(arch['L'])]
 
-    def __call__(self, pack):
+    def __call__(self, inputs, targets=None):
         """
         pack:  sentence-pair format from aiayn/pack.py
         returns
         output embedding: bqm
         attention entropy: bl
         """
-        inputs = pack['inputs']
         tmask = jnp.equal(inputs['tokids'], -1)
         qtmask = jnp.not_equal(inputs['seqids'][:,None,:], inputs['seqids'][:,:,None])
         qtmask = jnp.logical_or(qtmask, tmask[:,None,:])
@@ -310,8 +294,18 @@ class Encoder(hk.Module):
         # pdb.set_trace()
         attn_entropies = []
         for mod in self.layers:
-            out, attn_entropy = mod(out, pack, qtmask)
-            attn_entropies.append(attn_entropy)
+            out, attn_coeff = mod(out, qtmask)
+            if self.is_train and self.with_attn_entropy:
+                att_query, att_target, att_output = inputs, inputs, targets 
+                attn_entropy = funcs.attention_entropy(
+                        att_coeff, qtmask,
+                        att_query['seqids'], att_query['counts'],
+                        att_target['seqids'], att_target['counts'],
+                        att_output['counts'])
+                attn_entropies.append(attn_entropy)
+            else:
+                attn_entropies.append(jnp.zeros(out.shape[0]))
+
         # jax.debug.print('encoder_out: {}', out)
         # jax.debug.print('attn_entropy {}', attn_entropies[0])
         attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
@@ -339,20 +333,18 @@ class DecoderLayer(hk.Module):
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
         self.dropout_rate = hps.dropout_rate
         self.is_train = is_train
-        self.with_attn_entropy = hps.with_attn_entropy
-        self.self_attention = MultiHeadAttention(H, M, K, V)
+        self.self_attention = MultiHeadAttention(H, M, K, V, do_cache=True)
         self.cross_attention = MultiHeadAttention(H, M, K, V)
         self.ff = PositionwiseFF(M, F)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
         self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
         self.norm3 = hk.LayerNorm((2,), True, True, name='lnorm3')
 
-    def __call__(self, enc_out, input_emb, pack, self_qtmask, cross_qtmask):
+    def __call__(self, enc_out, input_emb, self_qtmask, cross_qtmask):
         """
         all masks have 0 or 1 (1 = mask out)
         enc_out: btm (t from encoder)
         input_emb: bqm 
-        pack: the sentence pair pack from aiayn/pack.py
         self_qtmask: bqt
         cross_qtmask: bqt
         out: bqm
@@ -373,24 +365,15 @@ class DecoderLayer(hk.Module):
         if self.is_train:
             ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add2 + ff
+        return out, cross_att_coeff
 
-        if self.with_attn_entropy:
-            query, target, output = pack['targets'], pack['inputs'], pack['targets']
-            cross_attn_entropy = funcs.attention_entropy(
-                    cross_att_coeff, cross_qtmask,
-                    query['seqids'], query['counts'],
-                    target['seqids'], target['counts'],
-                    output['counts'])
-        else:
-            cross_attn_entropy = jnp.zeros(out.shape[0]) 
-        return out, cross_attn_entropy
 
     def enc_kvcache(self, enc_out):
         """
         Compute the keys and values of the encoder output for this decoder layer
         return bhstd  (s in [0, 1], key or val)
         """
-        return self.cross_att.get_keys_values(enc_out)
+        return self.cross_attention.get_keys_values(enc_out)
 
     def incremental(self, layer, step, enc_mask, enc_kvcache, dec_kvcache, next_embed):
         """
@@ -409,7 +392,7 @@ class DecoderLayer(hk.Module):
         step_mask = jnp.greater(jnp.arange(Q), step).astype(jnp.int32)
         step_mask = jnp.repeat(step_mask[None,:], B, axis=0)
         # jax.debug.print('layer: {}\nstep: {}\n_mask:\n{}\n', layer, step, step_mask)
-        dec_kvcache, att1 = self.self_att.incremental(layer, step, dec_kvcache,
+        dec_kvcache, att1 = self.self_attention.incremental(layer, step, dec_kvcache,
             norm1, step_mask)
         # norm1 = self.norm1(next_embed, att1)
         post_add1 = next_embed + att1
@@ -418,7 +401,7 @@ class DecoderLayer(hk.Module):
 
         # enc_mask = jnp.zeros(enc_mask.shape)
         # enc_mask = enc_mask.at[:,40:].set(1)
-        coeff, att2 = self.cross_att.incremental(layer, step, enc_kvcache, norm2, enc_mask)
+        coeff, att2 = self.cross_attention.incremental(layer, step, enc_kvcache, norm2, enc_mask)
 
         # if step == 5:
             # jax.debug.print('layer: {}\nstep: {}\natt2:\n{}\n', layer, step, att2)
@@ -477,8 +460,17 @@ class Decoder(hk.Module):
         attn_entropies = []
         out = dec_embed
         for mod in self.layers:
-            out, attn_entropy = mod(enc_out, out, pack, self_qtmask, cross_qtmask)
-            attn_entropies.append(attn_entropy)
+            out, att_coeff = mod(enc_out, out, self_qtmask, cross_qtmask)
+            if self.is_train and self.with_attn_entropy:
+                att_query, att_target, att_output = pack['targets'], pack['inputs'], pack['targets']
+                attn_entropy = funcs.attention_entropy(
+                        att_coeff, cross_qtmask,
+                        att_query['seqids'], att_query['counts'],
+                        att_target['seqids'], att_target['counts'],
+                        att_output['counts'])
+                attn_entropies.append(attn_entropy)
+            else:
+                attn_entropies.append(jnp.zeros(out.shape[0]))
         attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
 
         # As shown in: 
@@ -713,7 +705,7 @@ class Model(hk.Module):
         encoder attention entropy: l
         decoder cross-attention entropy: l
         """
-        enc_output, enc_attn_entropy = self.encoder(pack)
+        enc_output, enc_attn_entropy = self.encoder(pack['inputs'], pack['targets'])
         dec_output, dec_attn_entropy = self.decoder(enc_output, pack)
         return dec_output, enc_attn_entropy.sum(axis=0), dec_attn_entropy.sum(axis=0)
 
@@ -771,7 +763,8 @@ class Model(hk.Module):
         enc_mask = jnp.where(enc_tokens == pad_value, 1, 0)
         # jax.debug.print('enc_tokids:\n{}', enc_tokids)
         enc_seqids = jnp.zeros_like(enc_tokids, dtype=jnp.int32)
-        enc_out, _ = self.encoder(enc_tokens, enc_seqids, enc_tokids)
+        inputs = dict(seqs=enc_tokens, seqids=enc_seqids, tokids=enc_tokids)
+        enc_out, _ = self.encoder(inputs)
         # jax.debug.print('Model: beam_search: enc_out[0,0:10,0:4]\n{}', enc_out[0,0:10,0:4])
         return self.decoder.beam_search(enc_mask, enc_out, alpha, beta, beam_size,
                 max_source_len, max_target_len)
