@@ -53,8 +53,8 @@ def log_softmax(x, axis, where=None, initial=None):
         return jnp.where(where, result, -jnp.inf)
     return result
 
-def attention_entropy(attn_matrix, attn_mask, query_seqids, query_lengths,
-        target_seqids, target_lengths, output_seqids, output_lengths):
+def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
+        target_seqids, target_counts, output_seqids, output_counts):
     """
     computes a 0-1 scaled discrete entropy of target attention paid to a given
     sentence.  'target attention' is the attention_matrix summed over heads and
@@ -79,47 +79,58 @@ def attention_entropy(attn_matrix, attn_mask, query_seqids, query_lengths,
     attn_matrix: bhqt (softmax'ed attention - each b,h,q slice is normalized)
     attn_mask: bqt    (1 means masked, 0 means pass-through)
     query_seqids: bq  (identifies packed sentences used in attention query)
-    query_lengths: bp  (p is the id dimension, indexed by target_seqids)
+    query_counts: bp  (p is the id dimension, indexed by target_seqids)
     target_seqids: bt (identifies packed sentences used in attention target) 
-    output_seqids: bo (identifies packed output sentences corresponding to this batch)
-    output_lengths: bp (p is the id dimension, indexed by output_seqids)
+    target_counts: bp 
+    output_seqids: bo 
+    output_counts: bp 
 
     Output: b
     """
     # Gather output_counts using target_seqids as index tensor
-    B = target_seqids.shape[0]
-    target_index = jnp.stack(
-            jnp.broadcast_arrays(jnp.arange(B)[None,:], target_seqids), 
-            axis=2)
-    gd = jax.lax.GatherDimensionNumbers((), (0,1), (0,1)) 
+    def count_to_length(x):
+        B = target_seqids.shape[0]
+        bcast = jnp.broadcast_arrays(jnp.arange(B)[:,None], target_seqids)
+        tindex = jnp.stack(bcast, axis=2)
+        gd = jax.lax.GatherDimensionNumbers((), (0,1), (0,1)) 
+        l = jax.lax.gather(x, tindex, gd, (1,1), mode='fill', fill_value=0)
+        return l.astype(jnp.float32)
 
-    # both of these are shape bt
-    # they give the output sequence length or query sequence length
-    # corresponding to the target token at position bt
-    output_lengths = jax.lax.gather(output_lengths, tindex, gd, (1,1)).astype(jnp.float32)
-    query_lengths = jax.lax.gather(query_lengths, tindex, gd, (1,1)).astype(jnp.float32)
-    target_lengths = jax.lax.gather(target_lengths, tindex, gd, (1,1)).astype(jnp.float32)
+    output_lengths = count_to_length(output_counts) # bt
+    query_lengths = count_to_length(query_counts)   # bt
+    target_lengths = count_to_length(target_counts) # bt
+
 
     # Compute the masked marginal of the attention matrix
-    active = 1 - attn_mask
-    marg = jnp.sum(attn_matrix, axis=2, where=active, initial=0) # bht
+    active = jnp.logical_not(attn_mask)
+    marg = jnp.sum(attn_matrix, axis=2, where=active[:,None,:,:], initial=0) # bhqt->bht
     marg = jnp.mean(marg, axis=1) # bt
 
     # Further normalize by query sequence length
-    # TODO: How to avoid NaNs here?
     have_query = jnp.greater(query_lengths, 0)
     entropy_coeffs = jnp.divide(
             jnp.where(have_query, marg, 1.0),
             jnp.where(have_query, query_lengths, 1.0))
 
-    # Scale each discrete entropy argument so final entropy is in [0, 1]
+    # ScaledH := H(p) / log2(k) for k >= 2 categories
+    # ScaledH for k < 2 == 1 
     # Finally, weight each entropy by output_lengths.  This represents the number of
     # loss terms dependent on this entropy term
-    entropy_args = (jnp.log2(entropy_coeffs) 
-            * -jnp.log2(target_lengths) 
-            * output_lengths)
+    entropy_args = jnp.select(
+            [jnp.equal(target_lengths, 0), jnp.equal(target_lengths, 1)],
+            [0.0, 1.0],
+            -jnp.log2(entropy_coeffs) 
+            * output_lengths
+            / jnp.log2(jnp.maximum(target_lengths, 2.0))
+            )
 
-    final = jnp.sum(entropy_coeffs * entropy_args)
+    # jax.debug.print('target_lengths:\n{}\n', target_lengths[0])
+    # jax.debug.print('entropy_coeffs:\n{}\n', entropy_coeffs[0])
+    # jax.debug.print('entropy_args:\n{}\n', entropy_args[0])
+    
+    final = jnp.sum(entropy_coeffs * entropy_args) # bt -> ()
+    # jax.debug.print('final:\n{}\n', final)
+    # jax.debug.print('total output_counts:\n{}\n', jnp.sum(output_counts))
     return final
 
 

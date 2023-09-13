@@ -36,14 +36,9 @@ def make_learning_rate_fn(warmup_steps, M):
 
 def make_loss_fn(model, objective):
     def loss_fn(params, data, rng):
-        inputs = data['inputs']
-        targets = data['targets']
-        dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, inputs, targets)
-        metrics = objective.metrics(targets, dec_output)
-
-        # TODO: properly normalize each entropy measure by batch size
+        dec_output, enc_attn_ent, dec_attn_ent = model.apply(params, rng, data)
+        metrics = objective.metrics(data['targets'], dec_output)
         metrics.update(enc_attn_entropy=enc_attn_ent, dec_attn_entropy=dec_attn_ent)
-
         # The loss must be returned in order to use this function to generate
         # gradients.  However, the gradients should be re-normalized, since batch
         # size varies
@@ -266,7 +261,7 @@ def setup_train(hps, rng_key):
     # Initialize state de-novo
     item = next(train_ds.as_numpy_iterator())
     init_item = jax.tree_map(lambda ten: ten[:1], item)
-    params = mod.init(rng_key, init_item['inputs'], init_item['targets'])
+    params = mod.init(rng_key, init_item)
     opt_state = tx.init(params)
     state = dict(params=params, opt_state=opt_state)
     initial_step = 0

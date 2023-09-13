@@ -15,7 +15,7 @@ class MultiHeadAttention(hk.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, is_self_attn, H, M, K, V, with_attn_entropy=False):
+    def __init__(self, H, M, K, V):
         super().__init__(name='att')
         self.H = H # number of heads
         self.M = M # d_model, or 'embedding dimension'
@@ -24,32 +24,19 @@ class MultiHeadAttention(hk.Module):
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
         self.kscale = np.sqrt(self.K) ** -1
-        self.self_attn = is_self_attn
-        self.with_attn_entropy = with_attn_entropy
 
-    def __call__(self, qinput, kvinput, qmask, tmask, qtmask):
+    def __call__(self, qinput, kvinput, qtmask):
         """
         all masks have 0 or 1.  1 means ignore (mask out)
         qinput: bqm 
         kvinput: btm 
-        qmask: bq  (ignore these query positions)
-        tmask: bt  (ignore these target positions)
         qtmask: bqt  (ignore combinations of query, target positions)
-        output: bqm 
+        output: 
+           mha: bqm
+           attention matrix: bqt
         """
         B,Q,_ = qinput.shape
         _,T,_ = kvinput.shape
-
-        if qmask is None:
-            qmask = jnp.zeros((B,Q))
-        if tmask is None:
-            tmask = jnp.zeros((B,T))
-        if qtmask is None:
-            qtmask = jnp.zeros((B,Q,T))
-
-        qmask = qmask[:,:,None]
-        tmask = tmask[:,None,:]
-        logits_mask = jnp.maximum(tmask, qtmask)
 
         kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
@@ -64,48 +51,15 @@ class MultiHeadAttention(hk.Module):
         key = jnp.einsum('hmd,btm->bhtd', wk, kvinput)
         val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
         
-        # logit_adj = logits_mask[:,None,:,:] * -1e6
-        # alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key) + logit_adj
         alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key)
-        active = jnp.broadcast_to(1 - logits_mask[:,None,:,:], alogit.shape)
+        active = jnp.broadcast_to(jnp.logical_not(qtmask)[:,None,:,:], alogit.shape)
         # att2 = jax.nn.softmax(alogit * self.kscale, axis=3, where=active,
                 # initial=0.0)
         att = funcs.softmax(alogit * self.kscale, axis=3, where=active, initial=0.0)
-
-        """
-        Computes the 
-        """
-        if self.with_attn_entropy:
-            occu = 1 - logits_mask # bqt
-            row_occu = jnp.sum(occu, axis=2, keepdims=True)[:,None,:,:] # bhqt
-            active_cols = jnp.max(occu, axis=1) # bt
-            target_marg = jnp.sum(att * row_occu, axis=(1,2)) # bt
-            target_sum = jnp.sum(target_marg, axis=(1,), keepdims=True) # bt
-            target_norm = target_marg / target_sum
-            target_entr = funcs.entropy(target_norm, axis=1, where=active_cols)
-            c = jnp.sum(active_cols, axis=1) # b
-
-            scaled_entr = target_entr / jnp.log2(c)
-            # if not self.self_attn:
-                # jax.debug.print('using my att: {}, {}',
-                        # jnp.any(jnp.isnan(alogit)),
-                        # jnp.any(jnp.isnan(att)))
-
-            # scaled_entr = target_entr
-            # jax.debug.print('scaled_entr: nan: {}, inf: {}\n',
-             #        jnp.any(jnp.isnan(scaled_entr)),
-              #       jnp.any(jnp.isinf(scaled_entr)))
-            # jax.debug.print('scaled_entr:\n{}', scaled_entr)
-            # jax.debug.print('c:\n{}', c)
-
         pre = jnp.einsum('bhqt,bhtd->bhqd', att, val)
         out = jnp.einsum('hdm,bhqd->bqm', wo, pre)
-        out = out * (1.0 - qmask) # to protect gradients of masked positions
         # jax.debug.print('qinput: {}\nkvinput: {}\n', qinput, kvinput)
-        if self.with_attn_entropy:
-            return out, scaled_entr
-        else:
-            return out
+        return out, att
 
     def get_keys_values(self, kvinput):
         """
@@ -205,16 +159,12 @@ class PositionwiseFF(hk.Module):
         self.M = M
         self.F = F
 
-    def __call__(self, input, qmask=None):
+    def __call__(self, input):
         """
         input: bqm
         qmask: bq
         returns: bqm
         """
-        if qmask is None:
-            B,Q,_ = input.shape
-            qmask = jnp.zeros((B,Q))
-
         dtype = input.dtype
         w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
         w2_init = hk.initializers.RandomNormal(self.fscale, 0.0)
@@ -224,7 +174,6 @@ class PositionwiseFF(hk.Module):
         b2 = hk.get_parameter('b2', [self.M], dtype, jnp.zeros)
         s = jax.nn.relu(jnp.einsum('mf, bqm -> bqf', w1, input) + b1)
         out = jnp.einsum('fm, bqf -> bqm', w2, s) + b2
-        out = out * (1.0 - jnp.expand_dims(qmask, 2))
         # jax.debug.print('ff_out: {}', out)
         return out
 
@@ -240,13 +189,12 @@ class EmbedMatrix(hk.Module):
         return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
 
 class InputEmbedding(hk.Module):
-    def __init__(self, embed_mat, matrix_scale_factor, pos_factor, dropout_rate,
-            is_train):
+    def __init__(self, hps, embed_mat, matrix_scale_factor, is_train):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
         self.mat_factor = matrix_scale_factor
-        self.pos_factor = pos_factor 
-        self.dropout_rate = dropout_rate
+        self.pos_factor = hps.pos_encoding_factor
+        self.dropout_rate = hps.dropout_rate
         self.is_train = is_train
 
     def positional_embedding(self, tokids):
@@ -260,12 +208,14 @@ class InputEmbedding(hk.Module):
         pos_emb = pos_emb.at[:,1::2].set(jnp.cos(arg[:,1::2]))
         return pos_emb
 
-    def __call__(self, seq_tokens, tokids):
+    def __call__(self, pack):
         """
-        seq_tokens: bc (end-to-end packed tokens from sentences)
-        tokids: bc (ids identifying position of token in a sentence, or -1 if masked)
+        pack['seqs']: bc (end-to-end packed tokens from sentences)
+        pack['tokids']: bc (ids identifying position of token in a sentence, or -1 if masked)
         output: bcm
         """
+        seq_tokens = pack['seqs']
+        tokids = pack['tokids']
         pos_embed = self.positional_embedding(tokids)
         # jax.debug.print('pos_factor: {}, pos_embed[0]:\n{}', self.pos_factor, pos_embed[0])
         # jax.debug.print('tokids: {}', tokids[0])
@@ -285,22 +235,23 @@ class InputEmbedding(hk.Module):
         return full_embed
 
 class EncoderLayer(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, layer_num):
+    def __init__(self, hps, arch, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
         self.layer_num = layer_num
         self.is_train = is_train
-        self.dropout_rate = dropout_rate
-        self.att = MultiHeadAttention(True, H, M, K, V, True)
+        self.with_attn_entropy = hps.attn_loss_weight > 0.0
+        self.dropout_rate = hps.dropout_rate
+        self.attention = MultiHeadAttention(H, M, K, V)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
         self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
         self.ff = PositionwiseFF(M, F)
 
-    def __call__(self, input, position_mask, qt_mask):
+    def __call__(self, input_embed, pack, qtmask):
         """
-        input: btm
-        position_mask: bt
-        qt_mask: bqt
+        input_embed: btm
+        pack: pack from aiayn.pack
+        qtmask: bqt (bool)
         returns: 
         output_embedding: bqm
         attn_entropy: b
@@ -311,49 +262,61 @@ class EncoderLayer(hk.Module):
         In my experiments, post-LN resulted in homogenization of the encoder
         embeddings (all embedding vectors at every position were nearly identical)
         """
-        norm1 = self.norm1(input)
-        att, attn_entropy = self.att(norm1, norm1, position_mask, position_mask, qt_mask)
+        norm1 = self.norm1(input_embed)
+        att, att_coeff = self.attention(norm1, norm1, qtmask)
         if self.is_train:
             att = hk.dropout(hk.next_rng_key(), self.dropout_rate, att)
-        post_add1 = input + att
+        post_add1 = input_embed + att
         norm2 = self.norm2(post_add1)
-        ff = self.ff(norm2, position_mask)
+
+        ff = self.ff(norm2)
         if self.is_train:
             ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add1 + ff 
         # jax.debug.print('encoder_layer {}: out[0,:,100:110]:\n{}', 
                 # self.layer_num, out[0,:,100:110])
+
+        if self.with_attn_entropy:
+            query, target, output = pack['inputs'], pack['inputs'], pack['targets']
+            attn_entropy = funcs.attention_entropy(
+                    att_coeff, qtmask,
+                    query['seqids'], query['counts'],
+                    target['seqids'], target['counts'],
+                    output['seqids'], output['counts'])
+        else:
+            attn_entropy = jnp.zeros(out.shape[0])
         return out, attn_entropy
 
 class Encoder(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, embed_mat):
+    def __init__(self, hps, arch, is_train, embed_mat):
         super().__init__(name='enc')
-        self.embed_layer = InputEmbedding(embed_mat, jnp.sqrt(arch['M']),
-                pos_enc_factor, dropout_rate, is_train) 
-        self.layers = [EncoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
+        self.embed_layer = InputEmbedding(hps, embed_mat, jnp.sqrt(arch['M']), is_train) 
+        self.layers = [EncoderLayer(hps, arch, is_train, i) for i in range(arch['L'])]
 
-    def __call__(self, seqs, seqids, tokids):
+    def __call__(self, pack):
         """
-        seqs: bt    (tokens)
-        seqids: bt  (ids grouping tokens into separate sequences)
-        tokids: bt  (-1 is non-sample, >=0 are token ids, i.e. positions within a sentence)
+        pack:  sentence-pair format from aiayn/pack.py
         returns
         output embedding: bqm
         attention entropy: bl
         """
-        position_mask = jnp.equal(tokids, -1).astype(jnp.int32)
-        qt_mask = jnp.not_equal(seqids[:,None,:], seqids[:,:,None]).astype(jnp.int32)
+        inputs = pack['inputs']
+        tmask = jnp.equal(inputs['tokids'], -1)
+        qtmask = jnp.not_equal(inputs['seqids'][:,None,:], inputs['seqids'][:,:,None])
+        qtmask = jnp.logical_or(qtmask, tmask[:,None,:])
+        qtmask = jnp.logical_or(qtmask, tmask[:,:,None])
 
-        input_embed = self.embed_layer(seqs, tokids) 
+        input_embed = self.embed_layer(inputs) 
         # jax.debug.print('input_embed[:,:,0:2]:\n{}', input_embed[:,:,0:2])
         out = input_embed
         # pdb.set_trace()
         attn_entropies = []
         for mod in self.layers:
-            out, attn_entropy = mod(out, position_mask, qt_mask)
+            out, attn_entropy = mod(out, pack, qtmask)
             attn_entropies.append(attn_entropy)
         # jax.debug.print('encoder_out: {}', out)
-        attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
+        # jax.debug.print('attn_entropy {}', attn_entropies[0])
+        attn_entropy_all = jnp.stack(attn_entropies) # b
         return out, attn_entropy_all
 
     def from_embedding(self, embed, seqids):
@@ -361,60 +324,67 @@ class Encoder(hk.Module):
         embed: btm  (input embedding)
         seqids: bt  (ids grouping tokens into separate sequences, -1 for non-sample)
         """
-        position_mask = jnp.equal(seqids, -1).astype(jnp.int32)
-        qt_mask = jnp.not_equal(seqids[:,None,:], seqids[:,:,None]).astype(jnp.int32)
+        # TODO: fix this
+        position_mask = jnp.equal(seqids, -1)
+        tmask = jnp.equal(pack['tokids'], -1)
+        qtmask = jnp.not_equal(seqids[:,None,:], seqids[:,:,None]).astype(jnp.int32)
 
         out = embed
         for mod in self.layers:
-            out = mod(out, position_mask, qt_mask)
+            out = mod(out, position_mask, qtmask)
         return out
 
 class DecoderLayer(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, layer_num):
+    def __init__(self, hps, arch, is_train, layer_num):
         super().__init__(name=f'layer{layer_num:02d}')
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
-        self.dropout_rate = dropout_rate
+        self.dropout_rate = hps.dropout_rate
         self.is_train = is_train
-        self.self_att = MultiHeadAttention(True, H, M, K, V)
-        self.cross_att = MultiHeadAttention(False, H, M, K, V, True)
+        self.with_attn_entropy = hps.attn_loss_weight > 0.0
+        self.self_attention = MultiHeadAttention(H, M, K, V)
+        self.cross_attention = MultiHeadAttention(H, M, K, V)
         self.ff = PositionwiseFF(M, F)
         self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
         self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
         self.norm3 = hk.LayerNorm((2,), True, True, name='lnorm3')
 
-    def __call__(self, enc_out, input, position_mask, qt_self_mask, qt_cross_mask):
+    def __call__(self, enc_out, input_emb, pack, self_qtmask, cross_qtmask):
         """
         all masks have 0 or 1 (1 = mask out)
         enc_out: btm (t from encoder)
-        input: bqm 
-        position_mask: bq 
-        qt_self_mask: bqt
-        qt_cross_mask: bqt
+        input_emb: bqm 
+        pack: the sentence pair pack from aiayn/pack.py
+        self_qtmask: bqt
+        cross_qtmask: bqt
         out: bqm
         """
-        B, Cdec, _ = input.shape
-
-        # here both q and t are indexing into the decoder only
-        # qt_causal_mask = 1.0 - jnp.tri(Cdec, k=0)
-        # qt_self_mask = jnp.maximum(qt_causal_mask, qt_self_mask)
-
-        norm1 = self.norm1(input) 
-        att1 = self.self_att(norm1, norm1, position_mask, position_mask, qt_self_mask)
+        norm1 = self.norm1(input_emb) 
+        self_att, _ = self.self_attention(norm1, norm1, self_qtmask)
         if self.is_train:
-            att1 = hk.dropout(hk.next_rng_key(), self.dropout_rate, att1)
-        post_add1 = input + att1
+            self_att = hk.dropout(hk.next_rng_key(), self.dropout_rate, self_att)
+        post_add1 = input_emb + self_att
         norm2 = self.norm2(post_add1)
 
-        att2, attn_entropy = self.cross_att(norm2, enc_out, position_mask, None, qt_cross_mask)
+        cross_att, cross_att_coeff = self.cross_attention(norm2, enc_out, cross_qtmask)
         if self.is_train:
-            att2 = hk.dropout(hk.next_rng_key(), self.dropout_rate, att2)
-        post_add2 = post_add1 + att2
+            cross_att = hk.dropout(hk.next_rng_key(), self.dropout_rate, cross_att)
+        post_add2 = post_add1 + cross_att
         norm3 = self.norm3(post_add2)
-        ff = self.ff(norm3, position_mask)
+        ff = self.ff(norm3)
         if self.is_train:
             ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add2 + ff
-        return out, attn_entropy
+
+        if self.with_attn_entropy:
+            query, target, output = pack['targets'], pack['inputs'], pack['targets']
+            cross_attn_entropy = funcs.attention_entropy(
+                    cross_att_coeff, cross_qtmask,
+                    query['seqids'], query['counts'],
+                    target['seqids'], target['counts'],
+                    output['seqids'], output['counts'])
+        else:
+            cross_attn_entropy = jnp.zeros(out.shape[0]) 
+        return out, cross_attn_entropy
 
     def enc_kvcache(self, enc_out):
         """
@@ -462,8 +432,7 @@ class DecoderLayer(hk.Module):
         return dec_kvcache, coeff, out
 
 class Decoder(hk.Module):
-    def __init__(self, dropout_rate, arch, is_train, pos_enc_factor, bos_id, eos_id,
-            n_vocab, embed_mat=None):
+    def __init__(self, hps, arch, is_train, bos_id, eos_id, n_vocab, embed_mat=None):
         super().__init__(name='dec')
         self.is_train = is_train
         self.L = arch['L']
@@ -479,28 +448,29 @@ class Decoder(hk.Module):
         else:
             self.embed_mat = embed_mat
 
-        self.embed_layer = InputEmbedding(self.embed_mat, jnp.sqrt(arch['M']),
-                pos_enc_factor, dropout_rate, is_train) 
-        self.layers = [DecoderLayer(dropout_rate, arch, is_train, i) for i in range(arch['L'])]
+        self.embed_layer = InputEmbedding(hps, self.embed_mat, jnp.sqrt(arch['M']), is_train) 
+        self.layers = [DecoderLayer(hps, arch, is_train, i) for i in range(arch['L'])]
         self.mscale = np.sqrt(arch['M']) ** -1
         self.norm = hk.LayerNorm((2,), True, True, name='lnorm')
 
-    def __call__(self, enc_out, enc_seqids, dec_seqs, dec_seqids, dec_tokids):
+    def __call__(self, enc_out, pack):
         """
-        enc_out: btm (output from encoder)
-        enc_seqids: bt (identifies which sentences each enc output belongs)
-        dec_seqs: bq (tokens)
-        dec_seqids: bq (identify which sentences each token belongs)
-        dec_tokids: bq (position of a token within a sentence)
+        enc_out          : btm (output from encoder)
+        pack: sentence pair pack from aiayn/pack.py
         returns: bce
         """
-        dec_embed = self.embed_layer(dec_seqs, dec_tokids)
-        dec_position_mask = jnp.equal(dec_tokids, -1).astype(jnp.int32)
-        qt_cross_mask = jnp.not_equal(dec_seqids[:,:,None], enc_seqids[:,None,:]).astype(jnp.int32)
-        qt_self_mask = jnp.not_equal(dec_seqids[:,None,:], dec_seqids[:,:,None]).astype(jnp.int32)
+        inputs, targets = pack['inputs'], pack['targets']
+        dec_embed = self.embed_layer(targets)
 
-        qt_causal_mask = 1.0 - jnp.tri(dec_seqids.shape[1], k=0)
-        qt_self_mask = jnp.maximum(qt_self_mask, qt_causal_mask)
+        dec_position_mask = jnp.equal(targets['tokids'], -1)
+        cross_qtmask = jnp.not_equal(targets['seqids'][:,:,None], inputs['seqids'][:,None,:])
+        cross_qtmask = jnp.logical_or(cross_qtmask, dec_position_mask[:,:,None])
+
+        causal_mask = jnp.logical_not(jnp.tri(targets['seqids'].shape[1], k=0, dtype=bool))
+        self_qtmask = jnp.not_equal(targets['seqids'][:,:,None], targets['seqids'][:,None,:])
+        self_qtmask = jnp.logical_or(self_qtmask, causal_mask[None,:,:])
+        self_qtmask = jnp.logical_or(self_qtmask, dec_position_mask[:,:,None])
+        self_qtmask = jnp.logical_or(self_qtmask, dec_position_mask[:,None,:])
 
         # TODO: find out if this is really needed 
         enc_out = self.xnorm(enc_out)
@@ -508,10 +478,9 @@ class Decoder(hk.Module):
         attn_entropies = []
         out = dec_embed
         for mod in self.layers:
-            out, attn_entropy = mod(enc_out, out, dec_position_mask, qt_self_mask, qt_cross_mask)
+            out, attn_entropy = mod(enc_out, out, pack, self_qtmask, cross_qtmask)
             attn_entropies.append(attn_entropy)
-        attn_entropy_all = jnp.stack(attn_entropies, axis=1) # bl
-        # attn_entropy_all = jnp.zeros_like(attn_entropy_all)
+        attn_entropy_all = jnp.stack(attn_entropies) # l
 
         # As shown in: 
         # https://arxiv.org/pdf/1904.10509.pdf
@@ -719,8 +688,7 @@ class Decoder(hk.Module):
 
 
 class Model(hk.Module):
-    def __init__(self, dropout_rate, pos_enc_factor, arch, is_train, bos_id, eos_id,
-            n_vocab):
+    def __init__(self, hps, arch, is_train, bos_id, eos_id, n_vocab):
         super().__init__(name='tx')
         self.is_train = is_train
         self.L = arch['L']  
@@ -729,12 +697,10 @@ class Model(hk.Module):
         self.eos_id = eos_id
         self.n_vocab = n_vocab # includes bos_id and eos_id but not pad_id
         self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
-        self.encoder = Encoder(dropout_rate, arch, is_train, pos_enc_factor,
-                self.embed_mat)
-        self.decoder = Decoder(dropout_rate, arch, is_train, pos_enc_factor, bos_id,
-                eos_id, n_vocab, self.embed_mat)
+        self.encoder = Encoder(hps, arch, is_train, self.embed_mat)
+        self.decoder = Decoder(hps, arch, is_train, bos_id, eos_id, n_vocab, self.embed_mat)
 
-    def batch(self, inputs, targets):
+    def batch(self, pack):
         """
         inputs and targets are produced by pack.pack_dataset
         each is a map as follows:
@@ -745,10 +711,8 @@ class Model(hk.Module):
 
         returns: bct
         """
-        enc_output, enc_attn_entropy = self.encoder(inputs['seqs'], inputs['seqids'],
-                inputs['tokids'])
-        dec_output, dec_attn_entropy = self.decoder(enc_output, inputs['seqids'], 
-                targets['seqs'], targets['seqids'], targets['tokids'])
+        enc_output, enc_attn_entropy = self.encoder(pack)
+        dec_output, dec_attn_entropy = self.decoder(enc_output, pack)
         return dec_output, enc_attn_entropy.mean(axis=0), dec_attn_entropy.mean(axis=0)
 
     def infer_simple(self, enc_tokens, max_gen_length, temperature=1.0):
@@ -897,6 +861,9 @@ class Objective:
         norms['kldiv'] = metrics['sum_kldiv'] / metrics['sum_active']
         norms['label_entropy'] = metrics['sum_label_entropy'] / metrics['sum_active']
         norms['cross_entropy'] = metrics['sum_cross_entropy'] / metrics['sum_active']
+        norms['enc_attn_entropy'] = metrics['enc_attn_entropy'] / metrics['sum_active']
+        norms['dec_attn_entropy'] = metrics['dec_attn_entropy'] / metrics['sum_active']
+        
         norms['sum_active'] = metrics['sum_active']
         # jax.debug.print('active metrics: {}', metrics['sum_active'])
         return norms
@@ -924,8 +891,7 @@ def _wrap_haiku(mod_cls, *args):
 
 def make_model(hps, bos_id, eos_id, n_vocab, do_batch, do_train):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = (hps.dropout_rate, hps.pos_encoding_factor, arch, do_train, bos_id,
-            eos_id, n_vocab)
+    args = (hps, arch, do_train, bos_id, eos_id, n_vocab)
     if do_batch:
         def wrap_fn(*call_args):
             mod = Model(*args)
@@ -939,7 +905,7 @@ def make_model(hps, bos_id, eos_id, n_vocab, do_batch, do_train):
 
 def make_score_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
-    args = hps.dropout_rate, hps.pos_encoding_factor, arch, False, tok_map 
+    args = hps, arch, False, tok_map 
     def wrap_fn(*call_args):
         mod = Model(*args)
         return mod.embed_to_score(*call_args)

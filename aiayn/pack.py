@@ -241,6 +241,9 @@ def pack_dataset(toks_ds, feature_lengths, packing_batch=1000, num_tries=10, pad
     num_tries:  number of internal iterations for trying to pack a batch
 
     The final structure of the returned dataset is 
+    { 'seqs': o, 'seqids': o, 'tokids': o, 'counts': p }
+    where o is a sequence context index,
+    p is the pack index in [0, num_tries)
     """
     pad_ds = pad_and_filter(toks_ds, feature_lengths, pad_value)
     sz_ds = masked_sizes(pad_ds, packing_batch, num_tries, feature_lengths)
