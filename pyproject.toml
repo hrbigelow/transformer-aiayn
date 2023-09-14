@@ -18,11 +18,10 @@ dependencies = [
   # "orbax-checkpoint==0.1.1",
   "tensorflow",
   "tensorflow-datasets>=4.9.2",
-  "dm-haiku @ git+https://github.com/deepmind/dm-haiku.git@v0.0.9",
+  "dm-haiku @ git+https://github.com/deepmind/dm-haiku.git@v0.0.10",
   "fire",
   "numpy",
   "psutil",
-  "google-cloud-pubsub",
   "streamvis @ git+https://github.com/hrbigelow/streamvis.git"
 ]
 
