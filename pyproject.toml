@@ -18,7 +18,7 @@ dependencies = [
   # "orbax-checkpoint==0.1.1",
   "tensorflow",
   "tensorflow-datasets>=4.9.2",
-  "dm-haiku @ git+https://github.com/deepmind/dm-haiku",
+  "dm-haiku @ git+https://github.com/deepmind/dm-haiku.git@v0.0.9",
   "fire",
   "numpy",
   "psutil",
