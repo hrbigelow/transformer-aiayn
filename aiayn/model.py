@@ -273,6 +273,7 @@ class Encoder(hk.Module):
     def __init__(self, hps, arch, is_train, embed_mat):
         super().__init__(name='enc')
         self.is_train = is_train
+        self.with_attn_entropy = hps.with_attn_entropy
         self.embed_layer = InputEmbedding(hps, embed_mat, jnp.sqrt(arch['M']), is_train) 
         self.layers = [EncoderLayer(hps, arch, is_train, i) for i in range(arch['L'])]
 
@@ -296,12 +297,12 @@ class Encoder(hk.Module):
         for mod in self.layers:
             out, attn_coeff = mod(out, qtmask)
             if self.is_train and self.with_attn_entropy:
-                att_query, att_target, att_output = inputs, inputs, targets 
+                attn_query, attn_target, attn_output = inputs, inputs, targets 
                 attn_entropy = funcs.attention_entropy(
-                        att_coeff, qtmask,
-                        att_query['seqids'], att_query['counts'],
-                        att_target['seqids'], att_target['counts'],
-                        att_output['counts'])
+                        attn_coeff, qtmask,
+                        attn_query['seqids'], attn_query['counts'],
+                        attn_target['seqids'], attn_target['counts'],
+                        attn_output['counts'])
                 attn_entropies.append(attn_entropy)
             else:
                 attn_entropies.append(jnp.zeros(out.shape[0]))
@@ -420,6 +421,7 @@ class Decoder(hk.Module):
         self.L = arch['L']
         self.H = arch['H']
         self.K = arch['K']
+        self.with_attn_entropy = hps.with_attn_entropy
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.n_vocab = n_vocab
@@ -460,14 +462,15 @@ class Decoder(hk.Module):
         attn_entropies = []
         out = dec_embed
         for mod in self.layers:
-            out, att_coeff = mod(enc_out, out, self_qtmask, cross_qtmask)
+            out, attn_coeff = mod(enc_out, out, self_qtmask, cross_qtmask)
             if self.is_train and self.with_attn_entropy:
-                att_query, att_target, att_output = pack['targets'], pack['inputs'], pack['targets']
+                attn_query = attn_output = pack['targets']
+                attn_target = pack['inputs']
                 attn_entropy = funcs.attention_entropy(
-                        att_coeff, cross_qtmask,
-                        att_query['seqids'], att_query['counts'],
-                        att_target['seqids'], att_target['counts'],
-                        att_output['counts'])
+                        attn_coeff, cross_qtmask,
+                        attn_query['seqids'], attn_query['counts'],
+                        attn_target['seqids'], attn_target['counts'],
+                        attn_output['counts'])
                 attn_entropies.append(attn_entropy)
             else:
                 attn_entropies.append(jnp.zeros(out.shape[0]))

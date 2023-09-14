@@ -41,8 +41,11 @@ def make_loss_fn(model, objective):
         sum_active = metrics['sum_active']
         enc_attn_loss = objective.renorm_loss(enc_attn_ent, metrics['sum_active'])
         dec_attn_loss = objective.renorm_loss(dec_attn_ent, metrics['sum_active'])
+        metrics.update(sum_enc_attn_entropy=enc_attn_ent)
+        metrics.update(sum_dec_attn_entropy=dec_attn_ent)
         metrics.update(sum_enc_attn_loss=enc_attn_loss)
         metrics.update(sum_dec_attn_loss=dec_attn_loss)
+        metrics.update(sum_attn_loss=enc_attn_loss+dec_attn_loss)
         # The loss must be returned in order to use this function to generate
         # gradients.  However, the gradients should be re-normalized, since batch
         # size varies
@@ -289,25 +292,6 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
 
-    """
-    steps = np.empty(hps.report_every)
-    losses = np.empty(hps.report_every)
-    label_entropy = np.empty(hps.report_every)
-    cross_entropy = np.empty(hps.report_every)
-    enc_attn_loss = np.empty((hps.report_every, hps.num_layers)) # each layer
-    dec_attn_loss = np.empty((hps.report_every, hps.num_layers)) # each layer
-    attn_loss = np.empty(hps.report_every)
-    learn_rate = np.empty(hps.report_every)
-    report_metrics = dict(
-            kldiv=losses,
-            label_entropy=label_entropy,
-            cross_entropy=cross_entropy,
-            enc_attn_loss=enc_attn_loss,
-            dec_attn_loss=dec_attn_loss,
-            attn_loss=attn_loss
-            )
-    """
-
     if hps.with_metrics: 
         names = ('grad', 'param', 'update')
         fn = lambda x: { l: np.empty(hps.report_every) for l in names } 
@@ -352,12 +336,6 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             # mngr.wait_until_finished()
             raise RuntimeError(f'Got NaN gradients.  Dumping pre-update state at step {step}')
 
-        # report_idx = step % hps.report_every
-        # steps[report_idx] = step
-        # for key in report_metrics:
-            # report_metrics[key][report_idx] = metrics[key]
-        # learn_rate[report_idx] = learn_rate_fn(step + 1)
-
         if hps.with_metrics:
             fn = lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, report_idx, 0)
             norms = jax.tree_map(fn, norms, metrics['norms'])
@@ -366,23 +344,18 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             ce = metrics['cross_entropy']
             act = metrics['sum_active']
             loss = metrics['loss']
-            # loss = report_metrics['kldiv'][report_idx]
-            # attn_loss = report_metrics['attn_loss'][report_idx]
-            # ce = report_metrics['cross_entropy'][report_idx]
-            print(f'step {step}, {act=}, cross_ent={ce:3.2f} loss={loss:3.2f}')
-                     #f' attn_loss={attn_loss:2.4f}')
+            if hps.with_attn_entropy:
+                enc_attn_loss = metrics['enc_attn_loss']
+                dec_attn_loss = metrics['dec_attn_loss']
+                print(f'{step=}, {act=:d}, {ce=:3.2f} {loss=:3.2f}'
+                        f' {enc_attn_loss=:3.3f} {dec_attn_loss=:3.3f}')
+            else:
+                print(f'{step=}, {act=:d}, {ce=:3.2f} {loss=:3.2f}')
 
+        # jax.debug.print('attn_entropy:\n{}\n', metrics['enc_attn_entropy'])
         if logger:
             for key, val in metrics.items():
                 logger.write(key, x=step, y=val)
-
-        """
-        if logger and step > 0 and report_idx == hps.report_every - 1:
-            log_steps(logger, steps, learn_rate, report_metrics) 
-            # jax.debug.print('report:\n{}', report_metrics)
-            if hps.with_metrics:
-                log_metrics(logger, steps, norms)
-        """
 
         if step > 0 and step % hps.eval_every == 0:
             rng_key_s = jax.random.split(rng_key, num_replicas)
