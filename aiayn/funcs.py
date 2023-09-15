@@ -66,21 +66,22 @@ def sum_log_prob_labels(logits, labels, active_labels=None):
     assert labels.shape == active_labels.shape
     assert logits.shape[:2] == labels.shape
 
-    B,C = labels.shape
+    B,T,V = logits.shape
     log2e = jnp.log2(jnp.exp(1.0))
     softmax_where = None if active_labels is None else active_labels[:,:,None]
-    log_p = log_softmax(logits, 2, softmax_where, 0.0) * log2e # btv
+    log_p = log_softmax(logits, 2) * log2e # btv
 
-    batch = jnp.arange(B)[:,None]
-    indices = jnp.stack(jnp.broadcast_arrays(batch, labels), axis=2) # bt2 (bv)
+    batch = jnp.arange(B)[:,None]  # b1
+    target = jnp.arange(T)[None,:] # 1t
+    indices = jnp.stack(jnp.broadcast_arrays(batch, target, labels), axis=2) # bt3 (btv)
 
+    # gather the 
     offset_dims=()
     collapsed_slice_dims=(0,1,2)
-    start_index_map=(0,2) # b,v
+    start_index_map=(0,1,2) # btv
     gd = jax.lax.GatherDimensionNumbers(offset_dims, collapsed_slice_dims, start_index_map)
     log_p_labels = jax.lax.gather(log_p, indices, gd, (1,1,1)) # bt
     sum_log_prob = jnp.sum(log_p_labels, where=active_labels, initial=0.0)
-    total_active = active_labels.astype(jnp.int32).sum()
     return sum_log_prob 
 
 def attention_entropy(attn_matrix, attn_mask, query_seqids, query_counts,
