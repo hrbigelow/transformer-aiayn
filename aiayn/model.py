@@ -818,11 +818,13 @@ class Objective:
         """
         # bc
         targets = jax.tree_map(lambda x: x[:,1:], targets)
+        labels = targets['seqs']
         targets_active = jnp.not_equal(targets['tokids'], -1)
-        target_seqs = jax.nn.one_hot(targets['seqs'], self.V, axis=2) # bqv
+        target_seqs = jax.nn.one_hot(labels, self.V, axis=2) # bqv
 
         # From https://arxiv.org/pdf/1512.00567.pdf "we used the uniform distribution u(k)"
         target_seqs = (1.0 - self.eps) * target_seqs + self.eps * self.V ** -1 
+        # jax.debug.print('sanity check:\n{}\n', target_seqs.sum(axis=2))
 
         # jax.debug.print('{}', dec_mask)
         dec_pred_logits = dec_output_logits[:,:-1,:]
@@ -838,12 +840,14 @@ class Objective:
         sum_cross_ent = cross_ent.sum(where=targets_active)
         label_ent = funcs.entropy(target_seqs, 2, where)
         sum_label_ent = label_ent.sum(where=targets_active)
+        sum_log_prob_labels = funcs.sum_log_prob_labels(dec_pred_logits, labels, targets_active)
 
         return dict(
                 sum_active=total_active_targets,
                 sum_kldiv=sum_kldiv,
                 sum_label_entropy=sum_label_ent,
-                sum_cross_entropy=sum_cross_ent
+                sum_cross_entropy=sum_cross_ent,
+                sum_log_prob_labels=sum_log_prob_labels
                 )
 
     def reduce_metrics(self, metrics):
@@ -859,6 +863,7 @@ class Objective:
             norms[key[4:]] = val / metrics['sum_active']
         
         norms['sum_active'] = metrics['sum_active']
+        norms['perplexity'] = 2 ** -norms['log_prob_labels']
         # jax.debug.print('active metrics: {}', metrics['sum_active'])
         return norms
 
