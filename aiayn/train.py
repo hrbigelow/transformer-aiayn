@@ -371,10 +371,15 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             ce_val = val_metrics['cross_entropy']
             ce_val_nd = val_nd_metrics['cross_entropy']
             sum_active = val_metrics['sum_active']
-            print(f'{step=}, {sum_active=:d}, {ce_val=:3.2f}, {ce_val_nd=:3.2f}')
+            ppl_val = val_metrics['perplexity']
+            ppl_val_nd = val_nd_metrics['perplexity']
+            print(f'{step=}, {sum_active=:d}, {ce_val=:3.2f}, {ce_val_nd=:3.2f}'
+                    f' {ppl_val=:3.2f} {ppl_val_nd=:3.2f}')
             if logger:
                 logger.write('cross_entropy_val', x=step, y=ce_val) 
                 logger.write('cross_entropy_val_nd', x=step, y=ce_val_nd)
+                logger.write('perplexity_val', x=step, y=ppl_val)
+                logger.write('perplexity_val_nd', x=step, y=ppl_val_nd)
             
 
         if (step % hps.ckpt_every == 0 and step != hps.resume_ckpt):
