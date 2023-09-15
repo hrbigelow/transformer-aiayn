@@ -113,6 +113,8 @@ def make_update_fn(model, objective, repl_batch_size, accum_steps, with_metrics,
 
         metrics, grad = jax.lax.psum((metrics, grad), axis_name='batch')
         grad = jax.tree_map(lambda x: x / metrics['sum_active'], grad)
+
+        # Normalizing with summed numerator and summed denominator (sum_active)
         metrics = objective.reduce_metrics(metrics)
         
         nan_grads = jax.tree_map(lambda x: jnp.any(jnp.isnan(x)), grad)
@@ -345,14 +347,15 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             act = metrics['sum_active']
             loss = metrics['loss']
             # jax.debug.print('log_prob_labels:\n{}\n', metrics['log_prob_labels'])
+            mean_lpl = metrics['log_prob_labels']
             ppl = metrics['perplexity'] 
             if hps.with_attn_entropy:
                 enc_attn_loss = metrics['enc_attn_loss']
                 dec_attn_loss = metrics['dec_attn_loss']
-                print(f'{step=}, {act=:d}, {ce=:3.2f} {ppl=:3.2f} {loss=:3.2f}'
+                print(f'{step=}, {act=:d}, {ce=:3.2f} {mean_lpl=:3.2f} {ppl=:3.2f} {loss=:3.2f}'
                         f' {enc_attn_loss=:3.3f} {dec_attn_loss=:3.3f}')
             else:
-                print(f'{step=}, {act=:d}, {ce=:3.2f} {ppl=:3.2f} {loss=:3.2f}')
+                print(f'{step=}, {act=:d}, {ce=:3.2f} {mean_lpl=:3.2f} {ppl=:3.2f} {loss=:3.2f}')
 
         # jax.debug.print('attn_entropy:\n{}\n', metrics['enc_attn_entropy'])
         if logger:
