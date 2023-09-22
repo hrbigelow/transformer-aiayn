@@ -79,6 +79,7 @@ train = Hyperparams(
     random_seed = 982349820,
     ckpt_every = 5000,
     ckpt_dir = None,
+    ckpt_max_keep = 20,
     resume_ckpt = None,
     )
 

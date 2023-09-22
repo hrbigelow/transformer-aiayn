@@ -215,7 +215,8 @@ def setup_train(hps, rng_key):
     if repl_batch_size % hps.accum_steps != 0:
         raise RuntimeError(f'{repl_batch_size=} not divisible by {hps.accum_steps=}')
 
-    options = ocp.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every, max_to_keep=20)
+    options = ocp.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every,
+            max_to_keep=hps.ckpt_max_keep)
     checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
     mngr = ocp.CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
