@@ -130,10 +130,10 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
     mod, params = load_model(hps, special_toks.bos_id, special_toks.eos_id, n_vocab)
     print(f'Loaded model from {ckpt_dir}/{resume_ckpt}')
     if batch_file is None:
-        return predict_interactive(mod, params, tokenizer, special_toks, hps)
+        predict_interactive(mod, params, tokenizer, special_toks, hps)
     else:
-        return predict_batch(mod, params, tokenizer, special_toks, batch_file,
-                out_file, hps)
+        predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps)
+    del params
 
 def all(ckpt_dir, resume_ckpts, tokenizer_file, batch_file, result_template,
         hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
