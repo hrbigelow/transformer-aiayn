@@ -4,7 +4,6 @@ import sys
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.interpreters import xla
 import orbax.checkpoint as orbax
 from aiayn import model, data, hparams
 from tokenizers import decoders
@@ -135,6 +134,7 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
     else:
         predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps)
     del params
+    del mod
 
 def all(ckpt_dir, resume_ckpts, tokenizer_file, batch_file, result_template,
         hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
@@ -142,7 +142,6 @@ def all(ckpt_dir, resume_ckpts, tokenizer_file, batch_file, result_template,
         result_file = result_template.format(resume_ckpt)
         main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file, result_file,
                 hps_keys, **hps_overrides)
-        xla._xla_callable.cache_clear()
 
 
 if __name__ == '__main__':
