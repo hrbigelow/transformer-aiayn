@@ -287,18 +287,16 @@ class Encoder(hk.Module):
         output embedding: bqm
         attention entropy: bl
         """
-        utils.shape_check('bo, bo, bo, bp', 
+        utils.shape_check('bo, bo, bo', 
                 seqs=inputs['seqs'],
                 seqids=inputs['seqids'], 
-                tokids=inputs['tokids'],
-                counts=inputs['counts'])
+                tokids=inputs['tokids'])
 
         if targets is not None:
-            utils.shape_check('bo, bo, bo, bp',
+            utils.shape_check('bo, bo, bo',
                 seqs=targets['seqs'],
                 seqids=targets['seqids'], 
-                tokids=targets['tokids'],
-                counts=targets['counts'])
+                tokids=targets['tokids'])
 
         tmask = jnp.equal(inputs['tokids'], -1)
         qtmask = jnp.not_equal(inputs['seqids'][:,None,:], inputs['seqids'][:,:,None])
