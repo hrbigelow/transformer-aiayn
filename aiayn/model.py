@@ -5,6 +5,7 @@ import numpy as np
 from . import hparams
 from . import funcs
 from . import data
+from . import utils
 import pdb
 import jax
 import jax.numpy as jnp
@@ -36,6 +37,8 @@ class MultiHeadAttention(hk.Module):
            mha: bqm
            attention matrix: bqt
         """
+        utils.shape_check('bqm, btm, bqt', qinput=qinput, kvinput=kvinput, qtmask=qtmask)
+
         B,Q,_ = qinput.shape
         _,T,_ = kvinput.shape
 
@@ -159,7 +162,6 @@ class PositionwiseFF(hk.Module):
     def __call__(self, input):
         """
         input: bqm
-        qmask: bq
         returns: bqm
         """
         dtype = input.dtype
@@ -256,6 +258,7 @@ class EncoderLayer(hk.Module):
         In my experiments, post-LN resulted in homogenization of the encoder
         embeddings (all embedding vectors at every position were nearly identical)
         """
+        utils.shape_check('btm, bqt', input_embed=input_embed, qtmask=qtmask)
         norm1 = self.norm1(input_embed)
         att, att_coeff = self.attention(norm1, norm1, qtmask)
         if self.is_train:
@@ -284,6 +287,19 @@ class Encoder(hk.Module):
         output embedding: bqm
         attention entropy: bl
         """
+        utils.shape_check('bo, bo, bo, bp', 
+                seqs=inputs['seqs'],
+                seqids=inputs['seqids'], 
+                tokids=inputs['tokids'],
+                counts=inputs['counts'])
+
+        if targets is not None:
+            utils.shape_check('bo, bo, bo, bp',
+                seqs=targets['seqs'],
+                seqids=targets['seqids'], 
+                tokids=targets['tokids'],
+                counts=targets['counts'])
+
         tmask = jnp.equal(inputs['tokids'], -1)
         qtmask = jnp.not_equal(inputs['seqids'][:,None,:], inputs['seqids'][:,:,None])
         qtmask = jnp.logical_or(qtmask, tmask[:,None,:])
@@ -381,13 +397,14 @@ class DecoderLayer(hk.Module):
         enc_mask: bt
         enc_kvcache: lbhstd 
         dec_kvcache: lbhsqd
-        xattn:  bt  (cumulative attention on encoder embeddings)
         next_embed: b1m
         """
+        utils.shape_check('bt, lbhstd, lbhsqd, bzm',
+                enc_mask=enc_mask, enc_kvcache=enc_kvcache, dec_kvcache=dec_kvcache,
+                next_embed=next_embed)
         B = dec_kvcache.shape[1]
         Q = dec_kvcache.shape[4]
         norm1 = self.norm1(next_embed)
-        assert next_embed.shape[0] == enc_kvcache.shape[1]
         # print(f'{next_embed.shape=}')
 
         step_mask = jnp.greater(jnp.arange(Q), step).astype(jnp.int32)

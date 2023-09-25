@@ -135,7 +135,15 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
         return predict_batch(mod, params, tokenizer, special_toks, batch_file,
                 out_file, hps)
 
+def all(ckpt_dir, resume_ckpts, result_template, tokenizer_file, batch_file=None, 
+        hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
+    for resume_ckpt in resume_ckpts:
+        result_file = result_template.format(resume_ckpt)
+        main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file, result_file,
+                hps_keys, **hps_overrides)
+
+
 if __name__ == '__main__':
-    cmds = dict(sample=main, evaluate=evaluate_bleu)
+    cmds = dict(sample=main, all=all, evaluate=evaluate_bleu)
     fire.Fire(cmds)
 
