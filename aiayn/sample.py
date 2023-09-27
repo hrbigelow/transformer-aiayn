@@ -1,4 +1,5 @@
 import tensorflow as tf
+import gc
 import fire
 import sys
 import numpy as np
@@ -75,6 +76,7 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
     fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
     rng_key = jax.random.PRNGKey(hps.random_seed)
+    print(f'Working on {out_file}: ', end='', flush=True)
 
     for chunk, lines in enumerate(bit):
         lines = [ l.strip() for l in lines ]
@@ -99,10 +101,11 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
             out_fh.write(f'{seq}\n')
             # print(f'{_id}\t{score:2.3f}\t{seq}')
         out_fh.flush()
-        print(f'Finished {chunk * hps.batch_dim0} sentences')
+        print(f'.', end='', flush=True)
 
     fh.close()
     out_fh.close()
+    print(f'  done.')
 
 def evaluate_bleu(ref_file, hyp_file):
     """
@@ -114,7 +117,7 @@ def evaluate_bleu(ref_file, hyp_file):
     bleu = bleu_tools.bleu_wrapper(ref_file, hyp_file)
     print(f'Bleu Score: {bleu:2.3f}')
 
-def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
+def sample(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_template=None,
         hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
     hps = hparams.setup_hparams(hps_keys,
             dict(
@@ -122,6 +125,7 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
                 resume_ckpt=resume_ckpt,
                 **hps_overrides)
             )
+    out_file = out_template.format(resume_ckpt)
     special_toks = data.get_special_tokens(tokenizer_file) 
     tokenizer = data.get_tokenizer(tokenizer_file)
     tokenizer.enable_padding(pad_id=special_toks.pad_id, pad_token='[PAD]')
@@ -133,18 +137,16 @@ def main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file=None, out_file=None,
         predict_interactive(mod, params, tokenizer, special_toks, hps)
     else:
         predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hps)
-    del params
-    del mod
 
-def all(ckpt_dir, resume_ckpts, tokenizer_file, batch_file, result_template,
+def all(ckpt_dir, resume_ckpts, tokenizer_file, batch_file, out_template,
         hps_keys: str = 'arch,reg,data,sample', **hps_overrides):
     for resume_ckpt in resume_ckpts:
-        result_file = result_template.format(resume_ckpt)
-        main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file, result_file,
-                hps_keys, **hps_overrides)
+        out_file = out_template.format(resume_ckpt)
+        main(ckpt_dir, resume_ckpt, tokenizer_file, batch_file, out_file, hps_keys,
+                **hps_overrides)
 
 
 if __name__ == '__main__':
-    cmds = dict(sample=main, all=all, evaluate=evaluate_bleu)
+    cmds = dict(sample=sample, all=all, evaluate=evaluate_bleu)
     fire.Fire(cmds)
 
