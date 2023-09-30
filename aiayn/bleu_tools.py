@@ -246,8 +246,8 @@ def bleu_wrapper(ref_filename, hyp_filename, case_sensitive=False):
   # hyp_fh = open(hyp_filename, 'r')
   hyp_lines = native_to_unicode(hyp_fh.read()).split("\n")[:-1]
   n = min(len(ref_lines), len(hyp_lines))
-  print(f'Parsed {len(ref_lines)} reference lines and {len(hyp_lines)} hypothesis lines')
-  print(f'Will process {n} pairs')
+  # print(f'Parsed {len(ref_lines)} reference lines and {len(hyp_lines)} hypothesis lines')
+  # print(f'Will process {n} pairs')
   # ref_lines = [line.split('\t')[2] for line in ref_lines if line != '']
   # hyp_lines = [line.split('\t')[2] for line in hyp_lines if line != '']
   if not case_sensitive:

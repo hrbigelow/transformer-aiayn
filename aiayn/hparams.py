@@ -108,6 +108,7 @@ sample = Hyperparams(
     random_seed = 42,
     ckpt_dir = None,
     resume_ckpt = None,
+    force_save_ckpt = False,
     num_sample = 10,
     beam_size = 4, # From section 6.1
     beam_search_alpha = 0.6, # From section 6.1 

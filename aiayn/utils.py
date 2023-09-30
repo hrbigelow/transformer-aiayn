@@ -76,7 +76,3 @@ def shape_check(index_expr, **tensors):
                 )
     return
 
-    
-
-
-
