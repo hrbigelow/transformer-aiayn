@@ -388,8 +388,6 @@ def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn,
             state_save_args = jax.tree_map(lambda _: ocp.SaveArgs(aggregate=True), state)
             mngr.save(step, state, save_kwargs={'save_args': state_save_args},
                     force=hps.force_save_ckpt)
-    options = ocp.CheckpointManagerOptions(save_interval_steps=hps.ckpt_every,
-            max_to_keep=hps.ckpt_max_keep)
             # mngr.save(step, state)
             print(f'Saved checkpoint {step=}')
         step += 1
