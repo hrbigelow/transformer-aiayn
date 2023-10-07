@@ -3,16 +3,15 @@
 An original implementation of the paper [Attention is All You
 Need](https://arxiv.org/pdf/1706.03762.pdf) by Vaswani et al.
 
-![Loss (Conditional KL-Divergence in bits](assets/sept11-ce-85k-all.png)
+![Loss (Conditional KL-Divergence in bits](assets/metrics.png)
 
-![Loss (Conditional KL-Divergence in bits (zoom)](assets/sept11-ce-85k-zoom.png)
+![Loss (Conditional KL-Divergence in bits (zoom)](assets/metrics_zoom.png)
 
-Shown above is a training run for about 12 epochs.  Purple line is the training cross
-entropy.  Blue line is the validation cross-entropy on newstest2013, evaluated every
-100 SGD steps.  The lower, green line is also validation cross-entropy loss, but
-using a model without dropout.  Batch size about 25,000 target tokens.  Training is
-on the whole (4.5M sentence pairs) WMT-14 database.  96 sentence-pairs in each batch, 62,500
-steps per epoch. Training is on TPU.
+Shown above is a training run for about 260k steps (about 16 epochs per 100k steps).
+Blue: perplexity on WMT14/en-de 4.5 M training, with dropout.  Orange: perplexity on
+newstest2013, with dropout.  Green: perplexity on newstest2013, no dropout.  Red:
+Bleu score (red line) on newstest2013 set, no dropout.  newstest2013 has 3000
+sentences.
 
 ![Learning rate](assets/jul18-lr-40k.png)
 

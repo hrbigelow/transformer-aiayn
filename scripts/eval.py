@@ -32,13 +32,17 @@ def gcs_list(path_pattern):
 
 def get_checkpoint(file, ckpt_regex):
     m = re.search(ckpt_regex, file)
-    return int(m.group(1))
+    return None if m is None else int(m.group(1))
 
 def log_all(ref_filename, gcs_path, ckpt_regex, streamvis_path, scope, data_name):
     logger = DataLogger(scope)
-    logger.init(streamvis_path, 100)
+    logger.init(streamvis_path, 10)
     file_list = gcs_list(gcs_path)
-    ckpt_file_list = [ (get_checkpoint(file, ckpt_regex), file) for file in file_list ]
+    ckpt_file_list = []
+    for file in file_list:
+        ckpt = get_checkpoint(file, ckpt_regex)
+        if ckpt:
+            ckpt_file_list.append((ckpt, file))
     ckpt_file_list.sort()
     for ckpt, file in ckpt_file_list:
         bleu = one(ref_filename, file) * 100.0
