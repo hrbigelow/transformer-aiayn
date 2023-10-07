@@ -10,7 +10,7 @@ Need](https://arxiv.org/pdf/1706.03762.pdf) by Vaswani et al.
 Shown above is a training run for about 260k steps (about 16 epochs per 100k steps).
 Blue: perplexity on WMT14/en-de 4.5 M training, with dropout.  Orange: perplexity on
 newstest2013, with dropout.  Green: perplexity on newstest2013, no dropout.  Red:
-Bleu score (red line) on newstest2013 set, no dropout.  newstest2013 has 3000
+Bleu score on newstest2013 set, no dropout.  newstest2013 has 3000
 sentences.
 
 ![Learning rate](assets/jul18-lr-40k.png)
@@ -32,12 +32,20 @@ def make_learning_rate_fn(warmup_steps, M):
 ## Introduction
 
 This repo is written using Jax and Haiku, and tested using Google Colab TPU.  On the
-German-English dataset, consisting of 4.5 million sentence pairs, the model trains to
-100k steps in about 16 hours.  It achieves a Bleu score around 25.0, which is near
-the reported value of 27.3 in the paper.
+German-English dataset, consisting of 4.5 million sentence pairs, the `base model`
+trains to 100k steps in about 16 hours.  It achieves a Bleu score 25.5 and PPL 4.95
+at 100k training steps, very similar to the reported values of 25.8 and 4.92 for the
+same model and training stage.
 
 I tried to stay as close as possible to the original architecture.  However, there is
-one major change which is that I used Pre-LN instead of the original Post-LN.
+one major change which is that I used Pre-LN instead of the original Post-LN.  I
+implemented everything from scratch, including the data packing, entire model, beam
+search, incremental inference using kv-cache.  However, I adapted the Blue score
+calculation function from the original
+[tensor2tensor](https://github.com/tensorflow/tensor2tensor) repo, so as to be sure I
+was using the same metric.  A companion blog article,
+[transformer-from-scratch](https://mlcrumbs.com/transformer-from-scratch) documents
+many details of the code design and various problems.
 
 ## Installation
 
