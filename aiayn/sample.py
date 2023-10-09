@@ -75,7 +75,6 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
     out_fh = tf.io.gfile.GFile(out_file, 'w')
     fh = tf.io.gfile.GFile(batch_file, 'r')
     bit = batch_gen(fh, hps.batch_dim0)
-    rng_key = jax.random.PRNGKey(hps.random_seed)
     print(f'Working on {out_file}: ', end='', flush=True)
 
     for chunk, lines in enumerate(bit):
@@ -87,7 +86,7 @@ def predict_batch(mod, params, tokenizer, special_toks, batch_file, out_file, hp
         args = (special_toks.pad_id, hps.beam_search_alpha, hps.beam_search_beta,
                 hps.beam_size, hps.max_source_len, hps.max_target_len)
 
-        pred_toks, pred_scores = mod.apply(params, rng_key, inputs, *args)
+        pred_toks, pred_scores = mod.apply(params, inputs, *args)
         # print(pred_toks.shape)
         top_toks = pred_toks[:,0]
         # pdb.set_trace()

@@ -928,7 +928,7 @@ def make_model(hps, bos_id, eos_id, n_vocab, do_batch, do_train):
         def wrap_fn(*call_args):
             mod = Model(*args)
             return mod.beam_search(*call_args)
-        return hk.transform(wrap_fn)
+        return hk.without_apply_rng(hk.transform(wrap_fn))
 
 def make_score_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
