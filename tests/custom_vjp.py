@@ -17,6 +17,8 @@ def linear_bwd(res, g):
     xg = jnp.einsum('bj,ij -> bi', g, w)
     # note here that the weight gradient is not summed over batch yet
     wg = jnp.einsum('bj,bi -> bij', g, x)
+    # here is the Kaczmarz logic:  per-sample normalization of weights,
+    # then summing over batch as usual.
     return xg, (wg / norm[:,None,None]).sum(axis=0)
 
 linear.defvjp(linear_fwd, linear_bwd)
