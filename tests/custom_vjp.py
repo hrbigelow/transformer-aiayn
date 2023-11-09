@@ -8,13 +8,16 @@ def linear(x, w):
     return jnp.einsum('bi,ij -> bj', x, w)
 
 def linear_fwd(x, w):
+    # returns a tuple of 'forward_val', 'save-for-backward-tuple'
     return linear(x, w), (x, w, jnp.einsum('bi->b', x**2))
 
 def linear_bwd(res, g):
+    # res is the 'save-for-backward-tuple' produced by linear_fwd
     x, w, norm = res
     xg = jnp.einsum('bj,ij -> bi', g, w)
+    # note here that the weight gradient is not summed over batch yet
     wg = jnp.einsum('bj,bi -> bij', g, x)
-    return xg, wg / norm[:,None,None]
+    return xg, (wg / norm[:,None,None]).sum(axis=0)
 
 linear.defvjp(linear_fwd, linear_bwd)
 
@@ -26,9 +29,11 @@ def final(x, w):
     a = linear(x, w)
     return a.mean()
 
-final_grad = jax.grad(final)
+# compute a gradient function that returns the gradient w.r.t. argument 1
+final_grad = jax.grad(final, argnums=(1,))
 
-final_grad(x, w)
+wg, = final_grad(x, w)
+print(w.shape, wg.shape)
 
 
 
