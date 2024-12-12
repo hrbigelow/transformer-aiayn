@@ -1,5 +1,10 @@
 import functools
 from dataclasses import dataclass
+from flax import nnx
+from flax.typing import (
+        Dtype,
+        Initializer
+)
 import re
 import numpy as np
 from . import hparams
@@ -10,14 +15,21 @@ import pdb
 import jax
 import jax.numpy as jnp
 from jax import jit
-import haiku as hk
 
-class MultiHeadAttention(hk.Module):
+class MultiHeadAttention(nnx.Module):
     """
     Implements Multi-head attention from section 3.2.2
     """
-    def __init__(self, H, M, K, V, do_cache=False):
-        super().__init__(name='att')
+    def __init__(
+            self, 
+            H: int, 
+            M: int, 
+            K: int, 
+            V: int, 
+            do_cache: bool=False,
+            *,
+            param_dtype: Dtype = jnp.float32,
+            rngs: nnx.Rngs):
         self.H = H # number of heads
         self.M = M # d_model, or 'embedding dimension'
         self.K = K # number of components in the key
@@ -26,6 +38,13 @@ class MultiHeadAttention(hk.Module):
         self.mscale = np.sqrt(self.M) ** -1
         self.vscale = np.sqrt(self.V) ** -1
         self.kscale = np.sqrt(self.K) ** -1
+        kqv_init = initializers.normal(self.mscale)
+        o_init = initializers.normal(self.vscale)
+
+        self.wq = nnx.Param(kqv_init(rngs.params(), (H, M, K), param_dtype))
+        self.wk = nnx.Param(kqv_init(rngs.params(), (H, M, K), param_dtype))
+        self.wv = nnx.Param(kqv_init(rngs.params(), (H, M, V), param_dtype))
+        self.wo = nnx.Param(o_init(rngs.params(), (H, V, M), param_dtype))
 
     def __call__(self, qinput, kvinput, qtmask):
         """
@@ -42,18 +61,18 @@ class MultiHeadAttention(hk.Module):
         B,Q,_ = qinput.shape
         _,T,_ = kvinput.shape
 
-        kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
-        o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
-        dtype = kvinput.dtype
+        # kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
+        # o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
+        # dtype = kvinput.dtype
 
-        wq = hk.get_parameter('wq', [self.H,self.M,self.K], dtype, kqv_init)
-        wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
-        wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
-        wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
+        # wq = hk.get_parameter('wq', [self.H,self.M,self.K], dtype, kqv_init)
+        # wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
+        # wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
+        # wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
-        query = jnp.einsum('hmd,bqm->bhqd', wq, qinput)
-        key = jnp.einsum('hmd,btm->bhtd', wk, kvinput)
-        val = jnp.einsum('hmd,btm->bhtd', wv, kvinput)
+        query = jnp.einsum('hmd,bqm->bhqd', self.wq, qinput)
+        key = jnp.einsum('hmd,btm->bhtd', self.wk, kvinput)
+        val = jnp.einsum('hmd,btm->bhtd', self.wv, kvinput)
         
         alogit = jnp.einsum('bhqd,bhtd->bhqt', query, key)
         active = jnp.broadcast_to(jnp.logical_not(qtmask)[:,None,:,:], alogit.shape)
@@ -70,14 +89,14 @@ class MultiHeadAttention(hk.Module):
         kvinput: btm
         returns: bhstd, the kvcache for this layer
         """
-        kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
-        o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
-        dtype = kvinput.dtype
+        # kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
+        # o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
+        # dtype = kvinput.dtype
 
         assert self.K == self.V
-        wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
-        wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
-        wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
+        # wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
+        # wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
+        wkv = jnp.concatenate((self.wk[:,:,None,:], self.wv[:,:,None,:]), 2)
 
         return jnp.einsum('hmsd,btm->bhstd', wkv, kvinput)
 
@@ -99,19 +118,19 @@ class MultiHeadAttention(hk.Module):
         assert new_toks.ndim == 3, f'{new_toks.shape=}'
         new_toks = new_toks[:,0,:]
 
-        kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
-        o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
-        dtype = new_toks.dtype
+        # kqv_init = hk.initializers.RandomNormal(self.mscale, 0.0)
+        # o_init = hk.initializers.RandomNormal(self.vscale, 0.0)
+        # dtype = new_toks.dtype
 
-        wq = hk.get_parameter('wq', [self.H,self.M,self.K], dtype, kqv_init)
-        wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
-        wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
-        wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
+        # wq = hk.get_parameter('wq', [self.H,self.M,self.K], dtype, kqv_init)
+        # wk = hk.get_parameter('wk', [self.H,self.M,self.K], dtype, kqv_init)
+        # wv = hk.get_parameter('wv', [self.H,self.M,self.V], dtype, kqv_init)
+        # wo = hk.get_parameter('wo', [self.H,self.V,self.M], dtype, o_init)
 
-        query = jnp.einsum('hmd,bm->bhd', wq, new_toks)
+        query = jnp.einsum('hmd,bm->bhd', self.wq, new_toks)
 
         if self.do_cache:
-            wkv = jnp.concatenate((wk[:,:,None,:], wv[:,:,None,:]), 2)
+            wkv = jnp.concatenate((self.wk[:,:,None,:], self.wv[:,:,None,:]), 2)
             kv_next = jnp.einsum('hmsd,bm->bhsd', wkv, new_toks)
             kv_next_unsq = kv_next[None,:,:,:,None,:]
             kvcache = jax.lax.dynamic_update_slice(kvcache, kv_next_unsq, (layer,0,0,0,step,0))
@@ -139,7 +158,7 @@ class MultiHeadAttention(hk.Module):
 
         # att = jax.nn.softmax(attn_logit * self.kscale, axis=2)
         pre = jnp.einsum('bht,bhtd->bhd', att, kvcache[layer,:,:,1])
-        out = jnp.einsum('hdm,bhd->bm', wo, pre)
+        out = jnp.einsum('hdm,bhd->bm', self.wo, pre)
 
         coeff_summary = att.mean(axis=1) # mean over heads 
 
@@ -148,52 +167,58 @@ class MultiHeadAttention(hk.Module):
         else:
             return coeff_summary, out[:,None,:]
 
-class PositionwiseFF(hk.Module):
+class PositionwiseFF(nnx.Module):
     """
     Implements equation 2 (section 3.3)
     """
-    def __init__(self, M, F):
-        super().__init__(name='ff')
-        self.mscale = np.sqrt(M) ** -1
-        self.fscale = np.sqrt(F) ** -1
+    def __init__(
+            self, 
+            M: int, 
+            F: int, 
+            *, 
+            param_dtype: Dtype = jnp.float32, 
+            rngs: nnx.Rngs
+    ):
         self.M = M
         self.F = F
+        self.mscale = np.sqrt(M) ** -1
+        self.fscale = np.sqrt(F) ** -1
+        w1_init = initializers.normal(self.mscale)
+        w2_init = initializers.normal(self.fscale)
+        bias_init = initializers.zeros_init
+        self.w1 = nnx.Param(w1_init(rngs.params(), (M, F), param_dtype))
+        self.w2 = nnx.Param(w2_init(rngs.params(), (F, M), param_dtype))
+        self.b1 = nnx.Param(bias_init(rngs.params(), (F,), param_dtype))
+        self.b2 = nnx.Param(bias_init(rngs.params(), (M,), param_dtype))
 
     def __call__(self, input):
         """
         input: bqm
         returns: bqm
         """
-        dtype = input.dtype
-        w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
-        w2_init = hk.initializers.RandomNormal(self.fscale, 0.0)
-        w1 = hk.get_parameter('w1', [self.M,self.F], dtype, w1_init)
-        b1 = hk.get_parameter('b1', [self.F], dtype, jnp.zeros)
-        w2 = hk.get_parameter('w2', [self.F,self.M], dtype, w2_init)
-        b2 = hk.get_parameter('b2', [self.M], dtype, jnp.zeros)
-        s = jax.nn.relu(jnp.einsum('mf, bqm -> bqf', w1, input) + b1)
-        out = jnp.einsum('fm, bqf -> bqm', w2, s) + b2
+        # dtype = input.dtype
+        # w1_init = hk.initializers.RandomNormal(self.mscale, 0.0)
+        # w2_init = hk.initializers.RandomNormal(self.fscale, 0.0)
+        # w1 = hk.get_parameter('w1', [self.M,self.F], dtype, w1_init)
+        # b1 = hk.get_parameter('b1', [self.F], dtype, jnp.zeros)
+        # w2 = hk.get_parameter('w2', [self.F,self.M], dtype, w2_init)
+        # b2 = hk.get_parameter('b2', [self.M], dtype, jnp.zeros)
+        s = jax.nn.relu(jnp.einsum('mf, bqm -> bqf', self.w1, input) + self.b1)
+        out = jnp.einsum('fm, bqf -> bqm', self.w2, s) + self.b2
         # jax.debug.print('ff_out: {}', out)
         return out
 
-class EmbedMatrix(hk.Module):
-    def __init__(self, V, M):
-        super().__init__(name='embed_matrix')
-        self.V = V
-        self.M = M
+def make_embed_matrix(V: int, M: int, *, param_dtype: Dtype = jnp.float32, rngs: nnx.Rngs):
+        kernel_init = initializers.normal(M ** -0.5)
+        return nnx.Param(kernel_init(rngs.params(), (V, M), param_dtype))
 
-    def __call__(self):
-        scale = self.M ** -0.5
-        init = hk.initializers.RandomNormal(scale, 0.0)
-        return hk.get_parameter('emb', [self.V, self.M], np.float32, init) 
-
-class InputEmbedding(hk.Module):
-    def __init__(self, hps, embed_mat, matrix_scale_factor, is_train):
+class InputEmbedding(nnx.Module):
+    def __init__(self, hps, embed_mat, matrix_scale_factor, is_train, rngs: nnx.Rngs):
         super().__init__(name='emb')
         self.embed_mat = embed_mat
         self.mat_factor = matrix_scale_factor
         self.pos_factor = hps.pos_encoding_factor
-        self.dropout_rate = hps.dropout_rate
+        self.dropout = nnx.Dropout(self.dropout_rate, rngs=rngs)
         self.is_train = is_train
 
     def positional_embedding(self, tokids):
@@ -228,19 +253,21 @@ class InputEmbedding(hk.Module):
         # full_embed = scaled_embed + pos_embed
         full_embed = scaled_embed + pos_embed * self.pos_factor
         if self.is_train:
-            full_embed = hk.dropout(hk.next_rng_key(), self.dropout_rate, full_embed)
+            full_embed = self.dropout(full_embed)
+            # full_embed = hk.dropout(hk.next_rng_key(), self.dropout_rate, full_embed)
         return full_embed
 
-class EncoderLayer(hk.Module):
-    def __init__(self, hps, arch, is_train, layer_num):
-        super().__init__(name=f'layer{layer_num:02d}')
+class EncoderLayer(nnx.Module):
+    def __init__(self, hps, arch, is_train, layer_num, rngs: nnx.Rngs):
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
         self.layer_num = layer_num
         self.is_train = is_train
-        self.dropout_rate = hps.dropout_rate
+        self.dropout = nnx.Dropout(hps.dropout_rate, rngs=rngs)
         self.attention = MultiHeadAttention(H, M, K, V, do_cache=True)
-        self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
-        self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
+        self.norm1 = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
+        self.norm2 = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
+        # self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
+        # self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
         self.ff = PositionwiseFF(M, F)
 
     def __call__(self, input_embed, qtmask):
@@ -262,18 +289,20 @@ class EncoderLayer(hk.Module):
         norm1 = self.norm1(input_embed)
         att, att_coeff = self.attention(norm1, norm1, qtmask)
         if self.is_train:
-            att = hk.dropout(hk.next_rng_key(), self.dropout_rate, att)
+            att = self.dropout(att)
+            # att = hk.dropout(hk.next_rng_key(), self.dropout_rate, att)
         post_add1 = input_embed + att
         norm2 = self.norm2(post_add1)
 
         ff = self.ff(norm2)
         if self.is_train:
-            ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
+            ff = self.dropout(ff)
+            # ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add1 + ff 
         return out, att_coeff
 
-class Encoder(hk.Module):
-    def __init__(self, hps, arch, is_train, embed_mat):
+class Encoder(nnx.Module):
+    def __init__(self, hps, arch, is_train, embed_mat, rngs: nnx.Rngs):
         super().__init__(name='enc')
         self.is_train = is_train
         self.with_attn_entropy = hps.with_attn_entropy
@@ -342,18 +371,21 @@ class Encoder(hk.Module):
             out = mod(out, position_mask, qtmask)
         return out
 
-class DecoderLayer(hk.Module):
-    def __init__(self, hps, arch, is_train, layer_num):
+class DecoderLayer(nnx.Module):
+    def __init__(self, hps, arch, is_train, layer_num, rngs: nnx.Rngs):
         super().__init__(name=f'layer{layer_num:02d}')
         H, M, K, V, F = tuple(arch[l] for l in 'HMKVF') 
-        self.dropout_rate = hps.dropout_rate
+        self.dropout = nnx.Dropout(hps.dropout_rate, rngs=rngs)
         self.is_train = is_train
         self.self_attention = MultiHeadAttention(H, M, K, V, do_cache=True)
         self.cross_attention = MultiHeadAttention(H, M, K, V)
         self.ff = PositionwiseFF(M, F)
-        self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
-        self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
-        self.norm3 = hk.LayerNorm((2,), True, True, name='lnorm3')
+        self.norm1 = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
+        self.norm2 = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
+        self.norm3 = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
+        # self.norm1 = hk.LayerNorm((2,), True, True, name='lnorm1')
+        # self.norm2 = hk.LayerNorm((2,), True, True, name='lnorm2')
+        # self.norm3 = hk.LayerNorm((2,), True, True, name='lnorm3')
 
     def __call__(self, enc_out, input_emb, self_qtmask, cross_qtmask):
         """
@@ -367,18 +399,21 @@ class DecoderLayer(hk.Module):
         norm1 = self.norm1(input_emb) 
         self_att, _ = self.self_attention(norm1, norm1, self_qtmask)
         if self.is_train:
-            self_att = hk.dropout(hk.next_rng_key(), self.dropout_rate, self_att)
+            self_att = self.dropout(self_att)
+            # self_att = hk.dropout(hk.next_rng_key(), self.dropout_rate, self_att)
         post_add1 = input_emb + self_att
         norm2 = self.norm2(post_add1)
 
         cross_att, cross_att_coeff = self.cross_attention(norm2, enc_out, cross_qtmask)
         if self.is_train:
-            cross_att = hk.dropout(hk.next_rng_key(), self.dropout_rate, cross_att)
+            cross_att = self.dropout(cross_att)
+            # cross_att = hk.dropout(hk.next_rng_key(), self.dropout_rate, cross_att)
         post_add2 = post_add1 + cross_att
         norm3 = self.norm3(post_add2)
         ff = self.ff(norm3)
         if self.is_train:
-            ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
+            ff = self.dropout(ff)
+            # ff = hk.dropout(hk.next_rng_key(), self.dropout_rate, ff)
         out = post_add2 + ff
         return out, cross_att_coeff
 
@@ -429,9 +464,18 @@ class DecoderLayer(hk.Module):
         # out = self.norm3(norm2, ff)
         return dec_kvcache, coeff, out
 
-class Decoder(hk.Module):
-    def __init__(self, hps, arch, is_train, bos_id, eos_id, n_vocab, embed_mat=None):
-        super().__init__(name='dec')
+class Decoder(nnx.Module):
+    def __init__(
+            self, 
+            hps, 
+            arch, 
+            is_train, 
+            bos_id: int, 
+            eos_id: int, 
+            n_vocab: int, 
+            *,
+            embed_mat=None, 
+            rngs: nnx.Rngs):
         self.is_train = is_train
         self.L = arch['L']
         self.H = arch['H']
@@ -440,17 +484,20 @@ class Decoder(hk.Module):
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.n_vocab = n_vocab
-        self.xnorm = hk.LayerNorm((2,), True, True, name='lnormx')
+        self.xnorm = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
+        # self.xnorm = hk.LayerNorm((2,), True, True, name='lnormx')
+        self.rngs = rngs
 
         if embed_mat is None:
-            self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
+            self.embed_mat = make_embed_matrix(self.n_vocab, arch['M']) 
         else:
             self.embed_mat = embed_mat
 
         self.embed_layer = InputEmbedding(hps, self.embed_mat, jnp.sqrt(arch['M']), is_train) 
         self.layers = [DecoderLayer(hps, arch, is_train, i) for i in range(arch['L'])]
         self.mscale = np.sqrt(arch['M']) ** -1
-        self.norm = hk.LayerNorm((2,), True, True, name='lnorm')
+        # self.norm = hk.LayerNorm((2,), True, True, name='lnorm')
+        self.norm = nnx.LayerNorm(reduction_axes=(2,), use_scale=True, use_bias=True)
 
     def __call__(self, enc_out, pack):
         """
@@ -547,7 +594,8 @@ class Decoder(hk.Module):
                 dec_kvcache, next_embed = mod.incremental(layer, step, enc_mask, enc_kvcache,
                         dec_kvcache, next_embed) 
             logits = jnp.einsum('bcm,vm -> bcv', next_embed, self.embed_mat())
-            sample = jax.random.categorical(hk.next_rng_key(), logits, axis=2)
+            # sample = jax.random.categorical(hk.next_rng_key(), logits, axis=2)
+            sample = jax.random.categorical(self.rngs.sample(), logits, axis=2)
             tok_ids = jax.lax.dynamic_slice_in_dim(dec_tokids, step+1, 1, 1)
             next_embed = self.embed_layer(sample, tok_ids) 
             dec_pred = jax.lax.dynamic_update_slice(dec_pred, sample, (0,step+1))
@@ -696,18 +744,18 @@ class Decoder(hk.Module):
         return fin_seqs, fin_scores 
 
 
-class Model(hk.Module):
-    def __init__(self, hps, arch, is_train, bos_id, eos_id, n_vocab):
-        super().__init__(name='tx')
+class Model(nnx.Module):
+    def __init__(self, hps, arch, bos_id, eos_id, n_vocab, *, is_train=True):
         self.is_train = is_train
         self.L = arch['L']  
         self.H = arch['H']
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.n_vocab = n_vocab # includes bos_id and eos_id but not pad_id
-        self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
-        self.encoder = Encoder(hps, arch, is_train, self.embed_mat)
-        self.decoder = Decoder(hps, arch, is_train, bos_id, eos_id, n_vocab, self.embed_mat)
+        self.embed_mat = make_embed_matrix(self.n_vocab, arch['M'])
+        # self.embed_mat = EmbedMatrix(self.n_vocab, arch['M']) 
+        self.encoder = Encoder(hps, arch, is_train, self.embed_mat, rngs)
+        self.decoder = Decoder(hps, arch, is_train, bos_id, eos_id, n_vocab, self.embed_mat, rngs)
 
     def batch(self, pack):
         """
@@ -909,12 +957,14 @@ class Objective:
             return sum_xent
 
 
+"""
 def _wrap_haiku(mod_cls, *args):
     # This is convenient if you just want to call the '__call__' method of the module
     def wrapped_fn(*call_args):
         mod = mod_cls(*args)
         return mod(*call_args)
     return wrapped_fn
+"""
 
 def make_model(hps, bos_id, eos_id, n_vocab, do_batch, do_train):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
@@ -930,6 +980,7 @@ def make_model(hps, bos_id, eos_id, n_vocab, do_batch, do_train):
             return mod.beam_search(*call_args)
         return hk.without_apply_rng(hk.transform(wrap_fn))
 
+"""
 def make_score_model(hps, tok_map):
     arch = dict(zip('HMKVFL', (hps.H, hps.M, hps.K, hps.V, hps.F, hps.num_layers)))
     args = hps, arch, False, tok_map 
@@ -937,6 +988,7 @@ def make_score_model(hps, tok_map):
         mod = Model(*args)
         return mod.embed_to_score(*call_args)
     return hk.transform(wrap_fn, apply_rng=False)
+"""
 
 def make_grads(cls, inst_args, out_grad, call_args):
     """

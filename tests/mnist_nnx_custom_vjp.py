@@ -10,9 +10,9 @@ import typing as tp
 import functools
 from functools import partial
 import tensorflow as tf  # TensorFlow / `tf.data` operations.
-from aiayn.mod_optimizer import ModuleOptimizer
+# from aiayn.mod_optimizer import ModuleOptimizer
 
-def make_dataset(split='train', seed=0, batch_size=32, total_steps=10000):
+def mnist_dataset(split='train', seed=0, batch_size=32, total_steps=10000):
   ds: tf.data.Dataset = tfds.load('mnist', split=split)
   tf.random.set_seed(seed)  # Set the random seed for reproducibility.
   ds = ds.map(
@@ -128,14 +128,16 @@ class CNN(nnx.Module):
     return x
 
 
-def main(learning_rate=0.0005, 
+def main(seed=0,
+         learning_rate=0.0005, 
          momentum=0.9, 
          eval_every=100, 
-         train_steps=15000,
+         train_steps=20000,
          do_eval=False,
          do_imm_grad=True):
-  tx = optax.adamw(learning_rate, momentum)
-  model = CNN(tx, do_imm_grad, rngs=nnx.Rngs(0))
+  # tx = optax.adamw(learning_rate, momentum)
+  tx = optax.sgd(learning_rate)
+  model = CNN(tx, do_imm_grad, rngs=nnx.Rngs(seed))
   optimizer = nnx.Optimizer(model, tx)
 
   metrics = nnx.MultiMetric(

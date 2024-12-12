@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import flax
 import orbax.checkpoint as ocp
 import optax
-import haiku as hk
 import os
 import signal
 import queue
@@ -220,10 +219,6 @@ def setup_train(hps, rng_key):
     checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
     mngr = ocp.CheckpointManager(hps.ckpt_dir, checkpointer, options)
 
-    lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
-    tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2,
-            eps=hps.adam_eps)
-
     tokenizer = Tokenizer.from_str(tf.io.gfile.GFile(hps.tokenizer_file).read())
     n_vocab = tokenizer.get_vocab_size() + 2 # add BOS and EOS
     bos_id = tokenizer.token_to_id('[BOS]')
@@ -231,8 +226,15 @@ def setup_train(hps, rng_key):
     pad_id = tokenizer.token_to_id('[PAD]')
     print(f'{pad_id=}')
 
-    mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=True)
-    val_mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=False)
+    mod = model.Model(hps, arch, bos_id, eos_id, n_vocab, is_train=True)
+    val_mod = model.Model(hps, arch, bos_id, eos_id, n_vocab, is_train=False)
+
+    lr_fn = make_learning_rate_fn(hps.warmup_steps, hps.M)
+    tx = optax.adam(learning_rate=lr_fn, b1=hps.adam_beta1, b2=hps.adam_beta2, eps=hps.adam_eps)
+    optimizer = nnx.Optimizer(mod, tx)
+
+    # mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=True)
+    # val_mod = model.make_model(hps, bos_id, eos_id, n_vocab, do_batch=True, do_train=False)
     objective = model.Objective(hps, bos_id, n_vocab)
 
     update_fn = make_update_fn(mod, objective, repl_batch_size, hps.accum_steps,
@@ -287,10 +289,11 @@ def setup_train(hps, rng_key):
                 {'restore_args': restore_args})
         initial_step = hps.resume_ckpt
 
-    return mod, val_mod, objective, update_fn, val_data, train_ds, state, initial_step, mngr, lr_fn
+    return (mod, val_mod, objective, update_fn, val_data, train_ds, state, 
+            initial_step, mngr)
 
-def train_loop(hps, mod, val_mod, objective, update_fn, val_data, learn_rate_fn, train_ds, state, mngr,
-        initial_step, rng_key, logger):
+def train_loop(hps, mod, val_mod, objective, update_fn, val_data, 
+               train_ds, state, mngr, initial_step, rng_key, logger):
     num_replicas = jax.local_device_count()
     batch_repl_size = hps.batch_dim0 // num_replicas
     shape = [num_replicas, batch_repl_size, -1]
@@ -415,8 +418,8 @@ def main(hps_keys: str = 'arch,reg,train,data,logging', **hps_overrides):
     print(f'Prepared dataset from {hps.dataset_glob}')
 
     # move the save/restore logic here
-    mod, val_mod, objective, update_fn, val_data, train_ds, state, initial_step, mngr, lr_fn = setup_train(hps, rng_key)
-    train_loop(hps, mod, val_mod, objective, update_fn, val_data, lr_fn, train_ds, state, mngr,
+    mod, val_mod, objective, update_fn, val_data, train_ds, state, initial_step, mngr = setup_train(hps, rng_key)
+    train_loop(hps, mod, val_mod, objective, update_fn, val_data, train_ds, state, mngr,
             initial_step, rng_key, logger)
 
 if __name__ == '__main__':

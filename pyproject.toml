@@ -9,8 +9,8 @@ description = "Implementation of the Transformer from the paper 'Attention is Al
 authors = [{name="Henry Bigelow", email="hrbigelow@gmail.com"}]
 dependencies = [
   # "transformers",
-  "tokenizers",
-  "datasets",
+  # "tokenizers",
+  # "datasets",
   "flax",
   "jax",
   "optax",
@@ -18,11 +18,11 @@ dependencies = [
   # "orbax-checkpoint==0.1.1",
   "tensorflow",
   "tensorflow-datasets>=4.9.2",
-  "dm-haiku @ git+https://github.com/deepmind/dm-haiku.git@v0.0.10",
+  # "dm-haiku @ git+https://github.com/deepmind/dm-haiku.git@v0.0.10",
   "fire",
   "numpy",
-  "psutil",
-  "streamvis @ git+https://github.com/hrbigelow/streamvis.git"
+  # "psutil",
+  # "streamvis @ git+https://github.com/hrbigelow/streamvis.git"
 ]
 
 [tool.setuptools]
